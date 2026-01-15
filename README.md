@@ -1,15 +1,5 @@
 # Zettlecast: Privacy-First AI Knowledge Middleware
 
-## Executive Summary
-
-**Strategic Overview**  
-Zettlecast is a **Local-First Knowledge Middleware** designed to facilitate secure, offline-capable **Retrieval-Augmented Generation (RAG)** pipelines. It functions as a sovereign data plane that orchestrates multi-modal ingestion (PDF, Audio, Web) into an immutable identity system, leveraging **vector-based semantic search** and cross-encoder reranking to build a high-fidelity, privacy-preserving knowledge graph without relying on external cloud providers.
-
-**Role Alignment & Competency**  
-Architected to demonstrate **Privacy-by-design principles** in Generative AI, this system ensures zero-trust data handling by isolating sensitive intellectual property within a local runtime environment. It showcases **Agentic AI orchestration** via a background "Gardener" service that performs **contextual reasoning** to autonomously discover latent connections between disparate data points. The architecture includes **automated risk assessment workflows** through a feedback-driven "rejected edges" mechanism, effectively validating semantic integrity and establishing a scalable framework for trusted AI interactions.
-
----
-
 ## Project Overview
 
 Zettlecast is a comprehensive "Digital Zettelkasten" solution that serves as a bridge between raw unstructured data and structured knowledge. It provides a robust backend for ingesting documents, transcribing audio, and clipping web content, all while maintaining a permanent, immutable identity for every piece of information.
