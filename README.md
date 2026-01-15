@@ -1,131 +1,138 @@
-# Zettlecast
+# Zettlecast: Privacy-First AI Knowledge Middleware
 
-**Digital Zettelkasten Middleware** - A local-first AI knowledge system with semantic search, automatic link suggestions, and immutable identity.
+## Executive Summary
+
+**Strategic Overview**  
+Zettlecast is a **Local-First Knowledge Middleware** designed to facilitate secure, offline-capable **Retrieval-Augmented Generation (RAG)** pipelines. It functions as a sovereign data plane that orchestrates multi-modal ingestion (PDF, Audio, Web) into an immutable identity system, leveraging **vector-based semantic search** and cross-encoder reranking to build a high-fidelity, privacy-preserving knowledge graph without relying on external cloud providers.
+
+**Role Alignment & Competency**  
+Architected to demonstrate **Privacy-by-design principles** in Generative AI, this system ensures zero-trust data handling by isolating sensitive intellectual property within a local runtime environment. It showcases **Agentic AI orchestration** via a background "Gardener" service that performs **contextual reasoning** to autonomously discover latent connections between disparate data points. The architecture includes **automated risk assessment workflows** through a feedback-driven "rejected edges" mechanism, effectively validating semantic integrity and establishing a scalable framework for trusted AI interactions.
+
+---
+
+## Project Overview
+
+Zettlecast is a comprehensive "Digital Zettelkasten" solution that serves as a bridge between raw unstructured data and structured knowledge. It provides a robust backend for ingesting documents, transcribing audio, and clipping web content, all while maintaining a permanent, immutable identity for every piece of information.
+
+### Key Features
+
+- **🛡️ Privacy-First Architecture**: Zero data exfiltration. All embeddings, inference, and storage occur locally on the device.
+- **📄 Tiered Ingestion Pipeline**: Intelligent parsing strategy that balances speed and accuracy (e.g., pypdf → Marker OCR for complex PDFs).
+- **🧠 Advanced Semantic Search**: Utilizes `embeddinggemma-300m` for retrieval and `bge-reranker-v2-m3` for high-precision cross-encoding.
+- **🤖 Agentic "Gardener" System**: A background process that proactively suggests semantic links between notes, simulating an automated research assistant.
+- **🆔 Immutable Identity**: Universally Unique Identifier (UUID) enforcement for all artifacts, ensuring resilient reference integrity across file movements or renames.
+
+## Technical Architecture
+
+### Core Components
+
+```mermaid
+graph TD
+    A[Ingestion Layer] -->|PDF/Web/Audio| B(Parser Service)
+    B -->|Text Chunks| C{Identity System}
+    C -->|UUID & Frontmatter| D[Markdown Storage]
+    D -->|New Content| E[Vector Pipeline]
+    E -->|Embeddings| F[(LanceDB)]
+    G[Agentic Gardener] -->|Query| F
+    G -->|Contextual Reasoning| D
+    H[API / UI] -->|Search & Interact| F
+```
+
+### Data Pipeline & Security
+
+1.  **Ingestion & Parsing**:
+    - **PDF**: Implements a fail-over strategy, attempting standard extraction first and escalating to OCR/VLMs (Visual Language Models) only when text density is low.
+    - **Audio**: Uses `faster-whisper` for local, privacy-preserving transcription.
+    - **Web**: `Trafilatura` based extraction for clean, content-focused web clipping.
+
+2.  **Vector Search & RAG**:
+    - **Embedding**: 1024-dimensional vectors via `EmbeddingGemma`.
+    - **Storage**: `LanceDB` for high-performance, serverless vector storage.
+    - **Reranking**: Semantic candidates are re-scored using a Cross-Encoder to maximize relevance before presentation.
+
+3.  **Trust & Verification**:
+    - **Rejected Edges**: The system learns from user feedback. If a suggested link is rejected, it is recorded in a "negative constraints" table to prevent future hallucinations of that specific connection.
 
 ## Quick Start
 
-### macOS / Linux
+### Prerequisites
+- Python 3.10+
+- `ffmpeg` (for audio processing)
 
+### Installation
+
+**macOS / Linux**
 ```bash
-# Clone the repo
 git clone https://github.com/XonDesk/Zettlecast.git
 cd Zettlecast
-
-# Run setup (installs Python deps + Ollama)
-chmod +x setup.sh
 ./setup.sh
-
-# Start the server
-./run.sh
 ```
 
-### Windows
-
+**Windows**
 ```powershell
-# Clone the repo
 git clone https://github.com/XonDesk/Zettlecast.git
 cd Zettlecast
-
-# Run setup in PowerShell
 .\setup.ps1
+```
 
-# Start the server
+### Running the System
+
+Start the API server, UI, and background services:
+
+```bash
+# macOS/Linux
+./run.sh
+
+# Windows
 .\.venv\Scripts\Activate.ps1
 zettlecast serve
 ```
 
-### All Platforms
+Access the interfaces:
+- **Dashboard (Streamlit)**: `http://localhost:8501`
+- **REST API (FastAPI)**: `http://localhost:8000/docs`
 
-Then open:
-- **UI**: http://localhost:8501
-- **API**: http://localhost:8000/docs
+## Usage & Workflows
 
-## Features
-
-- 📄 **PDF Ingestion** - Tiered parsing (pypdf → Marker → Docling)
-- 🌐 **Web Clipping** - Ingest any URL via bookmarklet
-- 🎙️ **Audio Transcription** - Faster-Whisper with timestamps
-- 🔍 **Semantic Search** - EmbeddingGemma-300M + BGE reranker
-- 🔗 **Link Suggestions** - AI-powered "Gardener" finds related notes
-- 📊 **Graph View** - Visualize connections with Cytoscape.js
-
-## CLI Commands
+### CLI Operations
+The system includes a robust CLI for headless operation and automation:
 
 ```bash
-# Start server
-zettlecast serve
+# Ingest a directory of research papers
+zettlecast ingest ./papers/
 
-# Ingest files
-zettlecast ingest /path/to/files
+# Quick-add a security whitepaper URL
+zettlecast add https://example.com/security-architecture
 
-# Quick-add URL
-zettlecast add https://example.com/article
-
-# Search
-zettlecast search "machine learning"
-
-# Get your bookmarklet
-zettlecast token
-
-# View stats
-zettlecast stats
+# Semantic search for specific concepts
+zettlecast search "automated threat modeling"
 ```
+
+### API Integration
+All endpoints are secured via a bearer token generated at install time.
+
+- `POST /ingest`: Upload documents or URLs for processing.
+- `GET /search`: RAG-ready semantic search endpoint.
+- `GET /notes/{uuid}`: Retrieve content with AI-suggested context.
 
 ## Configuration
 
-Copy `.env.example` to `.env` and customize:
+Configuration is managed via `.env` to support various deployment environments (Dev, Test, Prod).
 
 ```env
-# Storage
+# Infrastructure
 STORAGE_PATH=~/_BRAIN_STORAGE
+LANCEDB_PATH=~/_BRAIN_STORAGE/.lancedb
 
-# Models
+# AI Models (Local)
 EMBEDDING_MODEL=google/embeddinggemma-300m
+RERANKER_MODEL=BAAI/bge-reranker-v2-m3
 WHISPER_MODEL=medium
 
-# LLM (for context enrichment)
-LLM_PROVIDER=ollama
-OLLAMA_MODEL=llama3.2:3b
-```
-
-## API Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/ingest?url=...` | Ingest URL |
-| POST | `/ingest` (file) | Upload file |
-| GET | `/notes` | List all notes |
-| GET | `/notes/{uuid}` | Get note with suggestions |
-| GET | `/search?q=...` | Semantic search |
-| POST | `/notes/{uuid}/link` | Accept/reject link |
-
-All endpoints require `?token=YOUR_API_TOKEN`.
-
-## Bookmarklet
-
-Run `zettlecast token` to get your bookmarklet, then:
-1. Create a new bookmark
-2. Set the URL to the JavaScript code
-3. Click it on any page to save to Zettlecast
-
-## Architecture
-
-```
-Zettlecast/
-├── src/zettlecast/
-│   ├── main.py      # FastAPI endpoints
-│   ├── config.py    # Settings
-│   ├── db.py        # LanceDB operations
-│   ├── parser.py    # PDF/Web/Audio parsing
-│   ├── chunker.py   # Text splitting
-│   ├── search.py    # Vector search + reranking
-│   ├── identity.py  # UUID management
-│   └── cli.py       # CLI commands
-└── ~/_BRAIN_STORAGE/
-    ├── *.md         # Your notes
-    └── .lancedb/    # Vector database
+# Privacy Controls
+ENABLE_CONTEXT_ENRICHMENT=false # Off by default to prevent LLM latency
 ```
 
 ## License
 
-MIT
+MIT License. Designed for open innovation and strictly local usage.
