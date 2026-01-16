@@ -40,22 +40,104 @@ if [ "$OS" = "Darwin" ]; then
     fi
 fi
 
+# --- Check Python Version ---
+echo ""
+echo "📦 Checking Python version..."
+
+PYTHON_CMD=""
+
+# Try python3.11 first (preferred for NeMo compatibility)
+if command -v python3.11 &> /dev/null; then
+    PYTHON_CMD="python3.11"
+    echo "✅ Found Python 3.11"
+elif command -v python3.12 &> /dev/null; then
+    PYTHON_CMD="python3.12"
+    echo "✅ Found Python 3.12"
+elif command -v python3 &> /dev/null; then
+    PY_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+    if [[ "$PY_VERSION" == "3.11" ]] || [[ "$PY_VERSION" == "3.12" ]]; then
+        PYTHON_CMD="python3"
+        echo "✅ Found Python $PY_VERSION"
+    else
+        echo "⚠️  Found Python $PY_VERSION, but 3.11 or 3.12 is recommended."
+        echo "   Python 3.13+ is NOT supported due to NeMo/ML library compatibility."
+        echo ""
+        read -p "Continue anyway? (y/N) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo "Please install Python 3.11:"
+            echo "  macOS: brew install python@3.11"
+            echo "  Linux: sudo apt install python3.11 python3.11-venv"
+            exit 1
+        fi
+        PYTHON_CMD="python3"
+    fi
+else
+    echo "❌ Python 3 not found!"
+    echo "Please install Python 3.11:"
+    echo "  macOS: brew install python@3.11"
+    echo "  Linux: sudo apt install python3.11 python3.11-venv"
+    exit 1
+fi
+
 # --- Python Environment ---
 echo ""
 echo "📦 Setting up Python environment..."
 
 if [ ! -d ".venv" ]; then
-    python3 -m venv .venv
-    echo "Created virtual environment"
+    $PYTHON_CMD -m venv .venv
+    echo "Created virtual environment with $PYTHON_CMD"
 fi
 
 source .venv/bin/activate
-pip install --upgrade pip
+pip install --upgrade pip --quiet
 
 # --- Install Zettlecast ---
 echo ""
-echo "📦 Installing Zettlecast dependencies..."
-pip install -e ".[dev]"
+echo "📦 Installing Zettlecast base dependencies..."
+echo "(This may take a few minutes...)"
+
+if ! pip install -e ".[dev]"; then
+    echo "❌ Failed to install base dependencies!"
+    echo ""
+    echo "Common issues:"
+    echo "  - PyTorch: May need manual installation from https://pytorch.org"
+    echo "  - Build tools: May need to install Xcode Command Line Tools (macOS)"
+    exit 1
+fi
+
+echo "✅ Base dependencies installed"
+
+# --- Optional: Install Podcast/NeMo dependencies ---
+echo ""
+echo "🎙️  Do you want to install podcast transcription support (NVIDIA NeMo)?"
+echo "   This includes: parakeet-tdt-0.6b-v2 (transcription) + MSDD (diarization)"
+echo "   Requires ~5GB disk space and CUDA GPU recommended."
+read -p "Install podcast support? (y/N) " -n 1 -r
+echo
+
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    echo ""
+    echo "📦 Installing NeMo toolkit and podcast dependencies..."
+    echo "(This may take 5-10 minutes...)"
+    
+    if pip install -e ".[podcast]"; then
+        echo "✅ Podcast/NeMo dependencies installed"
+        
+        # Apply OS-specific NeMo patch if script exists
+        if [ -f "scripts/patch_nemo_${OS}.py" ]; then
+            echo ""
+            echo "🔧 Applying $OS compatibility patch for NeMo..."
+            python scripts/patch_nemo_${OS}.py
+        fi
+        
+        echo ""
+        echo "   Enable in .env: USE_NEMO=true"
+    else
+        echo "⚠️  Failed to install podcast dependencies."
+        echo "   You can try again later with: pip install -e '.[podcast]'"
+    fi
+fi
 
 # --- Install Ollama ---
 echo ""

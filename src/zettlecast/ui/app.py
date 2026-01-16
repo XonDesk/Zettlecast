@@ -64,7 +64,7 @@ with st.sidebar:
     
     page = st.radio(
         "Navigation",
-        ["📚 Notes", "🔍 Search", "📊 Graph", "⚙️ Settings"],
+        ["📚 Notes", "🎙️ Podcasts", "🔍 Search", "📊 Graph", "⚙️ Settings"],
         label_visibility="collapsed",
     )
     
@@ -127,6 +127,90 @@ if page == "📚 Notes":
                 if st.button("View Details", key=f"view_{note['uuid']}"):
                     st.session_state.selected_note = note['uuid']
                     st.rerun()
+
+
+elif page == "🎙️ Podcasts":
+    st.header("🎙️ Podcast Manager")
+    
+    # Import
+    with st.expander("📥 Import Podcast", expanded=True):
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            feed_url = st.text_input("RSS Feed URL", placeholder="https://feeds.simplecast.com/...")
+        with col2:
+            import_limit = st.number_input("Limit", 1, 50, 5)
+            
+        if st.button("Fetch Episodes"):
+            if feed_url:
+                try:
+                    from zettlecast.podcast.queue import TranscriptionQueue
+                    queue = TranscriptionQueue()
+                    
+                    with st.spinner("Fetching feed..."):
+                        job_ids = queue.add_from_feed(feed_url, limit=import_limit)
+                        
+                    if job_ids:
+                        st.success(f"Added {len(job_ids)} episodes to queue!")
+                    else:
+                        st.info("No new episodes added (duplicates or empty feed)")
+                except Exception as e:
+                    st.error(f"Failed to import: {e}")
+            else:
+                st.warning("Please enter a feed URL")
+
+    st.divider()
+    
+    # Queue Status
+    try:
+        from zettlecast.podcast.queue import TranscriptionQueue
+        queue = TranscriptionQueue()
+        status = queue.get_status_summary()
+        
+        st.subheader("Queue Status")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Pending", status['by_status']['pending'])
+        col2.metric("Processing", status['by_status']['processing'])
+        col3.metric("Completed", status['by_status']['completed'])
+        col4.metric("Review Needed", status['by_status']['review'])
+        
+        if status['by_status']['pending'] > 0:
+            st.info(f"⏱️ Estimated time remaining: {status['estimated_remaining']}")
+            
+            if st.button("▶️ Process Queue (Run in Background)"):
+                # This is a bit hacky for Streamlit - ideally would trigger an async job
+                # For now we'll just show a message that CLI is better for long jobs
+                st.warning("Please run 'zettlecast podcast run' in your terminal for robust processing.")
+        
+        st.subheader("Episodes")
+        
+        # Sort items: processing first, then pending, then failed, then completed
+        # But for UI, let's just show recent additions
+        items = list(queue.items.values())
+        items.sort(key=lambda x: x.added_at, reverse=True)
+        
+        for item in items[:20]:  # Show last 20
+            with st.container():
+                cols = st.columns([4, 1, 2])
+                cols[0].markdown(f"**{item.episode.episode_title}**")
+                cols[0].caption(item.episode.podcast_name)
+                
+                # Status badge
+                color = {
+                    "pending": "blue",
+                    "processing": "orange",
+                    "completed": "green",
+                    "failed": "red",
+                    "review": "red",
+                }.get(item.status, "grey")
+                cols[1].markdown(f":{color}[{item.status.upper()}]")
+                
+                cols[2].caption(str(item.added_at).split(".")[0])
+                st.divider()
+                
+    except ImportError:
+        st.error("Podcast module dependencies not installed.")
+    except Exception as e:
+        st.error(f"Error loading queue: {e}")
 
 
 elif page == "🔍 Search":

@@ -192,9 +192,200 @@ def stats():
         click.echo(f"Error: {e}")
 
 
+# =============================================================================
+# Podcast Transcription Commands
+# =============================================================================
+
+@cli.group()
+def podcast():
+    """Podcast transcription pipeline commands."""
+    pass
+
+
+@podcast.command("add")
+@click.argument("path", type=click.Path(exists=True))
+@click.option("--name", "-n", help="Podcast/show name")
+@click.option("--recursive/--no-recursive", default=True, help="Scan subdirectories")
+def podcast_add(path: str, name: str, recursive: bool):
+    """Add audio files to transcription queue."""
+    from .podcast.queue import TranscriptionQueue, DuplicateEpisodeError
+    
+    path = Path(path)
+    queue = TranscriptionQueue()
+    
+    if path.is_file():
+        try:
+            job_id = queue.add(path, podcast_name=name)
+            click.echo(f"✅ Added: {path.name} (ID: {job_id[:8]})")
+        except DuplicateEpisodeError:
+            click.echo(f"⏭️  Skipped (already processed): {path.name}")
+    else:
+        job_ids = queue.add_directory(path, podcast_name=name, recursive=recursive)
+        click.echo(f"✅ Added {len(job_ids)} episodes to queue")
+    
+    # Show queue status
+    status = queue.get_status_summary()
+    click.echo(f"\n📋 Queue: {status['by_status']['pending']} pending, ETA: {status['estimated_remaining']}")
+
+
+@podcast.command("import")
+@click.argument("url")
+@click.option("--limit", "-l", default=5, help="Max episodes to download")
+def podcast_import(url: str, limit: int):
+    """Import episodes from RSS feed URL."""
+    from .podcast.queue import TranscriptionQueue
+    
+    click.echo(f"📡 Fetching feed: {url}...")
+    queue = TranscriptionQueue()
+    
+    try:
+        job_ids = queue.add_from_feed(url, limit=limit)
+        
+        if job_ids:
+            click.echo(f"✅ Added {len(job_ids)} episodes to queue")
+            
+            # Show queue status
+            status = queue.get_status_summary()
+            click.echo(f"\n📋 Queue: {status['by_status']['pending']} pending, ETA: {status['estimated_remaining']}")
+            click.echo("Run 'zettlecast podcast run' to process them")
+        else:
+            click.echo("⚠️  No new episodes added (duplicates or empty feed)")
+            
+    except Exception as e:
+        click.echo(f"❌ Failed to import feed: {e}")
+
+
+@podcast.command("run")
+@click.option("--limit", "-l", type=int, help="Max episodes to process")
+@click.option("--no-enhance", is_flag=True, help="Skip LLM enhancement")
+@click.option("--use-nemo", is_flag=True, help="Use NeMo pipeline (overrides USE_NEMO setting)")
+def podcast_run(limit: int, no_enhance: bool, use_nemo: bool):
+    """Process pending episodes in queue.
+    
+    Uses faster-whisper by default, or NeMo if USE_NEMO=true or --use-nemo flag is set.
+    NeMo provides better speaker diarization and word-level timestamps.
+    """
+    from .podcast.queue import TranscriptionQueue
+    from .podcast.enhancer import TranscriptEnhancer
+    from .podcast.formatter import save_result
+    from .config import settings
+    
+    queue = TranscriptionQueue()
+    pending = queue.get_pending_count()
+    
+    if pending == 0:
+        click.echo("✅ No pending episodes in queue")
+        return
+    
+    # Determine which transcriber to use
+    use_nemo_pipeline = use_nemo or settings.use_nemo
+    
+    if use_nemo_pipeline:
+        from .podcast.nemo_transcriber import NeMoTranscriber
+        transcriber = NeMoTranscriber(
+            device=settings.whisper_device,
+            chunk_duration_minutes=settings.nemo_chunk_duration_minutes,
+            enable_diarization=True,
+        )
+        click.echo("🧠 Using NeMo transcription pipeline (Parakeet + MSDD)")
+    else:
+        from .podcast.transcriber import PodcastTranscriber
+        transcriber = PodcastTranscriber(hf_token=settings.hf_token)
+        click.echo("🎤 Using Whisper transcription pipeline")
+    
+    click.echo(f"🎙️ Processing {min(limit, pending) if limit else pending} episodes...")
+    click.echo(f"   ETA: {queue.estimate_time_remaining()}\n")
+    
+    # Initialize enhancer
+    enhancer = TranscriptEnhancer() if not no_enhance else None
+    
+    processed = 0
+    while True:
+        if limit and processed >= limit:
+            break
+        
+        item = queue.get_next_pending()
+        if not item:
+            break
+        
+        episode = item.episode
+        click.echo(f"[{processed+1}] {episode.episode_title}...", nl=False)
+        
+        queue.mark_started(episode.id)
+        
+        try:
+            # Transcribe
+            result = transcriber.transcribe(
+                Path(episode.audio_path),
+                episode=episode,
+            )
+            
+            # Enhance (optional)
+            enhanced = None
+            if enhancer:
+                enhanced = enhancer.enhance(result.full_text)
+                result.keywords = enhanced.get("keywords", [])
+                result.sections = enhanced.get("sections", [])
+            
+            # Save
+            output_path = save_result(result, episode, enhanced)
+            queue.mark_completed(episode.id, result, output_path)
+            
+            click.echo(f" ✅ ({result.processing_time_seconds:.0f}s)")
+            processed += 1
+            
+        except Exception as e:
+            queue.mark_failed(episode.id, str(e), max_retries=settings.podcast_max_retries)
+            click.echo(f" ❌ {str(e)[:50]}")
+    
+    click.echo(f"\n✅ Processed {processed} episodes")
+    
+    # Show remaining
+    status = queue.get_status_summary()
+    if status["by_status"]["pending"] > 0:
+        click.echo(f"📋 Remaining: {status['by_status']['pending']} pending")
+    if status["by_status"]["review"] > 0:
+        click.echo(f"⚠️  {status['by_status']['review']} episodes need review (use: zettlecast podcast retry)")
+
+
+@podcast.command("status")
+def podcast_status():
+    """Show queue status and time estimate."""
+    from .podcast.queue import TranscriptionQueue
+    
+    queue = TranscriptionQueue()
+    status = queue.get_status_summary()
+    
+    click.echo("📊 Podcast Queue Status")
+    click.echo("=" * 40)
+    click.echo(f"Total items: {status['total']}")
+    click.echo(f"  Pending:    {status['by_status']['pending']}")
+    click.echo(f"  Processing: {status['by_status']['processing']}")
+    click.echo(f"  Completed:  {status['by_status']['completed']}")
+    click.echo(f"  Review:     {status['by_status']['review']}")
+    click.echo(f"\nEstimated time remaining: {status['estimated_remaining']}")
+    click.echo(f"Avg processing time: {status['avg_processing_time']}")
+
+
+@podcast.command("retry")
+def podcast_retry():
+    """Retry failed episodes marked for review."""
+    from .podcast.queue import TranscriptionQueue
+    
+    queue = TranscriptionQueue()
+    count = queue.retry_failed()
+    
+    if count > 0:
+        click.echo(f"✅ Reset {count} failed episodes for retry")
+        click.echo("Run 'zettlecast podcast run' to process them")
+    else:
+        click.echo("No failed episodes to retry")
+
+
 def main():
     cli()
 
 
 if __name__ == "__main__":
     main()
+

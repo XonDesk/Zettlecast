@@ -38,8 +38,16 @@ class Settings(BaseSettings):
     return_top_k: int = 5  # Final results to return
 
     # --- Audio Transcription ---
-    whisper_model: Literal["tiny", "small", "medium", "large"] = "medium"
-    whisper_device: str = "auto"  # "auto", "cpu", "cuda"
+    whisper_model: str = "large-v3-turbo"  # Fastest 2026 options: large-v3-turbo, distil-large-v3
+    whisper_device: str = "cuda"  # cuda for GPU acceleration, cpu for CPU-only
+    hf_token: str = ""  # HuggingFace token for pyannote diarization
+    podcast_max_retries: int = 3
+
+    # --- NeMo Transcription (New Pipeline) ---
+    use_nemo: bool = False  # Use NeMo pipeline instead of Whisper
+    nemo_chunk_duration_minutes: int = 10  # Macro-chunk size for stable memory
+    nemo_parakeet_model: str = "nvidia/parakeet-tdt-0.6b-v2"  # Fast transcription
+    nemo_diarization_model: str = "diar_msdd_telephonic"  # MSDD speaker diarization
 
     # --- LLM Provider ---
     llm_provider: Literal["ollama", "openai", "anthropic"] = "ollama"
