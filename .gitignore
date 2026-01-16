@@ -41,6 +41,9 @@ Thumbs.db
 
 # Storage (user data)
 _BRAIN_STORAGE/
+test_models/
+models/
+brain/
 
 # LanceDB
 *.lance
