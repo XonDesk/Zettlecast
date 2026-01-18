@@ -1,0 +1,46 @@
+services:
+  nemo-asr:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.nemo
+    image: zettlecast/nemo-asr:latest
+    container_name: zettlecast-nemo
+
+    # NVIDIA GPU support
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # Volume mounts for audio I/O
+    volumes:
+      - ../data/input:/data/input:ro
+      - ../data/output:/data/output
+      - ../data/requests:/data/requests
+      - nemo-cache:/app/.cache/nemo
+
+    # Environment
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTHONUNBUFFERED=1
+
+    # Restart policy
+    restart: unless-stopped
+
+    # Resource limits
+    shm_size: "8gb" # Required for PyTorch DataLoader
+
+    # Logging
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  nemo-cache:
+    driver: local

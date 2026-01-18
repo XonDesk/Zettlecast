@@ -135,14 +135,19 @@ def download_episode(
         
     logger.info(f"Downloading: {episode.title}")
     
+    # Use a proper User-Agent to avoid 403 errors from podcast hosts
+    headers = {
+        "User-Agent": "Zettlecast/1.0 (Podcast Transcription Tool; +https://github.com/zettlecast)"
+    }
+    
     try:
         if client:
-            response = client.get(episode.audio_url, follow_redirects=True)
+            response = client.get(episode.audio_url, follow_redirects=True, headers=headers)
             response.raise_for_status()
             content = response.content
         else:
-            with httpx.Client(timeout=30.0) as c:
-                response = c.get(episode.audio_url, follow_redirects=True)
+            with httpx.Client(timeout=120.0) as c:
+                response = c.get(episode.audio_url, follow_redirects=True, headers=headers)
                 response.raise_for_status()
                 content = response.content
                 

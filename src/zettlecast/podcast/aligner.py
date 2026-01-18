@@ -211,3 +211,59 @@ def align_transcription_with_diarization(
 
     logger.info("Alignment complete")
     return transcript_segments
+
+
+def parse_pyannote_annotation(annotation) -> List[SpeakerSegment]:
+    """
+    Convert pyannote.core.Annotation to SpeakerSegment list.
+
+    This is an adapter for Mac transcriber which uses pyannote.audio
+    for diarization instead of NeMo MSDD.
+
+    Args:
+        annotation: pyannote.core.Annotation object
+
+    Returns:
+        List of SpeakerSegment objects sorted by start time
+    """
+    segments = []
+
+    for turn, _, speaker in annotation.itertracks(yield_label=True):
+        segments.append(SpeakerSegment(
+            speaker=speaker,
+            start=turn.start,
+            end=turn.end,
+        ))
+
+    segments.sort(key=lambda s: s.start)
+    logger.info(f"Parsed {len(segments)} speaker segments from pyannote annotation")
+    return segments
+
+
+def align_with_pyannote(
+    words: List[Word], annotation
+) -> List[TranscriptSegment]:
+    """
+    Alignment pipeline using pyannote annotation instead of RTTM.
+
+    Args:
+        words: List of words with timestamps from transcription
+        annotation: pyannote.core.Annotation object from diarization
+
+    Returns:
+        List of TranscriptSegment objects with speaker labels
+    """
+    logger.info(f"Starting pyannote alignment for {len(words)} words")
+
+    # Step 1: Parse pyannote annotation
+    speaker_segments = parse_pyannote_annotation(annotation)
+
+    # Step 2: Assign speakers to words
+    words_with_speakers = assign_speakers_to_words(words, speaker_segments)
+
+    # Step 3: Group consecutive words by speaker
+    transcript_segments = group_words_by_speaker(words_with_speakers)
+
+    logger.info("Pyannote alignment complete")
+    return transcript_segments
+

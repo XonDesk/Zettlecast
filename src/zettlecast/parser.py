@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 import httpx
 
 from .config import settings
+from .enricher import enrich_note
 from .identity import compute_content_hash, generate_uuid
 from .models import NoteMetadata, NoteModel, ProcessingResult
 
@@ -116,6 +117,7 @@ def parse_pdf(file_path: Path) -> ProcessingResult:
             status="success",
             uuid=uuid,
             title=title,
+            note=note,
         )
     
     except Exception as e:
@@ -132,13 +134,47 @@ def parse_pdf(file_path: Path) -> ProcessingResult:
 def parse_url(url: str) -> ProcessingResult:
     """
     Extract main content from a URL using trafilatura.
+    Enhanced to extract richer metadata and embedded media.
     """
     try:
+        import re
         import trafilatura
+        from bs4 import BeautifulSoup
         
-        # Download page
+        # Browser-like headers to bypass bot detection
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "DNT": "1",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Cache-Control": "max-age=0",
+        }
+        
+        # Download page with custom headers
         logger.info(f"Fetching URL: {url}")
-        downloaded = trafilatura.fetch_url(url)
+        try:
+            response = httpx.get(url, headers=headers, follow_redirects=True, timeout=30)
+            response.raise_for_status()
+            downloaded = response.text
+        except httpx.HTTPStatusError as e:
+            return ProcessingResult(
+                status="failed",
+                error_type="network",
+                error_message=f"HTTP {e.response.status_code}: {e.response.reason_phrase}",
+            )
+        except httpx.RequestError as e:
+            return ProcessingResult(
+                status="failed",
+                error_type="network",
+                error_message=f"Request failed: {str(e)}",
+            )
         
         if not downloaded:
             return ProcessingResult(
@@ -147,11 +183,12 @@ def parse_url(url: str) -> ProcessingResult:
                 error_message="Failed to download URL",
             )
         
-        # Extract main content
+        # Extract main content with links preserved
         text = trafilatura.extract(
             downloaded,
             include_comments=False,
             include_tables=True,
+            include_links=True,  # Preserve hyperlinks in markdown
             output_format="markdown",
         )
         
@@ -166,7 +203,60 @@ def parse_url(url: str) -> ProcessingResult:
         metadata_dict = trafilatura.extract_metadata(downloaded)
         title = metadata_dict.title if metadata_dict else urlparse(url).netloc
         
+        # Extract embedded media (YouTube, Vimeo iframes)
+        embedded_media = []
+        try:
+            soup = BeautifulSoup(downloaded, "html.parser")
+            
+            # Find YouTube iframes
+            for iframe in soup.find_all("iframe"):
+                src = iframe.get("src", "")
+                if "youtube.com" in src or "youtu.be" in src or "vimeo.com" in src:
+                    embedded_media.append(src)
+            
+            # Also check for youtube-nocookie.com embeds
+            for iframe in soup.find_all("iframe"):
+                src = iframe.get("src", "")
+                if "youtube-nocookie.com" in src:
+                    embedded_media.append(src)
+                    
+            # Find video tags
+            for video in soup.find_all("video"):
+                src = video.get("src")
+                if src:
+                    embedded_media.append(src)
+                # Check source tags inside video
+                for source in video.find_all("source"):
+                    src = source.get("src")
+                    if src:
+                        embedded_media.append(src)
+                        
+        except Exception as e:
+            logger.warning(f"Failed to extract embedded media: {e}")
+        
+        # Calculate word count
+        word_count = len(text.split()) if text else None
+        
+        # Extract tags/categories
+        tags = []
+        if metadata_dict:
+            if hasattr(metadata_dict, "categories") and metadata_dict.categories:
+                tags.extend(metadata_dict.categories)
+            if hasattr(metadata_dict, "tags") and metadata_dict.tags:
+                tags.extend(metadata_dict.tags)
+        
+        # Extract language
+        language = None
+        if metadata_dict and hasattr(metadata_dict, "language"):
+            language = metadata_dict.language
+        
         uuid = generate_uuid()
+        
+        # Add embedded media info to text if found
+        if embedded_media:
+            text += "\n\n---\n**Embedded Media:**\n"
+            for media_url in embedded_media:
+                text += f"- {media_url}\n"
         
         note = NoteModel(
             uuid=uuid,
@@ -178,13 +268,21 @@ def parse_url(url: str) -> ProcessingResult:
             metadata=NoteMetadata(
                 source_url=url,
                 author=metadata_dict.author if metadata_dict else None,
+                tags=tags,
+                language=language,
+                word_count=word_count,
+                embedded_media=embedded_media,
             ),
         )
+        
+        # Enrich with LLM-generated tags and summary
+        note = enrich_note(note)
         
         return ProcessingResult(
             status="success",
             uuid=uuid,
             title=title,
+            note=note,
         )
     
     except Exception as e:
@@ -262,6 +360,7 @@ def parse_audio(file_path: Path) -> ProcessingResult:
             status="success",
             uuid=uuid,
             title=title,
+            note=note,
         )
     
     except Exception as e:
@@ -348,6 +447,7 @@ def parse_markdown(file_path: Path) -> ProcessingResult:
             status="success",
             uuid=uuid,
             title=title,
+            note=note,
         )
     
     except Exception as e:
@@ -370,14 +470,20 @@ def parse_file(file_path: Path) -> ProcessingResult:
     suffix = file_path.suffix.lower()
     
     if suffix == ".pdf":
-        return parse_pdf(file_path)
+        result = parse_pdf(file_path)
     elif suffix in {".md", ".markdown", ".txt"}:
-        return parse_markdown(file_path)
+        result = parse_markdown(file_path)
     elif suffix in {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".webm"}:
-        return parse_audio(file_path)
+        result = parse_audio(file_path)
     else:
         return ProcessingResult(
             status="failed",
             error_type="parse",
             error_message=f"Unsupported file type: {suffix}",
         )
+    
+    # Enrich successful parses with LLM-generated tags and summary
+    if result.status == "success" and result.note:
+        result.note = enrich_note(result.note)
+    
+    return result

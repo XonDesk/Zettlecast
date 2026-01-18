@@ -18,9 +18,16 @@ from .models import NoteModel, RejectedEdge, SearchResult, SuggestionCache
 # Initialize embedding function from registry
 def get_embedding_function():
     """Get the sentence-transformers embedding function."""
+    import os
+    if settings.hf_token:
+        os.environ["HF_TOKEN"] = settings.hf_token
+        
     model = get_registry().get("sentence-transformers")
     return model.create(name=settings.embedding_model, device="cpu")
 
+
+# Initialize embedding function
+func = get_embedding_function()
 
 # LanceDB schema with embedded vector field
 class NoteTable(LanceModel):
@@ -30,7 +37,7 @@ class NoteTable(LanceModel):
     title: str
     source_type: str
     source_path: str
-    full_text: str  # This will be used for embedding
+    full_text: str = func.SourceField()  # Mark as source for embedding
     content_hash: str
     status: str
     created_at: str  # ISO format string
@@ -39,7 +46,7 @@ class NoteTable(LanceModel):
     chunks_json: str  # JSON serialized chunks
     
     # Vector field - auto-populated from full_text
-    vector: Vector(settings.embedding_dimensions) = None  # type: ignore
+    vector: Vector(settings.embedding_dimensions) = func.VectorField(default=None)
 
 
 class RejectedEdgeTable(LanceModel):
@@ -57,6 +64,19 @@ class SuggestionCacheTable(LanceModel):
     suggested_uuids_json: str  # JSON array
     scores_json: str  # JSON array
     cached_at: str
+
+
+class GraphEdgeTable(LanceModel):
+    """LanceDB table schema for computed graph edges."""
+    
+    source_uuid: str
+    target_uuid: str
+    weight: float  # Composite score
+    vector_sim: float  # Vector similarity component
+    tag_sim: float  # Jaccard tag similarity component
+    is_directed: bool  # True if temporal direction applied
+    edge_type: str  # "semantic" | "prerequisite"
+    created_at: str
 
 
 class Database:
@@ -115,27 +135,27 @@ class Database:
         import json
         
         # Convert to table format
-        record = {
-            "uuid": note.uuid,
-            "title": note.title,
-            "source_type": note.source_type,
-            "source_path": note.source_path,
-            "full_text": note.full_text,
-            "content_hash": note.content_hash,
-            "status": note.status,
-            "created_at": note.created_at.isoformat(),
-            "updated_at": datetime.utcnow().isoformat(),
-            "metadata_json": json.dumps(note.metadata.model_dump()),
-            "chunks_json": json.dumps([c.model_dump() for c in note.chunks]),
-        }
+        record = NoteTable(
+            uuid=note.uuid,
+            title=note.title,
+            source_type=note.source_type,
+            source_path=note.source_path,
+            full_text=note.full_text,
+            content_hash=note.content_hash,
+            status=note.status,
+            created_at=note.created_at.isoformat(),
+            updated_at=datetime.utcnow().isoformat(),
+            metadata_json=json.dumps(note.metadata.model_dump()),
+            chunks_json=json.dumps([c.model_dump() for c in note.chunks]),
+        )
         
         # Check if exists
         existing = self.get_note_by_uuid(note.uuid)
         if existing:
-            # Update
+            # Update (convert to dict for update)
             self.notes.update(
                 where=f"uuid = '{note.uuid}'",
-                values=record,
+                values=record.model_dump(exclude={"vector"}), # Vector update might be tricky if not recalculated? 
             )
         else:
             # Insert
@@ -167,6 +187,15 @@ class Database:
     def get_note_by_hash(self, content_hash: str) -> Optional[NoteModel]:
         """Get a note by content hash (for deduplication)."""
         results = self.notes.search().where(f"content_hash = '{content_hash}'").limit(1).to_list()
+        if not results:
+            return None
+        return self.get_note_by_uuid(results[0]["uuid"])
+    
+    def get_note_by_source_path(self, source_path: str) -> Optional[NoteModel]:
+        """Get a note by source path/URL (for URL deduplication)."""
+        # Escape single quotes in URL
+        escaped_path = source_path.replace("'", "''")
+        results = self.notes.search().where(f"source_path = '{escaped_path}'").limit(1).to_list()
         if not results:
             return None
         return self.get_note_by_uuid(results[0]["uuid"])

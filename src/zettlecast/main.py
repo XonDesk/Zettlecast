@@ -101,6 +101,17 @@ async def ingest(
     result: ProcessingResult
     
     if url:
+        # Check for duplicate URL
+        existing = db.get_note_by_source_path(url)
+        if existing:
+            logger.info(f"URL already ingested: {url}")
+            return IngestResponse(
+                status="duplicate",
+                uuid=existing.uuid,
+                title=existing.title,
+                error=f"URL already exists as '{existing.title}'",
+            )
+        
         # Web ingestion
         logger.info(f"Ingesting URL: {url}")
         result = parse_url(url)
@@ -126,6 +137,10 @@ async def ingest(
             status="failed",
             error=result.error_message,
         )
+    
+    # Save to database if note was generated
+    if result.note:
+        db.upsert_note(result.note)
     
     return IngestResponse(
         status=result.status,

@@ -110,32 +110,156 @@ echo "✅ Base dependencies installed"
 
 # --- Optional: Install Podcast/NeMo dependencies ---
 echo ""
-echo "🎙️  Do you want to install podcast transcription support (NVIDIA NeMo)?"
-echo "   This includes: parakeet-tdt-0.6b-v2 (transcription) + MSDD (diarization)"
-echo "   Requires ~5GB disk space and CUDA GPU recommended."
-read -p "Install podcast support? (y/N) " -n 1 -r
-echo
 
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    echo ""
-    echo "📦 Installing NeMo toolkit and podcast dependencies..."
-    echo "(This may take 5-10 minutes...)"
-    
-    if pip install -e ".[podcast]"; then
-        echo "✅ Podcast/NeMo dependencies installed"
-        
-        # Apply OS-specific NeMo patch if script exists
-        if [ -f "scripts/patch_nemo_${OS}.py" ]; then
+# Check if running on Apple Silicon (M-series Mac)
+if [ "$OS" = "Darwin" ] && [ "$ARCH" = "arm64" ]; then
+    # Check/install FFmpeg first (required for audio processing)
+    # NOTE: torchcodec (used by pyannote.audio) requires FFmpeg 4-7, not 8
+    echo "🔊 Checking FFmpeg..."
+    if ! command -v ffmpeg &> /dev/null; then
+        echo "   FFmpeg not found. Installing via Homebrew..."
+        if command -v brew &> /dev/null; then
+            brew install ffmpeg@7 && brew link ffmpeg@7
+            echo "   ✅ FFmpeg 7 installed"
+        else
             echo ""
-            echo "🔧 Applying $OS compatibility patch for NeMo..."
-            python scripts/patch_nemo_${OS}.py
+            echo "   ⚠️  FFmpeg is required but not installed!"
+            echo "   Please install Homebrew first: https://brew.sh"
+            echo "   Then run: brew install ffmpeg@7 && brew link ffmpeg@7"
+            echo ""
         fi
-        
-        echo ""
-        echo "   Enable in .env: USE_NEMO=true"
     else
-        echo "⚠️  Failed to install podcast dependencies."
-        echo "   You can try again later with: pip install -e '.[podcast]'"
+        echo "   ✅ FFmpeg found: $(ffmpeg -version 2>&1 | head -1)"
+    fi
+    echo ""
+    
+    echo "🎙️  Podcast Transcription Setup (Apple Silicon)"
+    echo ""
+    echo "   Choose a transcription backend for your M-series Mac:"
+    echo ""
+    echo "   [1] Parakeet-MLX (Recommended)"
+    echo "       - Best accuracy for English podcasts"
+    echo "       - Supports speakers diarization"
+    echo "       - Optimized for Apple Silicon"
+    echo ""
+    echo "   [2] MLX-Whisper"
+    echo "       - Very fast transcription"
+    echo "       - No speaker diarization"
+    echo "       - Simpler setup, fewer dependencies"
+    echo ""
+    echo "   [3] Faster-Whisper (Default)"
+    echo "       - Already included in base install"
+    echo "       - Good quality, runs on CPU"
+    echo ""
+    echo "   All options support speaker diarization with pyannote.audio!"
+    echo ""
+    read -p "Select option (1/2/3, default=3): " TRANSCRIPTION_CHOICE
+    
+    ASR_BACKEND="whisper"  # Default
+    
+    case "$TRANSCRIPTION_CHOICE" in
+        1)
+            echo ""
+            echo "📦 Installing Parakeet-MLX + pyannote.audio..."
+            echo "(This may take a few minutes...)"
+            
+            if pip install parakeet-mlx pyannote.audio torchaudio; then
+                echo "✅ Parakeet-MLX installed with diarization support"
+                ASR_BACKEND="parakeet-mlx"
+                
+                # Pre-download the parakeet model
+                echo ""
+                echo "📥 Pre-downloading Parakeet model (2.5GB)..."
+                python -c "from parakeet_mlx import from_pretrained; from_pretrained('mlx-community/parakeet-tdt-0.6b-v3')" 2>/dev/null && \
+                    echo "   ✅ Parakeet model downloaded" || \
+                    echo "   ⚠️  Model will download on first use"
+            else
+                echo "⚠️  Failed to install Parakeet-MLX."
+                echo "   Falling back to faster-whisper (already installed)."
+            fi
+            ;;
+        2)
+            echo ""
+            echo "📦 Installing MLX-Whisper + pyannote.audio..."
+            echo "(This may take a few minutes...)"
+            
+            if pip install mlx-whisper pyannote.audio torchaudio; then
+                echo "✅ MLX-Whisper installed with diarization support"
+                ASR_BACKEND="mlx-whisper"
+                
+                # Pre-download the whisper model
+                echo ""
+                echo "📥 Pre-downloading Whisper model..."
+                python -c "import mlx_whisper; mlx_whisper.transcribe('/dev/null', path_or_hf_repo='mlx-community/whisper-large-v3-turbo')" 2>/dev/null || true
+                echo "   ✅ MLX-Whisper model downloaded"
+            else
+                echo "⚠️  Failed to install MLX-Whisper."
+                echo "   Falling back to faster-whisper (already installed)."
+            fi
+            ;;
+        3|"")
+            echo ""
+            echo "📦 Installing pyannote.audio for diarization..."
+            
+            if pip install pyannote.audio torchaudio; then
+                echo "✅ Faster-Whisper ready with diarization support"
+            else
+                echo "⚠️  Failed to install pyannote.audio."
+                echo "   Faster-Whisper will work without speaker detection."
+            fi
+            ASR_BACKEND="whisper"
+            ;;
+        *)
+            echo ""
+            echo "Invalid choice. Using faster-whisper (default)."
+            ASR_BACKEND="whisper"
+            ;;
+    esac
+    
+    # Check if HF_TOKEN already exists in .env
+    if [ -f ".env" ] && grep -q "^HF_TOKEN=" .env && ! grep -q "^HF_TOKEN=$" .env; then
+        echo ""
+        echo "   ✅ HuggingFace token found in .env - diarization ready!"
+    else
+        echo ""
+        echo "   ⚠️  For speaker diarization, you'll need a HuggingFace token:"
+        echo "   1. Accept the license at: https://huggingface.co/pyannote/speaker-diarization-3.1"
+        echo "   2. Add your token to .env: HF_TOKEN=your_token_here"
+    fi
+    
+    # Store the choice for .env generation
+    export SELECTED_ASR_BACKEND="$ASR_BACKEND"
+    echo ""
+    echo "   Selected backend: $ASR_BACKEND"
+else
+    echo "🎙️  Do you want to install podcast transcription support (NVIDIA NeMo)?"
+    echo "   This includes: parakeet-tdt-0.6b-v2 (transcription) + MSDD (diarization)"
+    echo "   Requires ~5GB disk space and CUDA GPU recommended."
+    read -p "Install podcast support? (y/N) " -n 1 -r
+    echo
+
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo ""
+        echo "📦 Installing NeMo toolkit and podcast dependencies..."
+        echo "(This may take 5-10 minutes...)"
+        
+        if pip install -e ".[podcast]"; then
+            echo "✅ Podcast/NeMo dependencies installed"
+            export SELECTED_ASR_BACKEND="nemo"
+            
+            # Apply OS-specific NeMo patch if script exists
+            if [ -f "scripts/patch_nemo_${OS}.py" ]; then
+                echo ""
+                echo "🔧 Applying $OS compatibility patch for NeMo..."
+                python scripts/patch_nemo_${OS}.py
+            fi
+            
+            echo ""
+            echo "   Enable in .env: USE_NEMO=true"
+        else
+            echo "⚠️  Failed to install podcast dependencies."
+            echo "   You can try again later with: pip install -e '.[podcast]'"
+        fi
     fi
 fi
 
@@ -211,16 +335,47 @@ else
     echo "⚠️  Skipping model pull (Ollama not available)"
 fi
 
-# --- Create directories ---
+# --- Configure storage path ---
+echo ""
+echo "📁 Storage Configuration"
+echo ""
+
+# Set default based on OS
+if [ "$OS" = "Darwin" ]; then
+    DEFAULT_STORAGE="$HOME/_BRAIN_STORAGE"
+else
+    DEFAULT_STORAGE="$HOME/_BRAIN_STORAGE"
+fi
+
+echo "   Where would you like to store your data?"
+echo "   Default: $DEFAULT_STORAGE"
+read -p "   Storage path (press Enter for default): " CUSTOM_STORAGE
+
+if [ -n "$CUSTOM_STORAGE" ]; then
+    STORAGE_PATH="$CUSTOM_STORAGE"
+else
+    STORAGE_PATH="$DEFAULT_STORAGE"
+fi
+
+# Expand ~ if used
+STORAGE_PATH="${STORAGE_PATH/#\~/$HOME}"
+
+# Create directories
 echo ""
 echo "📁 Creating storage directories..."
-mkdir -p ~/\_BRAIN_STORAGE
-mkdir -p ~/\_BRAIN_STORAGE/.lancedb
-echo "✅ Created ~/_BRAIN_STORAGE"
+mkdir -p "$STORAGE_PATH"
+mkdir -p "$STORAGE_PATH/.lancedb"
+echo "✅ Created $STORAGE_PATH"
 
 # --- Generate config ---
 echo ""
 echo "⚙️  Generating configuration..."
+
+# Determine USE_NEMO based on backend selection
+USE_NEMO="false"
+if [ "${SELECTED_ASR_BACKEND:-auto}" = "nemo" ]; then
+    USE_NEMO="true"
+fi
 
 if [ ! -f ".env" ]; then
     API_TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
@@ -232,13 +387,17 @@ if [ ! -f ".env" ]; then
 API_TOKEN=$API_TOKEN
 
 # Storage
-STORAGE_PATH=$HOME/_BRAIN_STORAGE
-LANCEDB_PATH=$HOME/_BRAIN_STORAGE/.lancedb
+STORAGE_PATH=$STORAGE_PATH
+LANCEDB_PATH=$STORAGE_PATH/.lancedb
 
 # Models
 EMBEDDING_MODEL=google/embeddinggemma-300m
 RERANKER_MODEL=BAAI/bge-reranker-v2-m3
-WHISPER_MODEL=medium
+WHISPER_MODEL=large-v3-turbo
+
+# ASR (Automatic Speech Recognition)
+ASR_BACKEND=${SELECTED_ASR_BACKEND:-auto}
+USE_NEMO=$USE_NEMO
 
 # LLM
 LLM_PROVIDER=ollama
@@ -257,6 +416,30 @@ EOF
     echo "   $API_TOKEN"
 else
     echo "✅ .env already exists"
+    
+    # Update ASR_BACKEND in existing .env if user selected a backend
+    if [ -n "$SELECTED_ASR_BACKEND" ]; then
+        if grep -q "^ASR_BACKEND=" .env; then
+            # Update existing ASR_BACKEND line
+            sed -i '' "s/^ASR_BACKEND=.*/ASR_BACKEND=$SELECTED_ASR_BACKEND/" .env
+            echo "   Updated ASR_BACKEND to: $SELECTED_ASR_BACKEND"
+        else
+            # Add ASR_BACKEND if not present
+            echo "" >> .env
+            echo "# ASR (Automatic Speech Recognition)" >> .env
+            echo "ASR_BACKEND=$SELECTED_ASR_BACKEND" >> .env
+            echo "   Added ASR_BACKEND: $SELECTED_ASR_BACKEND"
+        fi
+    fi
+    
+    # Update storage path in existing .env if different
+    if [ -n "$STORAGE_PATH" ] && ! grep -q "STORAGE_PATH=$STORAGE_PATH" .env; then
+        if grep -q "^STORAGE_PATH=" .env; then
+            sed -i '' "s|^STORAGE_PATH=.*|STORAGE_PATH=$STORAGE_PATH|" .env
+            sed -i '' "s|^LANCEDB_PATH=.*|LANCEDB_PATH=$STORAGE_PATH/.lancedb|" .env
+            echo "   Updated STORAGE_PATH to: $STORAGE_PATH"
+        fi
+    fi
 fi
 
 # --- Summary ---
@@ -265,10 +448,10 @@ echo "========================================="
 echo "✅ Setup complete!"
 echo ""
 echo "To start Zettlecast:"
-echo "  source .venv/bin/activate"
 echo "  ./run.sh"
 echo ""
 echo "Or run components separately:"
+echo "  source .venv/bin/activate"
 echo "  uvicorn zettlecast.main:app --port 8000"
 echo "  streamlit run src/zettlecast/ui/app.py"
 echo "========================================="

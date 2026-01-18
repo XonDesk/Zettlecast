@@ -1,0 +1,10 @@
+# NeMo container dependencies
+# These are installed inside the container on top of the NeMo base image
+
+# For transcription job handling
+pydantic>=2.0.0
+pydub>=0.25.0
+
+# Audio processing
+torchaudio>=2.0.0
+soundfile>=0.12.0

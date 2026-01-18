@@ -28,9 +28,10 @@ class Settings(BaseSettings):
     lancedb_path: Path = Field(default=Path.home() / "_BRAIN_STORAGE" / ".lancedb")
 
     # --- Embedding Model ---
+    # --- Embedding Model ---
     embedding_model: str = "google/embeddinggemma-300m"
     embedding_model_lite: str = "sentence-transformers/all-MiniLM-L6-v2"
-    embedding_dimensions: int = 1024  # EmbeddingGemma-300M output dim
+    embedding_dimensions: int = 768  # EmbeddingGemma-300M output dim (Correction from 1024)
 
     # --- Reranker ---
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
@@ -39,15 +40,25 @@ class Settings(BaseSettings):
 
     # --- Audio Transcription ---
     whisper_model: str = "large-v3-turbo"  # Fastest 2026 options: large-v3-turbo, distil-large-v3
-    whisper_device: str = "cuda"  # cuda for GPU acceleration, cpu for CPU-only
+    whisper_device: str = "auto"  # auto, cuda, cpu, mps
     hf_token: str = ""  # HuggingFace token for pyannote diarization
     podcast_max_retries: int = 3
 
-    # --- NeMo Transcription (New Pipeline) ---
-    use_nemo: bool = False  # Use NeMo pipeline instead of Whisper
+    # --- ASR Backend Selection ---
+    asr_backend: str = "auto"  # auto, nemo, parakeet-mlx, whisper
+    diarization_backend: str = "auto"  # auto, pyannote, nemo, none
+
+    # --- Mac (parakeet-mlx) ---
+    parakeet_model: str = "mlx-community/parakeet-tdt-0.6b-v3"
+    mlx_whisper_model: str = "mlx-community/whisper-large-v3-turbo"
+
+    # --- NeMo Transcription (Container-based on Windows) ---
+    use_nemo: bool = False  # Legacy flag, prefer asr_backend
     nemo_chunk_duration_minutes: int = 10  # Macro-chunk size for stable memory
     nemo_parakeet_model: str = "nvidia/parakeet-tdt-0.6b-v2"  # Fast transcription
     nemo_diarization_model: str = "diar_msdd_telephonic"  # MSDD speaker diarization
+    nemo_container_image: str = "zettlecast/nemo-asr:latest"
+    nemo_container_auto_start: bool = True
 
     # --- LLM Provider ---
     llm_provider: Literal["ollama", "openai", "anthropic"] = "ollama"
@@ -67,6 +78,18 @@ class Settings(BaseSettings):
     enable_context_enrichment: bool = False
     suggestion_cache_hours: int = 24
     max_file_size_mb: int = 50
+
+    # --- Auto-Tagging (Enrichment) ---
+    enable_auto_tagging: bool = True  # LLM tag extraction on ingest
+    auto_tag_count: int = 5  # Number of tags to extract per note
+
+    # --- Graph Construction ---
+    graph_alpha: float = 0.7  # Weight for vector similarity
+    graph_beta: float = 0.3  # Weight for tag overlap (Jaccard)
+    graph_edge_threshold: float = 0.65  # Min score to create edge
+    graph_temporal_direction: bool = True  # Older→newer directed edges
+    graph_llm_prerequisite: bool = False  # LLM-based dependency check
+
 
     # --- Server ---
     api_port: int = 8000

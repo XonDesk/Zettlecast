@@ -1,0 +1,44 @@
+# NeMo ASR Container for Zettlecast
+# Optimized for Windows with NVIDIA GPU
+
+FROM nvcr.io/nvidia/nemo:24.12-py310
+
+LABEL maintainer="Zettlecast Team"
+LABEL description="NeMo ASR pipeline with Parakeet-TDT transcription and MSDD diarization"
+
+WORKDIR /app
+
+# Install additional dependencies
+COPY requirements-nemo.txt /app/
+RUN pip install --no-cache-dir -r requirements-nemo.txt
+
+# Copy the podcast module
+COPY src/zettlecast/podcast/ /app/podcast/
+
+# Pre-download models at build time to speed up first run
+RUN python -c "\
+import nemo.collections.asr as nemo_asr; \
+print('Downloading Parakeet-TDT model...'); \
+nemo_asr.models.EncDecRNNTBPEModel.from_pretrained('nvidia/parakeet-tdt-0.6b-v2'); \
+print('Model cached successfully')"
+
+# Pre-download diarization models
+RUN python -c "\
+from nemo.collections.asr.models import ClusteringDiarizer; \
+print('Downloading diarization models...'); \
+# Models will be downloaded on first use, this just verifies import works
+print('Diarization module ready')"
+
+# Create data directories
+RUN mkdir -p /data/input /data/output /data/requests
+
+# Environment variables
+ENV PYTHONUNBUFFERED=1
+ENV NEMO_CACHE_DIR=/app/.cache/nemo
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python -c "import nemo.collections.asr as nemo_asr; print('OK')" || exit 1
+
+# Default command - keep container running
+CMD ["python", "-c", "import time; print('NeMo ASR container ready'); time.sleep(86400)"]

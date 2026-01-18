@@ -62,10 +62,46 @@ class TranscriptionQueue:
                 self.completed_hashes = data.get("completed_hashes", [])
 
                 logger.info(f"Loaded queue state: {len(self.items)} items")
+                
+                # Auto-reset stuck 'processing' items
+                self._reset_stuck_items()
 
             except Exception as e:
                 logger.error(f"Failed to load queue state: {e}")
                 self.items = {}
+    
+    def _reset_stuck_items(self):
+        """
+        Reset items stuck in 'processing' state.
+        
+        This can happen when the process crashes or is killed during transcription.
+        Items that have been 'processing' for more than 1 hour are considered stuck.
+        """
+        now = datetime.utcnow()
+        stuck_threshold = timedelta(hours=1)
+        reset_count = 0
+        
+        for item in self.items.values():
+            if item.status == "processing":
+                # Check if it's been processing too long
+                if item.started_at:
+                    processing_time = now - item.started_at
+                    if processing_time > stuck_threshold:
+                        logger.warning(
+                            f"Resetting stuck job (processing for {processing_time}): "
+                            f"{item.episode.episode_title}"
+                        )
+                        item.status = "pending"
+                        item.started_at = None
+                        reset_count += 1
+                else:
+                    # No start time but marked as processing - reset it
+                    item.status = "pending"
+                    reset_count += 1
+        
+        if reset_count > 0:
+            logger.info(f"Auto-reset {reset_count} stuck 'processing' items to 'pending'")
+            self._save_state()
 
     def _save_state(self):
         """Save queue state to disk."""
@@ -367,6 +403,30 @@ class TranscriptionQueue:
             logger.info(f"Reset {count} failed items for retry")
 
         return count
+    
+    def reset_all_stuck(self) -> int:
+        """
+        Reset all stuck items (processing or review) to pending.
+        
+        Use this to recover from crashed/killed transcription runs.
+        
+        Returns:
+            Number of items reset
+        """
+        count = 0
+        for item in self.items.values():
+            if item.status in ("processing", "review"):
+                item.status = "pending"
+                item.attempts = 0
+                item.started_at = None
+                item.error_message = None
+                count += 1
+        
+        if count > 0:
+            self._save_state()
+            logger.info(f"Reset {count} stuck/failed items to pending")
+        
+        return count
 
     def get_status_summary(self) -> dict:
         """Get summary of queue status."""
@@ -393,3 +453,122 @@ class TranscriptionQueue:
                 else "unknown"
             ),
         }
+    
+    def sync_with_storage(self, podcasts_dir: Optional[Path] = None, transcripts_dir: Optional[Path] = None) -> dict:
+        """
+        Sync queue state with actual files on disk.
+        
+        Scans downloaded podcast files and compares against existing transcripts
+        to determine what still needs processing. Automatically:
+        - Resets stuck 'processing' items to 'pending'
+        - Adds downloaded podcasts that have no transcript
+        - Marks items as completed if transcript exists
+        
+        Args:
+            podcasts_dir: Directory containing downloaded podcasts
+            transcripts_dir: Directory containing transcript markdown files
+            
+        Returns:
+            Dict with sync statistics
+        """
+        podcasts_dir = podcasts_dir or (settings.storage_path / "podcasts")
+        transcripts_dir = transcripts_dir or settings.storage_path
+        
+        stats = {
+            "podcasts_found": 0,
+            "transcripts_found": 0,
+            "added_to_queue": 0,
+            "reset_stuck": 0,
+            "already_complete": 0,
+        }
+        
+        # Step 1: Reset all stuck 'processing' items
+        for item in self.items.values():
+            if item.status == "processing":
+                item.status = "pending"
+                item.started_at = None
+                stats["reset_stuck"] += 1
+        
+        # Step 2: Find all downloaded podcast files
+        audio_extensions = [".mp3", ".m4a", ".wav", ".aac", ".ogg", ".opus", ".flac"]
+        podcast_files = []
+        
+        if podcasts_dir.exists():
+            for ext in audio_extensions:
+                podcast_files.extend(podcasts_dir.rglob(f"*{ext}"))
+        
+        stats["podcasts_found"] = len(podcast_files)
+        
+        # Step 3: Find all transcript markdown files
+        transcript_files = []
+        if transcripts_dir.exists():
+            transcript_files = list(transcripts_dir.glob("*.md"))
+        
+        stats["transcripts_found"] = len(transcript_files)
+        
+        # Build a set of transcript basenames (without UUID suffix) for matching
+        # Transcript format: {title}_{uuid8}.md
+        transcript_names = set()
+        for tf in transcript_files:
+            # Remove the _uuid8.md suffix to get title
+            stem = tf.stem
+            if len(stem) > 9 and stem[-9] == "_":
+                # Has UUID suffix, remove it
+                title_part = stem[:-9].lower().replace("_", " ")
+            else:
+                title_part = stem.lower().replace("_", " ")
+            transcript_names.add(title_part)
+        
+        # Step 4: Check each podcast file
+        for podcast_file in podcast_files:
+            # Get the podcast title from filename
+            title = podcast_file.stem.lower()
+            
+            # Check if already in queue
+            already_in_queue = False
+            for item in self.items.values():
+                if Path(item.episode.audio_path).resolve() == podcast_file.resolve():
+                    already_in_queue = True
+                    # If completed or has transcript, skip
+                    if item.status == "completed":
+                        stats["already_complete"] += 1
+                    break
+            
+            if already_in_queue:
+                continue
+            
+            # Check if transcript exists (fuzzy match on title)
+            has_transcript = any(
+                title[:20] in t_name or t_name[:20] in title 
+                for t_name in transcript_names
+            )
+            
+            if has_transcript:
+                stats["already_complete"] += 1
+                continue
+            
+            # Add to queue
+            try:
+                # Try to determine podcast name from parent directory
+                podcast_name = podcast_file.parent.name
+                if podcast_name == "podcasts":
+                    podcast_name = None
+                    
+                self.add(
+                    audio_path=podcast_file,
+                    podcast_name=podcast_name,
+                    episode_title=podcast_file.stem,
+                    skip_duplicate=True,
+                )
+                stats["added_to_queue"] += 1
+            except DuplicateEpisodeError:
+                stats["already_complete"] += 1
+            except Exception as e:
+                logger.warning(f"Failed to add {podcast_file.name}: {e}")
+        
+        # Save state if changes were made
+        if stats["reset_stuck"] > 0 or stats["added_to_queue"] > 0:
+            self._save_state()
+        
+        return stats
+

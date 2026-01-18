@@ -54,17 +54,34 @@ dev = [
     "mypy>=1.13.0",
 ]
 
+# Mac-specific (Apple Silicon with MLX)
+mac = [
+    "parakeet-mlx>=0.1.0",
+    "mlx-whisper>=0.4.0",
+    "pyannote.audio>=3.1.0",
+    "torchaudio>=2.0.0",
+]
+
+# Windows-specific (NeMo in container)
+windows = [
+    "docker>=7.0.0",
+]
+
+# Full podcast processing (platform-agnostic)
 podcast = [
-    # Transcription
-    "whisperx>=3.1.0",
+    # Diarization (works on all platforms)
     "pyannote.audio>=3.1.0",
     "speechbrain>=1.0.0",
-    # NeMo (NVIDIA models)
-    "nemo_toolkit[asr]>=2.0.0",
-    "omegaconf>=2.3.0",
     # VAD / Audio
     "torchaudio>=2.0.0",
     "pydub>=0.25.0",
+]
+
+# NeMo (for direct installation, not recommended - use container instead)
+nemo = [
+    "nemo_toolkit[asr]>=2.0.0",
+    "omegaconf>=2.3.0",
+    "whisperx>=3.1.0",
 ]
 
 

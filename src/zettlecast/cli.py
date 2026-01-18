@@ -258,48 +258,63 @@ def podcast_import(url: str, limit: int):
 @podcast.command("run")
 @click.option("--limit", "-l", type=int, help="Max episodes to process")
 @click.option("--no-enhance", is_flag=True, help="Skip LLM enhancement")
-@click.option("--use-nemo", is_flag=True, help="Use NeMo pipeline (overrides USE_NEMO setting)")
-def podcast_run(limit: int, no_enhance: bool, use_nemo: bool):
+@click.option("--backend", "-b", type=str, help="Force specific backend (parakeet-mlx, mlx-whisper, whisper, nemo)")
+@click.option("--no-sync", is_flag=True, help="Skip auto-sync with storage (just process existing queue)")
+def podcast_run(limit: int, no_enhance: bool, backend: str, no_sync: bool):
     """Process pending episodes in queue.
     
-    Uses faster-whisper by default, or NeMo if USE_NEMO=true or --use-nemo flag is set.
-    NeMo provides better speaker diarization and word-level timestamps.
+    Automatically syncs queue with storage: scans downloaded podcasts,
+    compares against transcripts, and adds missing items to queue.
+    Use --no-sync to skip this and just process existing queue items.
     """
     from .podcast.queue import TranscriptionQueue
     from .podcast.enhancer import TranscriptEnhancer
     from .podcast.formatter import save_result
+    from .podcast.transcriber_factory import TranscriberFactory
     from .config import settings
+    import time
     
     queue = TranscriptionQueue()
+    
+    # Auto-sync queue with storage (unless disabled)
+    if not no_sync:
+        click.echo("🔄 Syncing queue with storage...")
+        sync_stats = queue.sync_with_storage()
+        
+        if sync_stats["reset_stuck"] > 0:
+            click.echo(f"   Reset {sync_stats['reset_stuck']} stuck processing items")
+        if sync_stats["added_to_queue"] > 0:
+            click.echo(f"   Added {sync_stats['added_to_queue']} new episodes from downloads")
+        
+        click.echo(f"   📁 {sync_stats['podcasts_found']} podcasts, {sync_stats['transcripts_found']} transcripts")
+    
     pending = queue.get_pending_count()
     
     if pending == 0:
-        click.echo("✅ No pending episodes in queue")
+        click.echo("✅ All podcasts are transcribed!")
         return
     
-    # Determine which transcriber to use
-    use_nemo_pipeline = use_nemo or settings.use_nemo
+    # Create transcriber using factory (respects ASR_BACKEND setting)
+    transcriber = TranscriberFactory.create(backend=backend)
+    caps = transcriber.get_capabilities()
     
-    if use_nemo_pipeline:
-        from .podcast.nemo_transcriber import NeMoTranscriber
-        transcriber = NeMoTranscriber(
-            device=settings.whisper_device,
-            chunk_duration_minutes=settings.nemo_chunk_duration_minutes,
-            enable_diarization=True,
-        )
-        click.echo("🧠 Using NeMo transcription pipeline (Parakeet + MSDD)")
-    else:
-        from .podcast.transcriber import PodcastTranscriber
-        transcriber = PodcastTranscriber(hf_token=settings.hf_token)
-        click.echo("🎤 Using Whisper transcription pipeline")
-    
-    click.echo(f"🎙️ Processing {min(limit, pending) if limit else pending} episodes...")
-    click.echo(f"   ETA: {queue.estimate_time_remaining()}\n")
+    click.echo("=" * 60)
+    click.echo("🎙️  Zettlecast Podcast Transcription")
+    click.echo("=" * 60)
+    click.echo(f"   Backend:     {caps.transcriber_name}")
+    click.echo(f"   Diarization: {caps.diarizer_name or 'disabled'}")
+    click.echo(f"   Episodes:    {min(limit, pending) if limit else pending} of {pending} pending")
+    click.echo(f"   Est. time:   {queue.estimate_time_remaining()}")
+    click.echo("=" * 60)
+    click.echo("")
     
     # Initialize enhancer
     enhancer = TranscriptEnhancer() if not no_enhance else None
     
     processed = 0
+    total_time = 0
+    start_time = time.time()
+    
     while True:
         if limit and processed >= limit:
             break
@@ -309,12 +324,17 @@ def podcast_run(limit: int, no_enhance: bool, use_nemo: bool):
             break
         
         episode = item.episode
-        click.echo(f"[{processed+1}] {episode.episode_title}...", nl=False)
+        episode_num = processed + 1
+        total_to_process = min(limit, pending) if limit else pending
+        
+        click.echo(f"[{episode_num}/{total_to_process}] {episode.episode_title[:50]}...")
+        click.echo(f"        ↳ Downloading... ", nl=False)
         
         queue.mark_started(episode.id)
         
         try:
             # Transcribe
+            click.echo("Transcribing... ", nl=False)
             result = transcriber.transcribe(
                 Path(episode.audio_path),
                 episode=episode,
@@ -323,6 +343,7 @@ def podcast_run(limit: int, no_enhance: bool, use_nemo: bool):
             # Enhance (optional)
             enhanced = None
             if enhancer:
+                click.echo("Enhancing... ", nl=False)
                 enhanced = enhancer.enhance(result.full_text)
                 result.keywords = enhanced.get("keywords", [])
                 result.sections = enhanced.get("sections", [])
@@ -331,21 +352,33 @@ def podcast_run(limit: int, no_enhance: bool, use_nemo: bool):
             output_path = save_result(result, episode, enhanced)
             queue.mark_completed(episode.id, result, output_path)
             
-            click.echo(f" ✅ ({result.processing_time_seconds:.0f}s)")
+            total_time += result.processing_time_seconds
+            
+            click.echo(f"✅ Done!")
+            click.echo(f"        ↳ Duration: {result.duration_seconds/60:.1f}min | "
+                      f"Time: {result.processing_time_seconds:.0f}s | "
+                      f"Speakers: {result.speakers_detected}")
             processed += 1
             
         except Exception as e:
             queue.mark_failed(episode.id, str(e), max_retries=settings.podcast_max_retries)
-            click.echo(f" ❌ {str(e)[:50]}")
+            click.echo(f"❌ Failed: {str(e)[:60]}")
     
-    click.echo(f"\n✅ Processed {processed} episodes")
+    # Summary
+    elapsed = time.time() - start_time
+    click.echo("")
+    click.echo("=" * 60)
+    click.echo(f"✅ Completed: {processed} episodes in {elapsed/60:.1f} minutes")
+    if processed > 0:
+        click.echo(f"   Avg time per episode: {total_time/processed:.0f}s")
+    click.echo("=" * 60)
     
     # Show remaining
     status = queue.get_status_summary()
     if status["by_status"]["pending"] > 0:
         click.echo(f"📋 Remaining: {status['by_status']['pending']} pending")
     if status["by_status"]["review"] > 0:
-        click.echo(f"⚠️  {status['by_status']['review']} episodes need review (use: zettlecast podcast retry)")
+        click.echo(f"⚠️  {status['by_status']['review']} episodes need review (use: ./zc podcast retry)")
 
 
 @podcast.command("status")

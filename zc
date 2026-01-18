@@ -1,0 +1,31 @@
+#!/bin/bash
+# Zettlecast CLI Wrapper
+# Automatically activates virtual environment and runs zettlecast commands
+#
+# Usage:
+#   ./zc serve          - Start the server
+#   ./zc podcast run    - Run transcription queue
+#   ./zc podcast status - Check queue status
+#   ./zc search "query" - Search notes
+#   ./zc --help         - Show all commands
+
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+# Activate virtual environment
+if [ -d ".venv" ]; then
+    source .venv/bin/activate
+else
+    echo "Error: Virtual environment not found."
+    echo "Run ./setup.sh first to set up the project."
+    exit 1
+fi
+
+# Load environment variables
+if [ -f ".env" ]; then
+    export $(grep -v '^#' .env | xargs)
+fi
+
+# Run zettlecast command with all arguments
+exec zettlecast "$@"

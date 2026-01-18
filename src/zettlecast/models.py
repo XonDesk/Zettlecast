@@ -32,6 +32,7 @@ class NoteMetadata(BaseModel):
     word_count: Optional[int] = None
     page_count: Optional[int] = None  # For PDFs
     duration_seconds: Optional[int] = None  # For audio
+    embedded_media: List[str] = Field(default_factory=list)  # YouTube, video URLs
     custom: dict = Field(default_factory=dict)
 
 
@@ -80,6 +81,7 @@ class ProcessingResult(BaseModel):
     error_type: Optional[str] = None  # parse | embed | store | network | timeout
     error_message: Optional[str] = None
     retry_count: int = 0
+    note: Optional[NoteModel] = None
 
 
 class SearchResult(BaseModel):
