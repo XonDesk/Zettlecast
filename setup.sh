@@ -442,6 +442,66 @@ else
     fi
 fi
 
+# --- Setup Next.js Frontend ---
+echo ""
+echo "🌐 Setting up Next.js frontend..."
+
+if [ -d "frontend" ]; then
+    # Check for Node.js
+    if command -v node &> /dev/null; then
+        NODE_VERSION=$(node --version)
+        echo "   Found Node.js $NODE_VERSION"
+        
+        # Install npm dependencies if node_modules doesn't exist
+        if [ ! -d "frontend/node_modules" ]; then
+            echo "   Installing frontend dependencies..."
+            cd frontend
+            npm install --silent
+            cd ..
+            echo "   ✅ Frontend dependencies installed"
+        else
+            echo "   ✅ Frontend dependencies already installed"
+        fi
+        
+        # Get API token from .env
+        if [ -f ".env" ]; then
+            API_TOKEN_FROM_ENV=$(grep "^API_TOKEN=" .env | cut -d'=' -f2)
+        else
+            API_TOKEN_FROM_ENV="$API_TOKEN"
+        fi
+        
+        # Create frontend .env.local if it doesn't exist
+        if [ ! -f "frontend/.env.local" ]; then
+            cat > frontend/.env.local <<EOF
+# Zettlecast Frontend Configuration
+# Generated: $(date)
+
+NEXT_PUBLIC_API_URL=http://localhost:8000
+NEXT_PUBLIC_API_TOKEN=$API_TOKEN_FROM_ENV
+EOF
+            echo "   ✅ Created frontend/.env.local with API token"
+        else
+            echo "   ✅ frontend/.env.local already exists"
+            
+            # Update token if it changed
+            if [ -n "$API_TOKEN_FROM_ENV" ] && ! grep -q "NEXT_PUBLIC_API_TOKEN=$API_TOKEN_FROM_ENV" frontend/.env.local; then
+                sed -i '' "s|^NEXT_PUBLIC_API_TOKEN=.*|NEXT_PUBLIC_API_TOKEN=$API_TOKEN_FROM_ENV|" frontend/.env.local
+                echo "   Updated API token in frontend/.env.local"
+            fi
+        fi
+    else
+        echo "   ⚠️  Node.js not found. Skipping frontend setup."
+        echo "   To install Node.js:"
+        echo "     macOS: brew install node"
+        echo "     Linux: curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt install nodejs"
+        echo ""
+        echo "   After installing Node.js, run:"
+        echo "     cd frontend && npm install"
+    fi
+else
+    echo "   ⚠️  Frontend directory not found. Skipping frontend setup."
+fi
+
 # --- Summary ---
 echo ""
 echo "========================================="
@@ -451,7 +511,15 @@ echo "To start Zettlecast:"
 echo "  ./run.sh"
 echo ""
 echo "Or run components separately:"
+echo ""
+echo "  # Backend (Terminal 1)"
 echo "  source .venv/bin/activate"
 echo "  uvicorn zettlecast.main:app --port 8000"
+echo ""
+echo "  # Frontend (Terminal 2)"
+echo "  cd frontend && npm run dev"
+echo "  # Open http://localhost:3000"
+echo ""
+echo "Legacy Streamlit UI (optional):"
 echo "  streamlit run src/zettlecast/ui/app.py"
 echo "========================================="

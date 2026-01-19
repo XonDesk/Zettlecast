@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -259,7 +259,398 @@ async def manage_link(
         return {"status": "rejected"}
 
 
+# --- Graph Data ---
+
+@app.get("/graph")
+async def get_graph_data(
+    token: str = Query(...),
+    limit: int = Query(2000, ge=1, le=10000),
+):
+    """
+    Get graph nodes and edges for visualization.
+    
+    Returns nodes (notes) and links (edges) in a format optimized
+    for react-force-graph-2d.
+    """
+    notes = db.list_notes(limit=limit)
+    
+    nodes = [
+        {
+            "id": n["uuid"],
+            "name": n["title"],
+            "source_type": n["source_type"],
+            "val": 1,  # node size factor
+        }
+        for n in notes
+    ]
+    
+    # Get edges from graph_edges table
+    edges = db.get_all_edges()
+    links = [
+        {
+            "source": e["source_uuid"],
+            "target": e["target_uuid"],
+            "value": e["weight"],
+        }
+        for e in edges
+    ]
+    
+    return {"nodes": nodes, "links": links}
+
+
+# --- Podcast Endpoints ---
+
+class PodcastImportRequest(BaseModel):
+    feed_url: str
+    limit: int = 5
+
+
+@app.get("/podcast/status")
+async def get_podcast_status(token: str = Query(...)):
+    """Get podcast queue status summary."""
+    try:
+        from .podcast.queue import TranscriptionQueue
+        queue = TranscriptionQueue()
+        status = queue.get_status_summary()
+        
+        # Get list of recent items
+        items_list = []
+        for item in list(queue.items.values())[-20:]:  # Last 20
+            items_list.append({
+                "job_id": item.episode.id,
+                "podcast_name": item.episode.podcast_name or "Unknown",
+                "episode_title": item.episode.episode_title or "Untitled",
+                "status": item.status,
+                "added_at": item.added_at.isoformat(),
+                "error_message": item.error_message,
+                "attempts": item.attempts,
+            })
+        
+        # Sort by added_at descending
+        items_list.sort(key=lambda x: x["added_at"], reverse=True)
+        
+        return {
+            "by_status": status["by_status"],
+            "total": status["total"],
+            "estimated_remaining": status["estimated_remaining"],
+            "items": items_list,
+        }
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Podcast module not installed")
+    except Exception as e:
+        logger.error(f"Failed to get podcast status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/podcast/import")
+async def import_podcast_feed(
+    body: PodcastImportRequest,
+    token: str = Query(...),
+):
+    """Import episodes from an RSS feed URL."""
+    try:
+        from .podcast.queue import TranscriptionQueue
+        queue = TranscriptionQueue()
+        
+        job_ids = queue.add_from_feed(body.feed_url, limit=body.limit)
+        
+        return {
+            "status": "success",
+            "added_count": len(job_ids),
+            "job_ids": job_ids,
+            "message": f"Added {len(job_ids)} episodes to queue",
+        }
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Podcast module not installed")
+    except Exception as e:
+        logger.error(f"Failed to import feed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/podcast/retry")
+async def retry_failed_podcasts(token: str = Query(...)):
+    """Retry all failed episodes marked for review."""
+    try:
+        from .podcast.queue import TranscriptionQueue
+        queue = TranscriptionQueue()
+        
+        count = queue.retry_failed()
+        
+        return {
+            "status": "success",
+            "retried_count": count,
+            "message": f"Reset {count} failed items to pending",
+        }
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Podcast module not installed")
+    except Exception as e:
+        logger.error(f"Failed to retry: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/podcast/sync")
+async def sync_podcast_queue(token: str = Query(...)):
+    """Sync queue with storage - finds unprocessed podcasts."""
+    try:
+        from .podcast.queue import TranscriptionQueue
+        queue = TranscriptionQueue()
+        
+        stats = queue.sync_with_storage()
+        
+        return {
+            "status": "success",
+            "sync_stats": stats,
+            "message": f"Sync complete: {stats.get('items_added', 0)} new items added",
+        }
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Podcast module not installed")
+    except Exception as e:
+        logger.error(f"Failed to sync: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/podcast/reset-stuck")
+async def reset_stuck_podcasts(token: str = Query(...)):
+    """Reset stuck processing items to pending."""
+    try:
+        from .podcast.queue import TranscriptionQueue
+        queue = TranscriptionQueue()
+        
+        count = queue.reset_all_stuck()
+        
+        return {
+            "status": "success",
+            "reset_count": count,
+            "message": f"Reset {count} stuck items to pending",
+        }
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Podcast module not installed")
+    except Exception as e:
+        logger.error(f"Failed to reset: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Global processing state
+_processing_state = {
+    "is_running": False,
+    "current_episode": None,
+    "processed_count": 0,
+    "error_count": 0,
+    "started_at": None,
+}
+
+
+def _run_transcription_background(limit: int = None, backend: str = None):
+    """Background task to run transcription processing."""
+    global _processing_state
+    
+    try:
+        from .podcast.queue import TranscriptionQueue
+        from .podcast.enhancer import TranscriptEnhancer
+        from .podcast.formatter import save_result
+        from .podcast.transcriber_factory import TranscriberFactory
+        from datetime import datetime
+        
+        _processing_state["is_running"] = True
+        _processing_state["started_at"] = datetime.utcnow().isoformat()
+        _processing_state["processed_count"] = 0
+        _processing_state["error_count"] = 0
+        
+        queue = TranscriptionQueue()
+        
+        # Sync queue first
+        queue.sync_with_storage()
+        
+        # Create transcriber
+        transcriber = TranscriberFactory.create(backend=backend)
+        enhancer = TranscriptEnhancer()
+        
+        processed = 0
+        
+        while True:
+            if limit and processed >= limit:
+                break
+            
+            item = queue.get_next_pending()
+            if not item:
+                break
+            
+            episode = item.episode
+            _processing_state["current_episode"] = episode.episode_title
+            
+            queue.mark_started(episode.id)
+            
+            try:
+                # Transcribe
+                from pathlib import Path as P
+                result = transcriber.transcribe(
+                    P(episode.audio_path),
+                    episode=episode,
+                )
+                
+                # Enhance
+                enhanced = enhancer.enhance(result.full_text)
+                result.keywords = enhanced.get("keywords", [])
+                result.sections = enhanced.get("sections", [])
+                
+                # Save
+                output_path = save_result(result, episode, enhanced)
+                queue.mark_completed(episode.id, result, output_path)
+                
+                processed += 1
+                _processing_state["processed_count"] = processed
+                
+            except Exception as e:
+                logger.error(f"Failed to transcribe {episode.id}: {e}")
+                queue.mark_failed(episode.id, str(e), max_retries=3)
+                _processing_state["error_count"] += 1
+        
+        _processing_state["current_episode"] = None
+        
+    except Exception as e:
+        logger.error(f"Background transcription error: {e}")
+    finally:
+        _processing_state["is_running"] = False
+        _processing_state["current_episode"] = None
+
+
+class PodcastRunRequest(BaseModel):
+    limit: int = 5
+    backend: Optional[str] = None
+
+
+@app.post("/podcast/run")
+async def run_podcast_processing(
+    body: PodcastRunRequest,
+    background_tasks: BackgroundTasks,
+    token: str = Query(...),
+):
+    """Start podcast transcription processing in the background."""
+    global _processing_state
+    
+    if _processing_state["is_running"]:
+        return {
+            "status": "already_running",
+            "current_episode": _processing_state["current_episode"],
+            "processed_count": _processing_state["processed_count"],
+            "message": "Transcription is already running",
+        }
+    
+    try:
+        from .podcast.queue import TranscriptionQueue
+        queue = TranscriptionQueue()
+        pending = queue.get_pending_count()
+        
+        if pending == 0:
+            return {
+                "status": "no_pending",
+                "message": "No pending episodes to process",
+            }
+        
+        # Start background task
+        background_tasks.add_task(
+            _run_transcription_background,
+            limit=body.limit,
+            backend=body.backend,
+        )
+        
+        return {
+            "status": "started",
+            "pending_count": pending,
+            "limit": body.limit,
+            "message": f"Started processing up to {body.limit} episodes",
+        }
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Podcast module not installed")
+    except Exception as e:
+        logger.error(f"Failed to start processing: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/podcast/running")
+async def get_podcast_running_status(token: str = Query(...)):
+    """Get the current running status of podcast processing."""
+    return {
+        "is_running": _processing_state["is_running"],
+        "current_episode": _processing_state["current_episode"],
+        "processed_count": _processing_state["processed_count"],
+        "error_count": _processing_state["error_count"],
+        "started_at": _processing_state["started_at"],
+    }
+
+
 # --- Settings ---
+
+class SettingsUpdate(BaseModel):
+    """Settings that can be updated via the API."""
+    embedding_model: Optional[str] = None
+    reranker_model: Optional[str] = None
+    whisper_model: Optional[str] = None
+    llm_provider: Optional[str] = None
+    ollama_model: Optional[str] = None
+    enable_context_enrichment: Optional[bool] = None
+    chunk_size: Optional[int] = None
+    storage_path: Optional[str] = None
+    asr_backend: Optional[str] = None
+    hf_token: Optional[str] = None
+
+
+def update_env_file(updates: dict) -> bool:
+    """Update .env file with new values."""
+    env_path = Path(".env")
+    
+    if not env_path.exists():
+        logger.warning(".env file not found")
+        return False
+    
+    # Read current content
+    lines = env_path.read_text().splitlines()
+    
+    # Map of python setting names to env var names
+    setting_to_env = {
+        "embedding_model": "EMBEDDING_MODEL",
+        "reranker_model": "RERANKER_MODEL",
+        "whisper_model": "WHISPER_MODEL",
+        "llm_provider": "LLM_PROVIDER",
+        "ollama_model": "OLLAMA_MODEL",
+        "enable_context_enrichment": "ENABLE_CONTEXT_ENRICHMENT",
+        "chunk_size": "CHUNK_SIZE",
+        "storage_path": "STORAGE_PATH",
+        "asr_backend": "ASR_BACKEND",
+        "hf_token": "HF_TOKEN",
+    }
+    
+    updated_keys = set()
+    new_lines = []
+    
+    for line in lines:
+        modified = False
+        for setting_name, env_name in setting_to_env.items():
+            if setting_name in updates and updates[setting_name] is not None:
+                if line.startswith(f"{env_name}=") or line.startswith(f"# {env_name}="):
+                    value = updates[setting_name]
+                    # Convert bool to lowercase string
+                    if isinstance(value, bool):
+                        value = str(value).lower()
+                    new_lines.append(f"{env_name}={value}")
+                    updated_keys.add(setting_name)
+                    modified = True
+                    break
+        if not modified:
+            new_lines.append(line)
+    
+    # Add any new settings that weren't in the file
+    for setting_name, env_name in setting_to_env.items():
+        if setting_name in updates and updates[setting_name] is not None and setting_name not in updated_keys:
+            value = updates[setting_name]
+            if isinstance(value, bool):
+                value = str(value).lower()
+            new_lines.append(f"{env_name}={value}")
+    
+    # Write back
+    env_path.write_text("\n".join(new_lines) + "\n")
+    return True
+
 
 @app.get("/settings")
 async def get_settings(token: str = Query(...)):
@@ -269,10 +660,38 @@ async def get_settings(token: str = Query(...)):
         "reranker_model": settings.reranker_model,
         "whisper_model": settings.whisper_model,
         "llm_provider": settings.llm_provider,
+        "ollama_model": settings.ollama_model,
         "enable_context_enrichment": settings.enable_context_enrichment,
         "chunk_size": settings.chunk_size,
         "storage_path": str(settings.storage_path),
+        "asr_backend": settings.asr_backend,
+        "hf_token": "***" if settings.hf_token else "",
     }
+
+
+@app.post("/settings")
+async def update_settings_endpoint(
+    body: SettingsUpdate,
+    token: str = Query(...),
+):
+    """
+    Update application settings.
+    
+    Changes are written to .env file and will take effect on next restart.
+    """
+    updates = body.model_dump(exclude_none=True)
+    
+    if not updates:
+        raise HTTPException(status_code=400, detail="No settings to update")
+    
+    if update_env_file(updates):
+        return {
+            "status": "updated",
+            "updated_keys": list(updates.keys()),
+            "message": "Settings saved. Restart the server for changes to take effect.",
+        }
+    else:
+        raise HTTPException(status_code=500, detail="Failed to update .env file")
 
 
 # --- Startup ---
@@ -285,3 +704,4 @@ async def startup_event():
     db.connect()
     logger.info(f"Storage path: {settings.storage_path}")
     logger.info(f"API token: {settings.api_token[:8]}...")
+

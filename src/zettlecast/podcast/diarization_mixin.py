@@ -8,6 +8,7 @@ Allows any transcriber to add speaker detection capabilities.
 import logging
 from pathlib import Path
 from typing import List, Optional
+import torch
 
 logger = logging.getLogger(__name__)
 
@@ -57,10 +58,23 @@ class DiarizationMixin:
             from pyannote.audio import Pipeline
             
             logger.info(f"Loading pyannote diarization: {self._diarization_model_id}")
-            self._diarization_pipeline = Pipeline.from_pretrained(
+            pipeline = Pipeline.from_pretrained(
                 self._diarization_model_id,
                 token=self.config.hf_token,  # pyannote 4.x uses 'token' instead of 'use_auth_token'
             )
+            
+            # Move to MPS if available
+            try:
+                if torch.backends.mps.is_available():
+                    device = torch.device("mps")
+                    pipeline.to(device)
+                    logger.info("Moved diarization pipeline to MPS device for acceleration")
+                else:
+                    logger.info("MPS not available, using default device (CPU)")
+            except Exception as e:
+                logger.warning(f"Failed to move pipeline to MPS: {e}. Falling back to CPU.")
+            
+            self._diarization_pipeline = pipeline
             logger.info("Pyannote diarization pipeline loaded")
         
         return self._diarization_pipeline

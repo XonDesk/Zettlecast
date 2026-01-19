@@ -128,6 +128,48 @@ class Database:
             self._cache_table = self._get_or_create_table("suggestion_cache", SuggestionCacheTable)
         return self._cache_table
     
+    @property
+    def graph_edges(self):
+        """Get or create graph edges table."""
+        if not hasattr(self, "_graph_edges_table") or self._graph_edges_table is None:
+            self._graph_edges_table = self._get_or_create_table("graph_edges", GraphEdgeTable)
+        return self._graph_edges_table
+    
+    # --- Graph Edge Operations ---
+    
+    def save_edges(self, edges: list) -> int:
+        """Save computed edges to database. Returns count of edges saved."""
+        from datetime import datetime
+        
+        records = []
+        for edge in edges:
+            records.append({
+                "source_uuid": edge.source_uuid,
+                "target_uuid": edge.target_uuid,
+                "weight": edge.weight,
+                "vector_sim": edge.vector_sim,
+                "tag_sim": edge.tag_sim,
+                "is_directed": edge.is_directed,
+                "edge_type": edge.edge_type,
+                "created_at": edge.created_at.isoformat() if hasattr(edge.created_at, 'isoformat') else datetime.utcnow().isoformat(),
+            })
+        
+        if records:
+            self.graph_edges.add(records)
+        return len(records)
+    
+    def get_all_edges(self) -> list:
+        """Get all edges for graph visualization."""
+        try:
+            results = self.graph_edges.search().limit(10000).to_list()
+            return results
+        except Exception:
+            return []
+    
+    def delete_edges_for_note(self, uuid: str) -> None:
+        """Delete all edges involving a note (for rebuilding)."""
+        self.graph_edges.delete(f"source_uuid = '{uuid}' OR target_uuid = '{uuid}'")
+    
     # --- Note Operations ---
     
     def upsert_note(self, note: NoteModel) -> None:

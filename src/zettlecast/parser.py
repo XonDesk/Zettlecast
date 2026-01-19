@@ -192,11 +192,27 @@ def parse_url(url: str) -> ProcessingResult:
             output_format="markdown",
         )
         
+        # Fallback to BeautifulSoup if trafilatura extraction fails
+        if not text:
+            logger.warning(f"Trafilatura extraction failed for {url} (content length: {len(downloaded)}), attempting fallback.")
+            soup = BeautifulSoup(downloaded, "html.parser")
+            
+            # Remove scripts and styles
+            for script in soup(["script", "style", "noscript", "iframe", "header", "footer", "nav"]):
+                script.decompose()
+            
+            # Get text
+            text = soup.get_text(separator="\n\n")
+            
+            # Clean up empty lines
+            lines = (line.strip() for line in text.splitlines())
+            text = "\n".join(line for line in lines if line)
+        
         if not text:
             return ProcessingResult(
                 status="failed",
                 error_type="parse",
-                error_message="No content extracted from URL",
+                error_message="No content extracted from URL (tried trafilatura and basic fallback)",
             )
         
         # Extract metadata
