@@ -90,12 +90,13 @@ Start the API server, UI, and background services:
 ./run.sh
 
 # Windows
+# Run the setup script first if you haven't: .\setup.ps1
 .\.venv\Scripts\Activate.ps1
 zettlecast serve
 ```
 
 Access the interfaces:
-- **Dashboard (Streamlit)**: `http://localhost:8501`
+- **Dashboard**: `http://localhost:3000`
 - **REST API (FastAPI)**: `http://localhost:8000/docs`
 
 ## Usage & Workflows
@@ -110,29 +111,29 @@ Access the interfaces:
 - 📊 **Graph View** - Visualize connections with Cytoscape.js
 
 ### CLI Operations
-The system includes a robust CLI for headless operation and automation:
+The system includes a robust CLI for headless operation and automation. You can use the `./zc` wrapper script to run commands without manually activating the virtual environment:
 
 ```bash
 # Ingest a directory of research papers
-zettlecast ingest ./papers/
+./zc ingest ./papers/
 
 # Quick-add a security whitepaper URL
-zettlecast add https://example.com/security-architecture
+./zc add https://example.com/security-architecture
 
 # Search
-zettlecast search "machine learning"
-zettlecast search "automated threat modeling"
+./zc search "machine learning"
+./zc search "automated threat modeling"
 
 # Get your bookmarklet
-zettlecast token
+./zc token
 
 # View stats
-zettlecast stats
+./zc stats
 
 # Podcast transcription
-zettlecast podcast add /path/to/audio/files
-zettlecast podcast run
-zettlecast podcast status
+./zc podcast add /path/to/audio/files
+./zc podcast run
+./zc podcast status
 ```
 
 ### API Integration
@@ -158,8 +159,8 @@ Zettlecast supports two transcription pipelines for audio processing:
 
 **Usage:**
 ```bash
-zettlecast podcast add /path/to/audio
-zettlecast podcast run  # Uses Whisper by default
+./zc podcast add /path/to/audio
+./zc podcast run  # Uses Whisper by default
 ```
 
 #### 2. NeMo Pipeline (Faster & Parallel)
@@ -214,7 +215,7 @@ USE_NEMO=true
 Or use the command-line flag:
 ```bash
 # Use NeMo for this run even if USE_NEMO=false
-zettlecast podcast run --use-nemo
+./zc podcast run --use-nemo
 ```
 
 ### Standard Configuration

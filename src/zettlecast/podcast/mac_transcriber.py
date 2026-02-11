@@ -108,6 +108,7 @@ class MacTranscriber(BaseTranscriber):
         self,
         audio_path: Path,
         episode: Optional[PodcastEpisode] = None,
+        progress_callback=None,
     ) -> TranscriptionResult:
         """
         Transcribe audio using parakeet-mlx with optional pyannote diarization.

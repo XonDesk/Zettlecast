@@ -42,6 +42,8 @@ class TranscriptionResult(BaseModel):
     speakers_detected: int = Field(default=1, description="Number of unique speakers")
     keywords: List[str] = Field(default_factory=list, description="Extracted keywords")
     sections: List[dict] = Field(default_factory=list, description="Detected sections/chapters")
+    summary: str = Field(default="", description="Episode summary")
+    key_points: List[str] = Field(default_factory=list, description="Key takeaways/insights")
     duration_seconds: float = Field(description="Audio duration")
     processing_time_seconds: float = Field(description="Time taken to process")
 

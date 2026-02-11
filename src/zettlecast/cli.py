@@ -18,10 +18,8 @@ def cli():
 
 @cli.command()
 @click.option("--port", "-p", default=8000, help="API server port")
-@click.option("--ui-port", default=8501, help="Streamlit UI port")
-@click.option("--no-ui", is_flag=True, help="Start API only, no UI")
-def serve(port: int, ui_port: int, no_ui: bool):
-    """Start the Zettlecast server."""
+def serve(port: int):
+    """Start the Zettlecast API server."""
     import subprocess
     import signal
     import os
@@ -43,26 +41,26 @@ def serve(port: int, ui_port: int, no_ui: bool):
     ])
     processes.append(api_proc)
     
-    # Start UI (optional)
-    if not no_ui:
-        click.echo(f"Starting UI on port {ui_port}...")
-        ui_proc = subprocess.Popen([
-            sys.executable, "-m", "streamlit", "run",
-            str(Path(__file__).parent / "ui" / "app.py"),
-            "--server.port", str(ui_port),
-            "--server.headless", "true",
-        ])
-        processes.append(ui_proc)
-    
     click.echo(f"\n✅ Zettlecast running!")
     click.echo(f"   API: http://localhost:{port}")
-    if not no_ui:
-        click.echo(f"   UI:  http://localhost:{ui_port}")
+    click.echo(f"   Frontend: Run 'cd frontend && npm run dev' in another terminal")
     click.echo(f"\n🔑 API Token: {settings.api_token[:16]}...")
     click.echo("\nPress Ctrl+C to stop")
     
     def shutdown(signum, frame):
         click.echo("\nShutting down...")
+        
+        # Cleanup Ollama
+        try:
+            from .podcast.enhancer import TranscriptEnhancer
+            click.echo("Unloading Ollama model...")
+            TranscriptEnhancer.unload_model(
+                settings.ollama_base_url,
+                settings.ollama_model
+            )
+        except Exception:
+            pass
+
         for p in processes:
             p.terminate()
         sys.exit(0)
@@ -271,8 +269,57 @@ def podcast_run(limit: int, no_enhance: bool, backend: str, no_sync: bool):
     from .podcast.enhancer import TranscriptEnhancer
     from .podcast.formatter import save_result
     from .podcast.transcriber_factory import TranscriberFactory
+    from .parser import parse_file
+    from .db import db
     from .config import settings
     import time
+    import shutil
+    
+    def cleanup_gpu_memory():
+        """Aggressively clean up GPU memory and stale processes."""
+        import gc
+        import torch
+        import os
+        
+        click.echo("🧹 Cleaning up GPU memory...")
+        
+        # 1. Python GC
+        gc.collect()
+        
+        # 2. PyTorch Cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+            
+        # 3. Kill stale zettlecast processes (careful!)
+        try:
+            import psutil
+            current_pid = os.getpid()
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    # Look for other python processes running zettlecast
+                    if proc.info['pid'] != current_pid and \
+                       proc.info['name'] == 'python' and \
+                       any('zettlecast' in arg for arg in proc.info['cmdline'] or []):
+                        click.echo(f"   Killing stale process: {proc.info['pid']}")
+                        proc.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+        except ImportError:
+            click.echo("   (psutil not installed, skipping process cleanup)")
+
+        # 4. Unload Ollama Model
+        try:
+            from .podcast.enhancer import TranscriptEnhancer
+            click.echo("   Unloading Ollama model...")
+            TranscriptEnhancer.unload_model(
+                settings.ollama_base_url,
+                settings.ollama_model
+            )
+        except Exception as e:
+            click.echo(f"   (Failed to unload Ollama model: {e})")
+
+    cleanup_gpu_memory()
     
     queue = TranscriptionQueue()
     
@@ -347,10 +394,24 @@ def podcast_run(limit: int, no_enhance: bool, backend: str, no_sync: bool):
                 enhanced = enhancer.enhance(result.full_text)
                 result.keywords = enhanced.get("keywords", [])
                 result.sections = enhanced.get("sections", [])
+                result.summary = enhanced.get("summary", "")
+                result.key_points = enhanced.get("key_points", [])
             
             # Save
             output_path = save_result(result, episode, enhanced)
             queue.mark_completed(episode.id, result, output_path)
+            
+            # Auto-ingest into database
+            try:
+                ingest_result = parse_file(output_path)
+                if ingest_result.status == "success":
+                    db.connect()
+                    db.upsert_note(ingest_result.note)
+                    click.echo("        ↳ 💾 Ingested to database")
+                else:
+                    click.echo(f"        ↳ ⚠️ Ingestion failed: {ingest_result.error_message}")
+            except Exception as e:
+                click.echo(f"        ↳ ⚠️ Ingestion error: {e}")
             
             total_time += result.processing_time_seconds
             
@@ -413,6 +474,153 @@ def podcast_retry():
         click.echo("Run 'zettlecast podcast run' to process them")
     else:
         click.echo("No failed episodes to retry")
+
+
+# ===========================================
+# IMAGE PROCESSING COMMANDS
+# ===========================================
+
+
+@cli.group()
+def image():
+    """Image processing pipeline commands."""
+    pass
+
+
+@image.command("add")
+@click.argument("path", type=click.Path(exists=True))
+@click.option("--collection", "-c", help="Collection/folder name")
+@click.option("--recursive/--no-recursive", default=True, help="Scan subdirectories")
+def image_add(path: str, collection: str, recursive: bool):
+    """Add images to processing queue."""
+    from pathlib import Path
+    from .image.queue import ImageQueue, DuplicateImageError
+
+    path = Path(path)
+    queue = ImageQueue()
+
+    if path.is_file():
+        try:
+            job_id = queue.add(path, collection_name=collection)
+            click.echo(f"✅ Added: {path.name} (ID: {job_id[:8]})")
+        except DuplicateImageError as e:
+            click.echo(f"⚠️  {e}")
+            return
+    else:
+        try:
+            job_ids = queue.add_directory(path, collection_name=collection, recursive=recursive)
+            click.echo(f"✅ Added {len(job_ids)} images to queue")
+        except Exception as e:
+            click.echo(f"❌ Error: {e}")
+            return
+
+    status = queue.get_status_summary()
+    click.echo(f"\n📋 Queue: {status['by_status']['pending']} pending, ETA: {status['estimated_remaining']}")
+
+
+@image.command("run")
+@click.option("--limit", "-l", type=int, help="Max images to process")
+@click.option("--model", "-m", help="Vision model (e.g., qwen2.5-vl:7b)")
+def image_run(limit: int, model: str):
+    """Process pending images in queue."""
+    import time
+    from pathlib import Path
+    from .image.queue import ImageQueue
+    from .image.image_parser import parse_image
+    from .db import Database
+    from .config import settings
+
+    # Override model if specified
+    if model:
+        settings.vision_model = model
+
+    queue = ImageQueue()
+    pending = queue.get_pending_count()
+
+    if pending == 0:
+        click.echo("✅ All images are processed!")
+        return
+
+    click.echo("=" * 60)
+    click.echo("🖼️  Zettlecast Image Processing")
+    click.echo("=" * 60)
+    click.echo(f"   Model:    {settings.vision_model}")
+    click.echo(f"   Images:   {min(limit, pending) if limit else pending} of {pending}")
+    click.echo(f"   Est time: {queue.estimate_time_remaining()}")
+    click.echo("=" * 60)
+
+    db = Database()
+    db.connect()
+
+    processed = 0
+    start_time = time.time()
+
+    while True:
+        if limit and processed >= limit:
+            break
+
+        item = queue.get_next_pending()
+        if not item:
+            break
+
+        click.echo(f"[{processed+1}] {Path(item.image.image_path).name}... ", nl=False)
+        queue.mark_started(item.image.id)
+
+        item_start = time.time()
+        try:
+            result = parse_image(Path(item.image.image_path))
+
+            if result.status == "success":
+                db.upsert_note(result.note)
+                processing_time = time.time() - item_start
+                queue.mark_completed(item.image.id, processing_time)
+                click.echo(f"✅ {result.uuid[:8]} ({processing_time:.1f}s)")
+            else:
+                queue.mark_failed(item.image.id, result.error_message)
+                click.echo(f"❌ {result.error_message}")
+
+            processed += 1
+
+        except Exception as e:
+            queue.mark_failed(item.image.id, str(e))
+            click.echo(f"❌ {str(e)}")
+
+    elapsed = time.time() - start_time
+    click.echo(f"\n✅ Completed: {processed} images in {elapsed/60:.1f} minutes")
+
+
+@image.command("status")
+def image_status():
+    """Show queue status."""
+    from .image.queue import ImageQueue
+
+    queue = ImageQueue()
+    status = queue.get_status_summary()
+
+    click.echo("📊 Image Queue Status")
+    click.echo("=" * 40)
+    click.echo(f"Total:      {status['total']}")
+    click.echo(f"  Pending:    {status['by_status']['pending']}")
+    click.echo(f"  Processing: {status['by_status']['processing']}")
+    click.echo(f"  Completed:  {status['by_status']['completed']}")
+    click.echo(f"  Failed:     {status['by_status']['failed']}")
+    click.echo(f"  Review:     {status['by_status']['review']}")
+    click.echo(f"\nETA: {status['estimated_remaining']}")
+
+
+@image.command("retry")
+def image_retry():
+    """Retry failed images."""
+    from .image.queue import ImageQueue
+
+    queue = ImageQueue()
+    count = queue.retry_failed()
+
+    if count > 0:
+        click.echo(f"✅ Reset {count} failed images for retry")
+        click.echo("Run 'zettlecast image run' to process them")
+    else:
+        click.echo("No failed images to retry")
 
 
 def main():

@@ -244,7 +244,7 @@ Write-Host "  .\.venv\Scripts\Activate.ps1" -ForegroundColor White
 Write-Host "  python -m uvicorn zettlecast.main:app --port 8000" -ForegroundColor White
 Write-Host ""
 Write-Host "  # In a new terminal:" -ForegroundColor Gray
-Write-Host "  streamlit run src\zettlecast\ui\app.py" -ForegroundColor White
+Write-Host "  cd frontend && npm run dev" -ForegroundColor White
 Write-Host ""
 Write-Host "Or use the CLI:" -ForegroundColor Cyan
 Write-Host "  zettlecast serve" -ForegroundColor White

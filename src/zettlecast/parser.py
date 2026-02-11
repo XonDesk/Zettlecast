@@ -480,26 +480,30 @@ def parse_markdown(file_path: Path) -> ProcessingResult:
 def parse_file(file_path: Path) -> ProcessingResult:
     """
     Parse any supported file type.
-    
+
     Dispatches to appropriate parser based on file extension.
     """
     suffix = file_path.suffix.lower()
-    
+
     if suffix == ".pdf":
         result = parse_pdf(file_path)
     elif suffix in {".md", ".markdown", ".txt"}:
         result = parse_markdown(file_path)
     elif suffix in {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".webm"}:
         result = parse_audio(file_path)
+    elif suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}:
+        from .image.image_parser import parse_image
+        result = parse_image(file_path)
     else:
         return ProcessingResult(
             status="failed",
             error_type="parse",
             error_message=f"Unsupported file type: {suffix}",
         )
-    
+
     # Enrich successful parses with LLM-generated tags and summary
-    if result.status == "success" and result.note:
+    # Skip enrichment for images since vision model already provided tags
+    if result.status == "success" and result.note and result.note.source_type != "image":
         result.note = enrich_note(result.note)
-    
+
     return result

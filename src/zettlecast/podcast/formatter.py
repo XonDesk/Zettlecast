@@ -8,7 +8,7 @@ with proper YAML frontmatter.
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 from uuid import uuid4
 
 import yaml
@@ -41,6 +41,9 @@ def format_transcript_for_zettlecast(
     )
     keywords = enhanced.get("keywords", result.keywords) if enhanced else result.keywords
     sections = enhanced.get("sections", result.sections) if enhanced else result.sections
+    summary = enhanced.get("summary", result.summary) if enhanced else result.summary
+    key_points = enhanced.get("key_points", result.key_points) if enhanced else result.key_points
+    uncertain_corrections: List[dict] = enhanced.get("uncertain_corrections", []) if enhanced else []
 
     # Build frontmatter
     frontmatter = {
@@ -81,6 +84,18 @@ def format_transcript_for_zettlecast(
 
     header = "\n".join(header_lines)
 
+    # Build summary section
+    summary_md = ""
+    if summary:
+        summary_md = f"\n\n## Summary\n\n{summary}"
+
+    # Build key points section
+    key_points_md = ""
+    if key_points:
+        key_points_md = "\n\n## Key Points\n\n"
+        for point in key_points:
+            key_points_md += f"- {point}\n"
+
     # Add sections as markdown headers if detected
     sections_md = ""
     if sections:
@@ -90,6 +105,15 @@ def format_transcript_for_zettlecast(
             start = sec.get("start_time", 0)
             desc = sec.get("description", "")
             sections_md += f"- **{name}** ([{start:.0f}s]): {desc}\n"
+
+    # Build needs-review section for uncertain corrections
+    review_md = ""
+    if uncertain_corrections:
+        review_md = "\n\n## Needs Review\n\n"
+        review_md += "The following corrections were made with low confidence and should be verified:\n\n"
+        for item in uncertain_corrections:
+            text = item.get("text", "")
+            review_md += f"- \"{text}\"\n"
 
     # Serialize frontmatter
     frontmatter_yaml = yaml.dump(
@@ -105,7 +129,10 @@ def format_transcript_for_zettlecast(
 ---
 
 {header}
+{summary_md}
+{key_points_md}
 {sections_md}
+{review_md}
 
 ## Transcript
 

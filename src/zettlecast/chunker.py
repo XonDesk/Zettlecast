@@ -88,19 +88,19 @@ def recursive_split(
 def create_chunks(text: str, base_chunk_id: str) -> List[ChunkModel]:
     """
     Create ChunkModel instances from text.
-    
+
     Args:
         text: Full text to chunk
         base_chunk_id: Base ID (usually note UUID) for chunk IDs
-        
+
     Returns:
         List of ChunkModel instances
     """
     raw_chunks = recursive_split(text)
-    
+
     chunks = []
     current_pos = 0
-    
+
     for i, chunk_text in enumerate(raw_chunks):
         # Find position in original text
         start_char = text.find(chunk_text[:50], current_pos)  # Use first 50 chars to find
@@ -108,11 +108,11 @@ def create_chunks(text: str, base_chunk_id: str) -> List[ChunkModel]:
             start_char = current_pos
         end_char = start_char + len(chunk_text)
         current_pos = end_char
-        
-        # Skip very small chunks
-        if len(chunk_text.strip()) < settings.min_chunk_size:
+
+        # Skip very small chunks, but keep at least one chunk if we only have one
+        if len(chunk_text.strip()) < settings.min_chunk_size and len(raw_chunks) > 1:
             continue
-        
+
         chunk = ChunkModel(
             chunk_id=f"{base_chunk_id}_chunk_{i}",
             text=chunk_text,
@@ -120,7 +120,7 @@ def create_chunks(text: str, base_chunk_id: str) -> List[ChunkModel]:
             end_char=end_char,
         )
         chunks.append(chunk)
-    
+
     return chunks
 
 

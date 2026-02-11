@@ -3,7 +3,7 @@
 export interface Note {
     uuid: string;
     title: string;
-    source_type: 'pdf' | 'web' | 'audio' | 'markdown' | 'rss';
+    source_type: 'pdf' | 'web' | 'audio' | 'markdown' | 'rss' | 'image';
     status: 'inbox' | 'reviewed' | 'archived';
     created_at: string;
 }
@@ -85,6 +85,7 @@ export interface PodcastEpisode {
     podcast_name: string;
     status: 'pending' | 'processing' | 'completed' | 'failed' | 'review';
     added_at: string;
+    audio_path: string;
 }
 
 export interface PodcastQueueStatus {
@@ -95,4 +96,29 @@ export interface PodcastQueueStatus {
         review: number;
     };
     estimated_remaining: string;
+}
+
+export interface ImageItem {
+    job_id: string;
+    image_title: string;
+    collection_name: string;
+    status: 'pending' | 'processing' | 'completed' | 'failed' | 'review';
+    added_at: string;
+    error_message: string | null;
+    attempts: number;
+    megapixels: number | null;
+    image_path: string;
+}
+
+export interface ImageQueueStatus {
+    by_status: {
+        pending: number;
+        processing: number;
+        completed: number;
+        review: number;
+        failed: number;
+    };
+    total: number;
+    estimated_remaining: string;
+    items: ImageItem[];
 }

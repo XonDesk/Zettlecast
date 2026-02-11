@@ -40,6 +40,14 @@ if [ "$OS" = "Darwin" ]; then
     fi
 fi
 
+# Determine sed in-place argument for cross-platform compatibility
+if [ "$OS" = "Darwin" ]; then
+    SED_INPLACE="-i ''"
+else
+    # Linux/GNU sed does not take an Empty string as argument for -i
+    SED_INPLACE="-i"
+fi
+
 # --- Check Python Version ---
 echo ""
 echo "📦 Checking Python version..."
@@ -232,20 +240,79 @@ if [ "$OS" = "Darwin" ] && [ "$ARCH" = "arm64" ]; then
     echo ""
     echo "   Selected backend: $ASR_BACKEND"
 else
-    echo "🎙️  Do you want to install podcast transcription support (NVIDIA NeMo)?"
-    echo "   This includes: parakeet-tdt-0.6b-v2 (transcription) + MSDD (diarization)"
-    echo "   Requires ~5GB disk space and CUDA GPU recommended."
-    read -p "Install podcast support? (y/N) " -n 1 -r
-    echo
+    # Check if NeMo is already installed
+    if python -c "import nemo" 2>/dev/null; then
+        echo "🎙️  NeMo toolkit already installed"
+        echo "   ✅ Podcast transcription support is ready"
+        export SELECTED_ASR_BACKEND="nemo"
+        
+        # Still ensure cuda-python version is correct
+        echo ""
+        echo "🔧 Ensuring correct cuda-python version for NeMo..."
+        CUDA_PY_VERSION=$(pip show cuda-python 2>/dev/null | grep "^Version:" | cut -d' ' -f2)
+        if [[ "$CUDA_PY_VERSION" == 13.* ]]; then
+            echo "   Found cuda-python $CUDA_PY_VERSION (incompatible with NeMo)"
+            echo "   Installing cuda-python 12.x..."
+            pip uninstall cuda-python cuda-bindings cuda-pathfinder -y 2>/dev/null || true
+            rm -rf .venv/lib/python*/site-packages/cuda 2>/dev/null || true
+            rm -rf .venv/lib/python*/site-packages/cuda_* 2>/dev/null || true
+            pip install "cuda-python>=12.3,<13.0" --quiet
+            echo "   ✅ cuda-python fixed for NeMo CUDA graph support"
+        elif [ -n "$CUDA_PY_VERSION" ]; then
+            echo "   ✅ cuda-python $CUDA_PY_VERSION (compatible)"
+        fi
+    else
+        echo "🎙️  Do you want to install podcast transcription support (NVIDIA NeMo)?"
+        echo "   This includes: parakeet-tdt-0.6b-v2 (transcription) + MSDD (diarization)"
+        echo "   Requires ~5GB disk space and CUDA GPU recommended."
+        read -p "Install podcast support? (y/N) " -n 1 -r
+        echo
 
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+        # Check for FFmpeg on Linux
+        if [ "$OS" = "Linux" ]; then
+             echo "🔊 Checking FFmpeg..."
+             if ! command -v ffmpeg &> /dev/null; then
+                 echo "   FFmpeg not found. Installing..."
+                 if command -v apt &> /dev/null; then
+                     sudo apt update && sudo apt install -y ffmpeg
+                     echo "   ✅ FFmpeg installed"
+                 else
+                     echo "   ⚠️  Could not install FFmpeg automatically."
+                     echo "   Please install it manually (e.g., 'sudo apt install ffmpeg')"
+                 fi
+             else
+                 echo "   ✅ FFmpeg found"
+             fi
+        fi
+
+        echo ""
+        echo ""
         echo ""
         echo "📦 Installing NeMo toolkit and podcast dependencies..."
         echo "(This may take 5-10 minutes...)"
         
-        if pip install -e ".[podcast]"; then
+        # Install both podcast output libs AND nemo toolkit
+        if pip install -e ".[podcast,nemo]"; then
             echo "✅ Podcast/NeMo dependencies installed"
             export SELECTED_ASR_BACKEND="nemo"
+            
+            # Fix cuda-python version (v13 has breaking API changes that break NeMo CUDA graphs)
+            echo ""
+            echo "🔧 Ensuring correct cuda-python version for NeMo..."
+            CUDA_PY_VERSION=$(pip show cuda-python 2>/dev/null | grep "^Version:" | cut -d' ' -f2)
+            if [[ "$CUDA_PY_VERSION" == 13.* ]]; then
+                echo "   Found cuda-python $CUDA_PY_VERSION (incompatible with NeMo)"
+                echo "   Installing cuda-python 12.x..."
+                # Remove v13 packages (may have wrong permissions from previous runs)
+                pip uninstall cuda-python cuda-bindings cuda-pathfinder -y 2>/dev/null || true
+                rm -rf .venv/lib/python*/site-packages/cuda 2>/dev/null || true
+                rm -rf .venv/lib/python*/site-packages/cuda_* 2>/dev/null || true
+                pip install "cuda-python>=12.3,<13.0" --quiet
+                echo "   ✅ cuda-python fixed for NeMo CUDA graph support"
+            elif [ -n "$CUDA_PY_VERSION" ]; then
+                echo "   ✅ cuda-python $CUDA_PY_VERSION (compatible)"
+            fi
             
             # Apply OS-specific NeMo patch if script exists
             if [ -f "scripts/patch_nemo_${OS}.py" ]; then
@@ -254,13 +321,95 @@ else
                 python scripts/patch_nemo_${OS}.py
             fi
             
+            # Pre-download NeMo models
+            echo ""
+            echo "📥 Pre-downloading NeMo models (Parakeet + MSDD)..."
+            echo "   (This prevents downloads on first run)"
+            
+            mkdir -p scripts
+            cat > scripts/download_nemo_models.py << 'PYEOF'
+import logging
+import os
+import sys
+
+# Configure logging to suppress verbose NeMo output
+logging.getLogger("nemo_logging").setLevel(logging.ERROR)
+os.environ["NEMO_WARNINGS_AND_LOGS_ON"] = "0"
+
+# Apply NumPy 2.0 compatibility patch FIRST
+try:
+    from scripts.patch_numpy2 import apply_numpy2_patch
+    apply_numpy2_patch()
+except ImportError:
+    # Create minimal inline patch if script not found
+    import numpy as np
+    if not hasattr(np, 'sctypes'):
+        np.sctypes = {
+            'int': [np.int8, np.int16, np.int32, np.int64],
+            'uint': [np.uint8, np.uint16, np.uint32, np.uint64],
+            'float': [np.float16, np.float32, np.float64],
+            'complex': [np.complex64, np.complex128],
+            'others': [bool, object, bytes, str, np.void],
+        }
+
+def download_models():
+    print("   Starting model download...")
+    try:
+        import nemo.collections.asr as nemo_asr
+        from nemo.collections.asr.models import NeuralDiarizer
+        from omegaconf import OmegaConf
+
+        # Download Parakeet-TDT
+        print("   -> Downloading Parakeet-TDT (0.6b)...")
+        nemo_asr.models.EncDecRNNTBPEModel.from_pretrained("nvidia/parakeet-tdt-0.6b-v2")
+        print("      ✅ Parakeet downloaded")
+
+        # Download MSDD (Diarization)
+        print("   -> Downloading MSDD (Diarization)...")
+        # Initialize NeuralDiarizer with minimal config to trigger download
+        config = OmegaConf.create({
+            "diarizer": {
+                "manifest_filepath": "/dev/null",
+                "out_dir": "/tmp",
+                "msdd_model": {
+                    "model_path": "diar_msdd_telephonic",
+                    "parameters": {"infer_batch_size": 1}
+                }
+            }
+        })
+        # This instantiation triggers the model download
+        try:
+            NeuralDiarizer(cfg=config)
+        except Exception:
+            # Expected to fail execution, but model should be downloaded
+            pass
+            
+        print("      ✅ MSDD downloaded")
+        print("   ✅ All NeMo models ready")
+        
+    except ImportError:
+        print("   ⚠️  NeMo not installed correctly. Skipping model download.")
+    except Exception as e:
+        print(f"   ⚠️  Model download warning: {e}")
+
+if __name__ == "__main__":
+    download_models()
+PYEOF
+
+            if python scripts/download_nemo_models.py; then
+                rm scripts/download_nemo_models.py
+            else
+                echo "   ⚠️  Could not pre-download models. They will download on first run."
+            fi
+            
             echo ""
             echo "   Enable in .env: USE_NEMO=true"
         else
             echo "⚠️  Failed to install podcast dependencies."
-            echo "   You can try again later with: pip install -e '.[podcast]'"
+            echo "   You can try again later with: pip install -e '.[podcast,nemo]'"
         fi
-    fi
+        fi  # end of user said yes to install
+    fi  # end of "NeMo not yet installed" else block
 fi
 
 # --- Install Ollama ---
@@ -347,6 +496,69 @@ else
     DEFAULT_STORAGE="$HOME/_BRAIN_STORAGE"
 fi
 
+# If running as root (pseudo-code check), try to detect real user
+if [ "$EUID" -eq 0 ]; then
+    echo "⚠️  Running as root! Checking for actual user..."
+    
+    # scan /home or /Users
+    BASE_HOME="/home"
+    if [ "$OS" = "Darwin" ]; then
+        BASE_HOME="/Users"
+    fi
+    
+    # Get list of users (directories in BASE_HOME)
+    # Exclude . and ..
+    USERS=()
+    i=1
+    
+    # Also check SUDO_USER if valid
+    if [ -n "$SUDO_USER" ] && [ -d "$BASE_HOME/$SUDO_USER" ]; then
+        echo "   Found sudo user: $SUDO_USER"
+        USERS+=("$SUDO_USER")
+    fi
+    
+    # Add others found
+    for d in "$BASE_HOME"/*; do
+        if [ -d "$d" ]; then
+            u=$(basename "$d")
+            # Skip shared/system folders if known, or skip if already added
+            if [[ "$u" != "Shared" ]] && [[ "$u" != "$SUDO_USER" ]]; then
+                USERS+=("$u")
+            fi
+        fi
+    done
+    
+    if [ ${#USERS[@]} -gt 0 ]; then
+        echo "   Please select the user to own the storage:"
+        for idx in "${!USERS[@]}"; do
+            echo "   [$((idx+1))] ${USERS[$idx]}"
+        done
+        
+        # Default to first one (SUDO_USER usually)
+        read -p "   Select user [1-${#USERS[@]}] (default 1): " USER_CHOICE
+        USER_CHOICE=${USER_CHOICE:-1}
+        
+        # Valid choice?
+        if [[ "$USER_CHOICE" =~ ^[0-9]+$ ]] && [ "$USER_CHOICE" -ge 1 ] && [ "$USER_CHOICE" -le "${#USERS[@]}" ]; then
+            SELECTED_USER="${USERS[$((USER_CHOICE-1))]}"
+            echo "   Selected: $SELECTED_USER"
+            
+            # Update DEFAULT_STORAGE
+            DEFAULT_STORAGE="$BASE_HOME/$SELECTED_USER/_BRAIN_STORAGE"
+            
+            # We might want to chown later, but for now just updating the path is enough 
+            # so .env points to the right place.
+            # The script running as root will create dirs as root, so we MUST instruct to chown
+            MUST_CHOWN=true
+            CHOWN_USER="$SELECTED_USER"
+        else
+            echo "   Invalid selection. Using root home."
+        fi
+    else
+        echo "   No users found in $BASE_HOME. Using root home."
+    fi
+fi
+
 echo "   Where would you like to store your data?"
 echo "   Default: $DEFAULT_STORAGE"
 read -p "   Storage path (press Enter for default): " CUSTOM_STORAGE
@@ -366,6 +578,12 @@ echo "📁 Creating storage directories..."
 mkdir -p "$STORAGE_PATH"
 mkdir -p "$STORAGE_PATH/.lancedb"
 echo "✅ Created $STORAGE_PATH"
+
+if [ "$MUST_CHOWN" = "true" ]; then
+    echo "🔧 Setting permissions for $CHOWN_USER..."
+    chown -R "$CHOWN_USER" "$STORAGE_PATH"
+    echo "✅ Ownership fixed"
+fi
 
 # --- Generate config ---
 echo ""
@@ -421,7 +639,7 @@ else
     if [ -n "$SELECTED_ASR_BACKEND" ]; then
         if grep -q "^ASR_BACKEND=" .env; then
             # Update existing ASR_BACKEND line
-            sed -i '' "s/^ASR_BACKEND=.*/ASR_BACKEND=$SELECTED_ASR_BACKEND/" .env
+            sed $SED_INPLACE "s/^ASR_BACKEND=.*/ASR_BACKEND=$SELECTED_ASR_BACKEND/" .env
             echo "   Updated ASR_BACKEND to: $SELECTED_ASR_BACKEND"
         else
             # Add ASR_BACKEND if not present
@@ -435,8 +653,8 @@ else
     # Update storage path in existing .env if different
     if [ -n "$STORAGE_PATH" ] && ! grep -q "STORAGE_PATH=$STORAGE_PATH" .env; then
         if grep -q "^STORAGE_PATH=" .env; then
-            sed -i '' "s|^STORAGE_PATH=.*|STORAGE_PATH=$STORAGE_PATH|" .env
-            sed -i '' "s|^LANCEDB_PATH=.*|LANCEDB_PATH=$STORAGE_PATH/.lancedb|" .env
+            sed $SED_INPLACE "s|^STORAGE_PATH=.*|STORAGE_PATH=$STORAGE_PATH|" .env
+            sed $SED_INPLACE "s|^LANCEDB_PATH=.*|LANCEDB_PATH=$STORAGE_PATH/.lancedb|" .env
             echo "   Updated STORAGE_PATH to: $STORAGE_PATH"
         fi
     fi
@@ -485,18 +703,106 @@ EOF
             
             # Update token if it changed
             if [ -n "$API_TOKEN_FROM_ENV" ] && ! grep -q "NEXT_PUBLIC_API_TOKEN=$API_TOKEN_FROM_ENV" frontend/.env.local; then
-                sed -i '' "s|^NEXT_PUBLIC_API_TOKEN=.*|NEXT_PUBLIC_API_TOKEN=$API_TOKEN_FROM_ENV|" frontend/.env.local
+                sed $SED_INPLACE "s|^NEXT_PUBLIC_API_TOKEN=.*|NEXT_PUBLIC_API_TOKEN=$API_TOKEN_FROM_ENV|" frontend/.env.local
                 echo "   Updated API token in frontend/.env.local"
             fi
         fi
     else
-        echo "   ⚠️  Node.js not found. Skipping frontend setup."
-        echo "   To install Node.js:"
-        echo "     macOS: brew install node"
-        echo "     Linux: curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt install nodejs"
-        echo ""
-        echo "   After installing Node.js, run:"
-        echo "     cd frontend && npm install"
+        echo "   ⚠️  Node.js not found."
+        
+        # Try to install Node.js automatically
+        if [ "$OS" = "Linux" ]; then
+            echo "   Attempting to install Node.js 20.x..."
+            if command -v apt &> /dev/null; then
+                # Debian/Ubuntu
+                if curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt install -y nodejs; then
+                    echo "   ✅ Node.js installed: $(node --version)"
+                    
+                    # Now install frontend dependencies
+                    if [ ! -d "frontend/node_modules" ]; then
+                        echo "   Installing frontend dependencies..."
+                        cd frontend
+                        npm install --silent
+                        cd ..
+                        echo "   ✅ Frontend dependencies installed"
+                    fi
+                    
+                    # Create frontend .env.local
+                    if [ -f ".env" ]; then
+                        API_TOKEN_FROM_ENV=$(grep "^API_TOKEN=" .env | cut -d'=' -f2)
+                    fi
+                    if [ ! -f "frontend/.env.local" ]; then
+                        cat > frontend/.env.local <<EOF
+# Zettlecast Frontend Configuration
+# Generated: $(date)
+
+NEXT_PUBLIC_API_URL=http://localhost:8000
+NEXT_PUBLIC_API_TOKEN=$API_TOKEN_FROM_ENV
+EOF
+                        echo "   ✅ Created frontend/.env.local with API token"
+                    fi
+                else
+                    echo "   ⚠️  Failed to install Node.js automatically."
+                    echo "   Please install manually and run: cd frontend && npm install"
+                fi
+            else
+                echo "   ⚠️  apt not found. Please install Node.js manually:"
+                echo "     https://nodejs.org/en/download/"
+                echo ""
+                echo "   After installing Node.js, run:"
+                echo "     cd frontend && npm install"
+            fi
+        elif [ "$OS" = "Darwin" ]; then
+            if command -v brew &> /dev/null; then
+                echo "   Attempting to install Node.js via Homebrew..."
+                if brew install node; then
+                    echo "   ✅ Node.js installed: $(node --version)"
+                    
+                    # Now install frontend dependencies
+                    if [ ! -d "frontend/node_modules" ]; then
+                        echo "   Installing frontend dependencies..."
+                        cd frontend
+                        npm install --silent
+                        cd ..
+                        echo "   ✅ Frontend dependencies installed"
+                    fi
+                    
+                    # Create frontend .env.local
+                    if [ -f ".env" ]; then
+                        API_TOKEN_FROM_ENV=$(grep "^API_TOKEN=" .env | cut -d'=' -f2)
+                    fi
+                    if [ ! -f "frontend/.env.local" ]; then
+                        cat > frontend/.env.local <<EOF
+# Zettlecast Frontend Configuration
+# Generated: $(date)
+
+NEXT_PUBLIC_API_URL=http://localhost:8000
+NEXT_PUBLIC_API_TOKEN=$API_TOKEN_FROM_ENV
+EOF
+                        echo "   ✅ Created frontend/.env.local with API token"
+                    fi
+                else
+                    echo "   ⚠️  Failed to install Node.js via Homebrew."
+                    echo "   Please install manually: brew install node"
+                    echo ""
+                    echo "   After installing Node.js, run:"
+                    echo "     cd frontend && npm install"
+                fi
+            else
+                echo "   To install Node.js on macOS:"
+                echo "     1. Install Homebrew: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+                echo "     2. Run: brew install node"
+                echo ""
+                echo "   After installing Node.js, run:"
+                echo "     cd frontend && npm install"
+            fi
+        else
+            echo "   To install Node.js:"
+            echo "     Visit: https://nodejs.org/en/download/"
+            echo ""
+            echo "   After installing Node.js, run:"
+            echo "     cd frontend && npm install"
+        fi
     fi
 else
     echo "   ⚠️  Frontend directory not found. Skipping frontend setup."
@@ -519,7 +825,4 @@ echo ""
 echo "  # Frontend (Terminal 2)"
 echo "  cd frontend && npm run dev"
 echo "  # Open http://localhost:3000"
-echo ""
-echo "Legacy Streamlit UI (optional):"
-echo "  streamlit run src/zettlecast/ui/app.py"
 echo "========================================="

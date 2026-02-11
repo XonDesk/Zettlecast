@@ -8,9 +8,12 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .models import PodcastEpisode, TranscriptionResult
+
+# Progress callback type: (stage, chunk, total, device) -> should_continue
+ProgressCallback = Callable[[str, int, int, str], bool]
 
 logger = logging.getLogger(__name__)
 
@@ -73,14 +76,18 @@ class BaseTranscriber(ABC):
         self,
         audio_path: Path,
         episode: Optional[PodcastEpisode] = None,
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> TranscriptionResult:
         """
         Transcribe an audio file.
-        
+
         Args:
             audio_path: Path to the audio file
             episode: Optional episode metadata
-            
+            progress_callback: Optional callback for progress reporting.
+                Signature: (stage, chunk, total, device) -> bool
+                Return False to request cancellation.
+
         Returns:
             TranscriptionResult with segments and metadata
         """

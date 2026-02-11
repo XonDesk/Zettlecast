@@ -4,12 +4,13 @@ API endpoints for ingestion, search, and note management.
 """
 
 import logging
+import threading
 from pathlib import Path
 from typing import Optional
 
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from .config import settings
@@ -25,6 +26,34 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# --- Cleanup Handlers ---
+import atexit
+import signal
+import sys
+from .podcast.enhancer import TranscriptEnhancer
+
+def cleanup_ollama():
+    """Unload Ollama model on exit."""
+    if settings.llm_provider == "ollama":
+        logger.info("Shutdown: Requesting Ollama model unload...")
+        TranscriptEnhancer.unload_model(
+            settings.ollama_base_url, 
+            settings.ollama_model
+        )
+
+atexit.register(cleanup_ollama)
+
+def signal_handler(sig, frame):
+    """Handle termination signals."""
+    logger.info(f"Received signal {sig}, shutting down...")
+    sys.exit(0)  # This triggers atexit handlers
+
+# Only register invalid signals for the platform? 
+# SIGINT/SIGTERM are standard on Linux/macOS
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+
 # Create FastAPI app
 app = FastAPI(
     title="Zettlecast",
@@ -32,7 +61,7 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# CORS for Streamlit and bookmarklet
+# CORS for frontend and bookmarklet
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Bookmarklet needs this
@@ -155,11 +184,12 @@ async def ingest(
 async def list_notes(
     token: str = Query(...),
     status: Optional[str] = Query(None, description="Filter by status"),
+    source_type: Optional[str] = Query(None, description="Filter by source type"),
     limit: int = Query(50, ge=1, le=2000),
     offset: int = Query(0, ge=0),
 ):
     """List all notes with optional filtering."""
-    notes = db.list_notes(status=status, limit=limit, offset=offset)
+    notes = db.list_notes(status=status, source_type=source_type, limit=limit, offset=offset)
     return {"notes": notes, "count": len(notes)}
 
 
@@ -201,9 +231,106 @@ async def delete_note(
     """Delete a note by UUID."""
     if not db.get_note_by_uuid(uuid):
         raise HTTPException(status_code=404, detail="Note not found")
-    
+
     db.delete_note(uuid)
     return {"status": "deleted", "uuid": uuid}
+
+
+@app.get("/notes/{uuid}/source")
+async def get_note_source_file(
+    uuid: str,
+    token: str = Query(...),
+):
+    """Download/view the original source file for a note."""
+    note = db.get_note_by_uuid(uuid)
+
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+
+    source_path = Path(note.source_path)
+
+    # Check if it's a URL
+    if note.source_path.startswith(('http://', 'https://')):
+        return {"url": note.source_path, "type": "url"}
+
+    # Check if file exists
+    if not source_path.exists():
+        raise HTTPException(status_code=404, detail="Source file not found")
+
+    # Determine media type
+    media_type = "application/octet-stream"
+    if note.source_type == "image":
+        ext = source_path.suffix.lower()
+        media_types = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+            ".bmp": "image/bmp",
+        }
+        media_type = media_types.get(ext, "image/png")
+    elif note.source_type == "audio":
+        media_type = "audio/mpeg"
+    elif note.source_type == "pdf":
+        media_type = "application/pdf"
+
+    return FileResponse(
+        source_path,
+        media_type=media_type,
+        filename=source_path.name,
+    )
+
+
+@app.get("/notes/{uuid}/markdown")
+async def get_note_markdown(
+    uuid: str,
+    token: str = Query(...),
+):
+    """Download note as markdown file."""
+    note = db.get_note_by_uuid(uuid)
+
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+
+    # Generate markdown content
+    markdown_lines = [
+        f"# {note.title}",
+        "",
+        f"**UUID**: {note.uuid}",
+        f"**Source**: {note.source_type}",
+        f"**Created**: {note.created_at.isoformat()}",
+        "",
+    ]
+
+    # Add metadata
+    if note.metadata.tags:
+        markdown_lines.append(f"**Tags**: {', '.join(note.metadata.tags)}")
+        markdown_lines.append("")
+
+    # Add source link
+    if note.source_path:
+        if note.source_path.startswith(('http://', 'https://')):
+            markdown_lines.append(f"**Source URL**: [{note.source_path}]({note.source_path})")
+        else:
+            markdown_lines.append(f"**Source File**: `{note.source_path}`")
+        markdown_lines.append("")
+
+    # Add full text
+    markdown_lines.append("---")
+    markdown_lines.append("")
+    markdown_lines.append(note.full_text)
+
+    markdown_content = "\n".join(markdown_lines)
+
+    # Return as downloadable file
+    return Response(
+        content=markdown_content.encode('utf-8'),
+        media_type="text/markdown",
+        headers={
+            "Content-Disposition": f'attachment; filename="{note.uuid[:8]}_{note.title[:30]}.md"'
+        },
+    )
 
 
 # --- Search Endpoints ---
@@ -312,11 +439,12 @@ async def get_podcast_status(token: str = Query(...)):
         from .podcast.queue import TranscriptionQueue
         queue = TranscriptionQueue()
         status = queue.get_status_summary()
-        
-        # Get list of recent items
+
+        # Build items list with queue position for pending items
         items_list = []
-        for item in list(queue.items.values())[-20:]:  # Last 20
-            items_list.append({
+        pending_position = 1
+        for item in queue.items.values():
+            entry = {
                 "job_id": item.episode.id,
                 "podcast_name": item.episode.podcast_name or "Unknown",
                 "episode_title": item.episode.episode_title or "Untitled",
@@ -324,11 +452,16 @@ async def get_podcast_status(token: str = Query(...)):
                 "added_at": item.added_at.isoformat(),
                 "error_message": item.error_message,
                 "attempts": item.attempts,
-            })
-        
-        # Sort by added_at descending
+                "audio_path": item.episode.audio_path,
+            }
+            if item.status == "pending":
+                entry["queue_position"] = pending_position
+                pending_position += 1
+            items_list.append(entry)
+
+        # Sort: pending by queue_position, then rest by added_at descending
         items_list.sort(key=lambda x: x["added_at"], reverse=True)
-        
+
         return {
             "by_status": status["by_status"],
             "total": status["total"],
@@ -430,88 +563,169 @@ async def reset_stuck_podcasts(token: str = Query(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Global processing state
+# Global processing state (read by API threads, written by background thread)
 _processing_state = {
     "is_running": False,
     "current_episode": None,
+    "current_episode_id": None,
+    "current_stage": None,       # chunking|transcribing|diarizing|aligning|enhancing|saving
+    "current_chunk": 0,
+    "total_chunks": 0,
+    "device": None,              # primary device (cuda|cpu)
+    "chunk_device": None,        # actual device for current chunk (may differ on fallback)
     "processed_count": 0,
     "error_count": 0,
     "started_at": None,
+    "episode_started_at": None,
 }
+
+# Thread-safe cancellation mechanism
+_cancel_lock = threading.Lock()
+_cancel_episode_id: str | None = None
+
+
+def _check_cancel(episode_id: str) -> bool:
+    """Check if cancellation has been requested for an episode. Thread-safe."""
+    global _cancel_episode_id
+    with _cancel_lock:
+        if _cancel_episode_id == episode_id:
+            _cancel_episode_id = None
+            return True
+    return False
+
+
+def _clear_episode_state():
+    """Reset per-episode fields in processing state."""
+    _processing_state["current_episode"] = None
+    _processing_state["current_episode_id"] = None
+    _processing_state["current_stage"] = None
+    _processing_state["current_chunk"] = 0
+    _processing_state["total_chunks"] = 0
+    _processing_state["chunk_device"] = None
+    _processing_state["episode_started_at"] = None
 
 
 def _run_transcription_background(limit: int = None, backend: str = None):
     """Background task to run transcription processing."""
-    global _processing_state
-    
+    global _processing_state, _cancel_episode_id
+
     try:
         from .podcast.queue import TranscriptionQueue
         from .podcast.enhancer import TranscriptEnhancer
         from .podcast.formatter import save_result
         from .podcast.transcriber_factory import TranscriberFactory
+        from .podcast.nemo_transcriber import CancellationError
         from datetime import datetime
-        
+
         _processing_state["is_running"] = True
         _processing_state["started_at"] = datetime.utcnow().isoformat()
         _processing_state["processed_count"] = 0
         _processing_state["error_count"] = 0
-        
+
         queue = TranscriptionQueue()
-        
-        # Sync queue first
         queue.sync_with_storage()
-        
-        # Create transcriber
+
         transcriber = TranscriberFactory.create(backend=backend)
         enhancer = TranscriptEnhancer()
-        
+
+        # Detect primary device
+        _processing_state["device"] = getattr(transcriber, "device", "cpu")
+
         processed = 0
-        
+
         while True:
             if limit and processed >= limit:
                 break
-            
+
             item = queue.get_next_pending()
             if not item:
                 break
-            
+
             episode = item.episode
+
+            # Check if this episode was cancelled while pending
+            if _check_cancel(episode.id):
+                logger.info(f"Skipping cancelled episode: {episode.episode_title}")
+                queue.mark_cancelled(episode.id)
+                continue
+
+            # Set per-episode state
             _processing_state["current_episode"] = episode.episode_title
-            
+            _processing_state["current_episode_id"] = episode.id
+            _processing_state["current_stage"] = "chunking"
+            _processing_state["current_chunk"] = 0
+            _processing_state["total_chunks"] = 0
+            _processing_state["chunk_device"] = None
+            _processing_state["episode_started_at"] = datetime.utcnow().isoformat()
+
             queue.mark_started(episode.id)
-            
+
+            # Progress callback closure — updates state and checks cancellation
+            def progress_callback(stage: str, chunk: int, total: int, device: str) -> bool:
+                _processing_state["current_stage"] = stage
+                _processing_state["current_chunk"] = chunk
+                _processing_state["total_chunks"] = total
+                _processing_state["chunk_device"] = device
+                with _cancel_lock:
+                    if _cancel_episode_id == episode.id:
+                        return False  # Request cancellation
+                return True  # Continue
+
             try:
-                # Transcribe
+                # Transcribe with progress callback
                 from pathlib import Path as P
                 result = transcriber.transcribe(
                     P(episode.audio_path),
                     episode=episode,
+                    progress_callback=progress_callback,
                 )
-                
+
+                # Check cancellation before enhancement
+                if _check_cancel(episode.id):
+                    logger.info(f"Cancelled after transcription: {episode.episode_title}")
+                    queue.mark_cancelled(episode.id)
+                    continue
+
                 # Enhance
+                _processing_state["current_stage"] = "enhancing"
                 enhanced = enhancer.enhance(result.full_text)
                 result.keywords = enhanced.get("keywords", [])
                 result.sections = enhanced.get("sections", [])
-                
+                result.summary = enhanced.get("summary", "")
+                result.key_points = enhanced.get("key_points", [])
+
+                # Check cancellation before saving
+                if _check_cancel(episode.id):
+                    logger.info(f"Cancelled after enhancement: {episode.episode_title}")
+                    queue.mark_cancelled(episode.id)
+                    continue
+
                 # Save
+                _processing_state["current_stage"] = "saving"
                 output_path = save_result(result, episode, enhanced)
                 queue.mark_completed(episode.id, result, output_path)
-                
+
                 processed += 1
                 _processing_state["processed_count"] = processed
-                
+
+            except CancellationError:
+                logger.info(f"Episode cancelled mid-transcription: {episode.episode_title}")
+                with _cancel_lock:
+                    _cancel_episode_id = None
+                queue.mark_cancelled(episode.id)
+
             except Exception as e:
                 logger.error(f"Failed to transcribe {episode.id}: {e}")
                 queue.mark_failed(episode.id, str(e), max_retries=3)
                 _processing_state["error_count"] += 1
-        
-        _processing_state["current_episode"] = None
-        
+
+        _clear_episode_state()
+
     except Exception as e:
         logger.error(f"Background transcription error: {e}")
     finally:
         _processing_state["is_running"] = False
-        _processing_state["current_episode"] = None
+        _clear_episode_state()
 
 
 class PodcastRunRequest(BaseModel):
@@ -573,10 +787,57 @@ async def get_podcast_running_status(token: str = Query(...)):
     return {
         "is_running": _processing_state["is_running"],
         "current_episode": _processing_state["current_episode"],
+        "current_episode_id": _processing_state["current_episode_id"],
+        "current_stage": _processing_state["current_stage"],
+        "current_chunk": _processing_state["current_chunk"],
+        "total_chunks": _processing_state["total_chunks"],
+        "device": _processing_state["device"],
+        "chunk_device": _processing_state["chunk_device"],
         "processed_count": _processing_state["processed_count"],
         "error_count": _processing_state["error_count"],
         "started_at": _processing_state["started_at"],
+        "episode_started_at": _processing_state["episode_started_at"],
     }
+
+
+@app.post("/podcast/cancel/{episode_id}")
+async def cancel_podcast_episode(episode_id: str, token: str = Query(...)):
+    """Cancel a specific episode - remove from pending or stop current processing."""
+    global _cancel_episode_id
+
+    try:
+        from .podcast.queue import TranscriptionQueue
+        queue = TranscriptionQueue()
+
+        # Check if this is the currently-processing episode
+        if _processing_state.get("current_episode_id") == episode_id:
+            with _cancel_lock:
+                _cancel_episode_id = episode_id
+            return {
+                "status": "cancelling",
+                "message": "Cancellation requested. Will take effect at next chunk boundary.",
+            }
+
+        # Otherwise, check if it's pending in queue
+        if episode_id in queue.items:
+            item = queue.items[episode_id]
+            if item.status == "pending":
+                queue.mark_cancelled(episode_id)
+                return {
+                    "status": "cancelled",
+                    "message": f"Removed pending episode: {item.episode.episode_title}",
+                }
+            else:
+                return {
+                    "status": "not_cancellable",
+                    "message": f"Episode is in '{item.status}' state and cannot be cancelled",
+                }
+
+        return {"status": "not_found", "message": "Episode not found in queue"}
+
+    except Exception as e:
+        logger.error(f"Failed to cancel episode: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # --- Settings ---
@@ -692,6 +953,316 @@ async def update_settings_endpoint(
         }
     else:
         raise HTTPException(status_code=500, detail="Failed to update .env file")
+
+
+# --- Image Processing Endpoints ---
+
+@app.get("/image/status")
+async def get_image_status(token: str = Query(...)):
+    """Get image queue status summary."""
+    try:
+        from .image.queue import ImageQueue
+        queue = ImageQueue()
+        status = queue.get_status_summary()
+
+        # Get list of recent items
+        items_list = []
+        for item in list(queue.items.values())[-20:]:  # Last 20
+            items_list.append({
+                "job_id": item.image.id,
+                "image_title": item.image.image_title or "Untitled",
+                "collection_name": item.image.collection_name or "None",
+                "status": item.status,
+                "added_at": item.added_at.isoformat(),
+                "error_message": item.error_message,
+                "attempts": item.attempts,
+                "megapixels": item.image.megapixels,
+                "image_path": item.image.image_path,
+            })
+
+        # Sort by added_at descending
+        items_list.sort(key=lambda x: x["added_at"], reverse=True)
+
+        return {
+            "by_status": status["by_status"],
+            "total": status["total"],
+            "estimated_remaining": status["estimated_remaining"],
+            "items": items_list,
+        }
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Image module not installed")
+    except Exception as e:
+        logger.error(f"Failed to get image status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class ImageScanRequest(BaseModel):
+    path: str
+    recursive: bool = True
+    extensions: list[str] = ["png", "jpg", "jpeg", "gif", "webp", "bmp"]
+
+
+@app.post("/image/scan")
+async def scan_images(
+    body: ImageScanRequest,
+    token: str = Query(...),
+):
+    """Scan directory to preview images without adding to queue."""
+    try:
+        from pathlib import Path as P
+
+        path = P(body.path)
+
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="Path not found")
+
+        if not path.is_dir():
+            raise HTTPException(status_code=400, detail="Path must be a directory")
+
+        # Scan for images
+        found_images = []
+        pattern = "**/*" if body.recursive else "*"
+
+        for ext in body.extensions:
+            for image_file in path.glob(f"{pattern}.{ext}"):
+                if image_file.is_file():
+                    found_images.append({
+                        "path": str(image_file),
+                        "name": image_file.name,
+                        "size_mb": round(image_file.stat().st_size / (1024 * 1024), 2),
+                    })
+
+        # Sort by name
+        found_images.sort(key=lambda x: x["name"])
+
+        return {
+            "status": "success",
+            "path": str(path),
+            "total_count": len(found_images),
+            "images": found_images[:100],  # Limit preview to 100
+            "has_more": len(found_images) > 100,
+        }
+    except Exception as e:
+        logger.error(f"Failed to scan directory: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class ImageAddRequest(BaseModel):
+    path: str
+    collection_name: Optional[str] = None
+    recursive: bool = True
+    extensions: list[str] = ["png", "jpg", "jpeg", "gif", "webp", "bmp"]
+
+
+@app.post("/image/add")
+async def add_images(
+    body: ImageAddRequest,
+    token: str = Query(...),
+):
+    """Add image(s) to processing queue."""
+    try:
+        from .image.queue import ImageQueue, DuplicateImageError
+        from pathlib import Path as P
+
+        queue = ImageQueue()
+        path = P(body.path)
+
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="Path not found")
+
+        job_ids = []
+
+        if path.is_file():
+            # Single image
+            try:
+                job_id = queue.add(path, collection_name=body.collection_name)
+                job_ids.append(job_id)
+            except DuplicateImageError as e:
+                return {
+                    "status": "duplicate",
+                    "message": str(e),
+                    "added_count": 0,
+                }
+        else:
+            # Directory
+            job_ids = queue.add_directory(
+                path,
+                collection_name=body.collection_name,
+                recursive=body.recursive,
+                extensions=body.extensions,
+            )
+
+        return {
+            "status": "success",
+            "added_count": len(job_ids),
+            "job_ids": job_ids,
+            "message": f"Added {len(job_ids)} image(s) to queue",
+        }
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Image module not installed")
+    except Exception as e:
+        logger.error(f"Failed to add images: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/image/retry")
+async def retry_failed_images(token: str = Query(...)):
+    """Retry all failed images."""
+    try:
+        from .image.queue import ImageQueue
+        queue = ImageQueue()
+
+        count = queue.retry_failed()
+
+        return {
+            "status": "success",
+            "retried_count": count,
+            "message": f"Reset {count} failed items to pending",
+        }
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Image module not installed")
+    except Exception as e:
+        logger.error(f"Failed to retry: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Global image processing state
+_image_processing_state = {
+    "is_running": False,
+    "current_image": None,
+    "processed_count": 0,
+    "error_count": 0,
+    "started_at": None,
+}
+
+
+def _run_image_processing_background(limit: int = None, model: str = None):
+    """Background task to run image processing."""
+    global _image_processing_state
+
+    try:
+        from .image.queue import ImageQueue
+        from .image.image_parser import parse_image
+        from datetime import datetime
+        from pathlib import Path as P
+        import time
+
+        _image_processing_state["is_running"] = True
+        _image_processing_state["started_at"] = datetime.utcnow().isoformat()
+        _image_processing_state["processed_count"] = 0
+        _image_processing_state["error_count"] = 0
+
+        queue = ImageQueue()
+        processed = 0
+
+        while True:
+            if limit and processed >= limit:
+                break
+
+            item = queue.get_next_pending()
+            if not item:
+                break
+
+            image = item.image
+            _image_processing_state["current_image"] = image.image_title
+
+            queue.mark_started(image.id)
+            start_time = time.time()
+
+            try:
+                # Parse image
+                result = parse_image(P(image.image_path))
+
+                if result.status == "success" and result.note:
+                    # Save to database
+                    db.upsert_note(result.note)
+
+                    processing_time = time.time() - start_time
+                    queue.mark_completed(image.id, processing_time)
+
+                    processed += 1
+                    _image_processing_state["processed_count"] = processed
+                else:
+                    queue.mark_failed(image.id, result.error_message or "Unknown error")
+                    _image_processing_state["error_count"] += 1
+
+            except Exception as e:
+                logger.error(f"Failed to process image {image.id}: {e}")
+                queue.mark_failed(image.id, str(e))
+                _image_processing_state["error_count"] += 1
+
+        _image_processing_state["current_image"] = None
+
+    except Exception as e:
+        logger.error(f"Background image processing error: {e}")
+    finally:
+        _image_processing_state["is_running"] = False
+        _image_processing_state["current_image"] = None
+
+
+class ImageRunRequest(BaseModel):
+    limit: int = 5
+    model: Optional[str] = None
+
+
+@app.post("/image/run")
+async def run_image_processing(
+    body: ImageRunRequest,
+    background_tasks: BackgroundTasks,
+    token: str = Query(...),
+):
+    """Start image processing in the background."""
+    global _image_processing_state
+
+    if _image_processing_state["is_running"]:
+        return {
+            "status": "already_running",
+            "current_image": _image_processing_state["current_image"],
+            "processed_count": _image_processing_state["processed_count"],
+            "message": "Image processing is already running",
+        }
+
+    try:
+        from .image.queue import ImageQueue
+        queue = ImageQueue()
+        pending = queue.get_pending_count()
+
+        if pending == 0:
+            return {
+                "status": "no_pending",
+                "message": "No pending images to process",
+            }
+
+        # Start background task
+        background_tasks.add_task(
+            _run_image_processing_background,
+            limit=body.limit,
+            model=body.model,
+        )
+
+        return {
+            "status": "started",
+            "pending_count": pending,
+            "limit": body.limit,
+            "message": f"Started processing up to {body.limit} images",
+        }
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Image module not installed")
+    except Exception as e:
+        logger.error(f"Failed to start processing: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/image/running")
+async def get_image_running_status(token: str = Query(...)):
+    """Get the current running status of image processing."""
+    return {
+        "is_running": _image_processing_state["is_running"],
+        "current_image": _image_processing_state["current_image"],
+        "processed_count": _image_processing_state["processed_count"],
+        "error_count": _image_processing_state["error_count"],
+        "started_at": _image_processing_state["started_at"],
+    }
 
 
 # --- Startup ---

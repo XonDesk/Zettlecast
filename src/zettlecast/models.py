@@ -41,7 +41,7 @@ class NoteModel(BaseModel):
 
     uuid: str = Field(default_factory=lambda: str(uuid4()))
     title: str
-    source_type: str = Field(description="pdf | web | audio | markdown | rss")
+    source_type: str = Field(description="pdf | web | audio | markdown | rss | image")
     source_path: str = Field(description="Original file path or URL")
     full_text: str = Field(description="Complete extracted text")
     chunks: List[ChunkModel] = Field(default_factory=list)

@@ -9,6 +9,7 @@ import { api } from '@/lib/api';
 const navItems = [
     { href: '/notes', label: '📚 Notes', icon: '📚' },
     { href: '/podcasts', label: '🎙️ Podcasts', icon: '🎙️' },
+    { href: '/images', label: '🖼️ Images', icon: '🖼️' },
     { href: '/search', label: '🔍 Search', icon: '🔍' },
     { href: '/graph', label: '📊 Graph', icon: '📊' },
     { href: '/settings', label: '⚙️ Settings', icon: '⚙️' },

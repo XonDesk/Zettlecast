@@ -245,14 +245,20 @@ class Database:
     def list_notes(
         self,
         status: Optional[str] = None,
+        source_type: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
     ) -> List[dict]:
-        """List notes with optional status filter."""
+        """List notes with optional status and source_type filter."""
         query = self.notes.search()
-        
+
+        conditions = []
         if status:
-            query = query.where(f"status = '{status}'")
+            conditions.append(f"status = '{status}'")
+        if source_type:
+            conditions.append(f"source_type = '{source_type}'")
+        if conditions:
+            query = query.where(" AND ".join(conditions))
         
         results = query.limit(limit + offset).to_list()
         

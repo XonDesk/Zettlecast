@@ -65,6 +65,7 @@ class PodcastTranscriber:
         audio_path: Path,
         episode: Optional[PodcastEpisode] = None,
         enable_diarization: bool = False,  # Disabled by default for stability
+        progress_callback=None,
     ) -> TranscriptionResult:
         """
         Transcribe a podcast episode.

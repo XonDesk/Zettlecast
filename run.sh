@@ -48,7 +48,7 @@ for i in {1..30}; do
     sleep 1
 done
 
-# Start Next.js frontend (or Streamlit as fallback)
+# Start Next.js frontend
 if [ -d "frontend" ] && [ -f "frontend/.env.local" ]; then
     echo "Starting Next.js frontend on port 3000..."
     cd frontend
@@ -69,23 +69,20 @@ if [ -d "frontend" ] && [ -f "frontend/.env.local" ]; then
     # Handle shutdown
     trap "echo 'Shutting down...'; kill $API_PID $FRONTEND_PID 2>/dev/null; exit" SIGINT SIGTERM
 else
-    # Fallback to Streamlit
-    echo "Starting Streamlit UI on port ${UI_PORT:-8501}..."
-    streamlit run src/zettlecast/ui/app.py --server.port ${UI_PORT:-8501} --server.headless true > logs/ui.log 2>&1 &
-    UI_PID=$!
-    
-    sleep 2
-    
     echo ""
-    echo "✅ Zettlecast running!"
+    echo "⚠️  Frontend not configured. Please run ./setup.sh first."
+    echo ""
+    echo "✅ API only running!"
     echo "   API: http://localhost:${API_PORT:-8000}"
-    echo "   UI:  http://localhost:${UI_PORT:-8501}"
+    echo ""
+    echo "To set up the frontend:"
+    echo "  cd frontend && npm install"
     echo ""
     echo "Logs are in ./logs/"
     echo "Press Ctrl+C to stop"
     
     # Handle shutdown
-    trap "echo 'Shutting down...'; kill $API_PID $UI_PID 2>/dev/null; exit" SIGINT SIGTERM
+    trap "echo 'Shutting down...'; kill $API_PID 2>/dev/null; exit" SIGINT SIGTERM
 fi
 
 # Wait

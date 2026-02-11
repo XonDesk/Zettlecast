@@ -32,7 +32,7 @@ def compute_content_hash(content: str) -> str:
 def parse_frontmatter(content: str) -> Tuple[dict, str]:
     """
     Parse YAML frontmatter from markdown content.
-    
+
     Returns:
         Tuple of (frontmatter dict, body content)
     """
@@ -41,6 +41,12 @@ def parse_frontmatter(content: str) -> Tuple[dict, str]:
         try:
             frontmatter = yaml.safe_load(match.group(1)) or {}
             body = content[match.end():]
+
+            # Normalize uuid field to string if present
+            # (YAML auto-types numeric values like "12345" as int)
+            if "uuid" in frontmatter and not isinstance(frontmatter["uuid"], str):
+                frontmatter["uuid"] = str(frontmatter["uuid"])
+
             return frontmatter, body
         except yaml.YAMLError:
             # Malformed YAML, return empty frontmatter

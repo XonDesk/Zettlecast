@@ -77,6 +77,7 @@ class MLXWhisperTranscriber(BaseTranscriber, DiarizationMixin):
         self,
         audio_path: Path,
         episode: Optional[PodcastEpisode] = None,
+        progress_callback=None,
     ) -> TranscriptionResult:
         """
         Transcribe audio using mlx-whisper with optional diarization.

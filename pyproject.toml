@@ -35,10 +35,6 @@ dependencies = [
     # Audio Transcription
     "faster-whisper>=1.1.0",
     
-    # UI
-    "streamlit>=1.40.0",
-    "st-link-analysis>=0.1.0",
-    
     # Utilities
     "python-multipart>=0.0.17",
     "pyyaml>=6.0.0",
@@ -82,6 +78,7 @@ nemo = [
     "nemo_toolkit[asr]>=2.0.0",
     "omegaconf>=2.3.0",
     "whisperx>=3.1.0",
+    "cuda-python>=12.3,<13.0",  # NeMo requires v12 API (v13 has breaking changes)
 ]
 
 

@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     # --- Audio Transcription ---
     whisper_model: str = "large-v3-turbo"  # Fastest 2026 options: large-v3-turbo, distil-large-v3
     whisper_device: str = "auto"  # auto, cuda, cpu, mps
-    hf_token: str = ""  # HuggingFace token for pyannote diarization
+    hf_token: str = Field(default="", validation_alias="HF_TOKEN")  # Allow loading from env var
     podcast_max_retries: int = 3
 
     # --- ASR Backend Selection ---
@@ -100,6 +100,11 @@ class Settings(BaseSettings):
     pdf_parser_timeout: int = 60  # seconds
     use_marker_fallback: bool = True
     use_docling_fallback: bool = False  # Heavy, disabled by default
+
+    # --- Image Processing ---
+    vision_model: str = "qwen2.5-vl:7b"  # Qwen2.5-VL model (superior OCR vs LLaVA)
+    max_image_size_mb: int = 25  # Max file size
+    image_max_retries: int = 3  # Queue retry attempts
 
     def ensure_directories(self) -> None:
         """Create storage directories if they don't exist."""

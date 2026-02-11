@@ -43,9 +43,10 @@ async function fetchAPI<T>(
 
 export const api = {
     // Notes
-    listNotes: async (params?: { status?: string; limit?: number; offset?: number }) => {
+    listNotes: async (params?: { status?: string; source_type?: string; limit?: number; offset?: number }) => {
         const searchParams = new URLSearchParams();
         if (params?.status) searchParams.set('status', params.status);
+        if (params?.source_type) searchParams.set('source_type', params.source_type);
         if (params?.limit) searchParams.set('limit', String(params.limit));
         if (params?.offset) searchParams.set('offset', String(params.offset));
 
@@ -64,6 +65,18 @@ export const api = {
         fetchAPI<{ status: string; uuid: string }>(`/notes/${uuid}`, {
             method: 'DELETE',
         }),
+
+    getNoteSourceUrl: (uuid: string) => {
+        const url = new URL(`/notes/${uuid}/source`, API_URL);
+        url.searchParams.set('token', API_TOKEN);
+        return url.toString();
+    },
+
+    getNoteMarkdownUrl: (uuid: string) => {
+        const url = new URL(`/notes/${uuid}/markdown`, API_URL);
+        url.searchParams.set('token', API_TOKEN);
+        return url.toString();
+    },
 
     // Search
     search: (query: string, topK = 5, rerank = true) =>
@@ -92,7 +105,7 @@ export const api = {
     // Podcast
     getPodcastStatus: () =>
         fetchAPI<{
-            by_status: { pending: number; processing: number; completed: number; review: number; failed: number };
+            by_status: { pending: number; processing: number; completed: number; review: number; failed: number; cancelled?: number };
             total: number;
             estimated_remaining: string;
             items: Array<{
@@ -103,6 +116,7 @@ export const api = {
                 added_at: string;
                 error_message: string | null;
                 attempts: number;
+                queue_position?: number;
             }>;
         }>('/podcast/status'),
 
@@ -137,10 +151,84 @@ export const api = {
         fetchAPI<{
             is_running: boolean;
             current_episode: string | null;
+            current_episode_id: string | null;
+            current_stage: string | null;
+            current_chunk: number;
+            total_chunks: number;
+            device: string | null;
+            chunk_device: string | null;
             processed_count: number;
             error_count: number;
             started_at: string | null;
+            episode_started_at: string | null;
         }>('/podcast/running'),
+
+    cancelPodcastEpisode: (episodeId: string) =>
+        fetchAPI<{ status: string; message: string }>(`/podcast/cancel/${episodeId}`, {
+            method: 'POST',
+        }),
+
+    // Image Processing
+    getImageStatus: () =>
+        fetchAPI<{
+            by_status: { pending: number; processing: number; completed: number; review: number; failed: number };
+            total: number;
+            estimated_remaining: string;
+            items: Array<{
+                job_id: string;
+                image_title: string;
+                collection_name: string;
+                status: string;
+                added_at: string;
+                error_message: string | null;
+                attempts: number;
+                megapixels: number | null;
+                image_path: string;
+            }>;
+        }>('/image/status'),
+
+    scanImages: (path: string, recursive: boolean = true, extensions: string[] = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp']) =>
+        fetchAPI<{
+            status: string;
+            path: string;
+            total_count: number;
+            images: Array<{ path: string; name: string; size_mb: number }>;
+            has_more: boolean;
+        }>('/image/scan', {
+            method: 'POST',
+            body: JSON.stringify({ path, recursive, extensions }),
+        }),
+
+    addImages: (
+        path: string,
+        collectionName?: string,
+        recursive: boolean = true,
+        extensions: string[] = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp']
+    ) =>
+        fetchAPI<{ status: string; added_count: number; job_ids: string[]; message: string }>('/image/add', {
+            method: 'POST',
+            body: JSON.stringify({ path, collection_name: collectionName, recursive, extensions }),
+        }),
+
+    retryFailedImages: () =>
+        fetchAPI<{ status: string; retried_count: number; message: string }>('/image/retry', {
+            method: 'POST',
+        }),
+
+    runImages: (limit: number = 5, model?: string) =>
+        fetchAPI<{ status: string; pending_count?: number; limit?: number; message: string }>('/image/run', {
+            method: 'POST',
+            body: JSON.stringify({ limit, model }),
+        }),
+
+    getImageRunningStatus: () =>
+        fetchAPI<{
+            is_running: boolean;
+            current_image: string | null;
+            processed_count: number;
+            error_count: number;
+            started_at: string | null;
+        }>('/image/running'),
 
     // Settings
     getSettings: () => fetchAPI<Settings>('/settings'),

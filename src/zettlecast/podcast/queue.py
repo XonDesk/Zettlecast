@@ -428,6 +428,15 @@ class TranscriptionQueue:
         
         return count
 
+    def mark_cancelled(self, job_id: str):
+        """Mark a job as cancelled. It will not be retried."""
+        if job_id in self.items:
+            item = self.items[job_id]
+            item.status = "cancelled"
+            item.error_message = "Cancelled by user"
+            self._save_state()
+            logger.info(f"Cancelled: {item.episode.episode_title}")
+
     def get_status_summary(self) -> dict:
         """Get summary of queue status."""
         status_counts = {
@@ -436,6 +445,7 @@ class TranscriptionQueue:
             "completed": 0,
             "failed": 0,
             "review": 0,
+            "cancelled": 0,
         }
 
         for item in self.items.values():

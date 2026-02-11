@@ -13,6 +13,8 @@ from zettlecast.podcast.aligner import (
     parse_rttm,
     assign_speakers_to_words,
     group_words_by_speaker,
+    merge_micro_segments,
+    merge_similar_speakers,
     align_transcription_with_diarization,
     parse_pyannote_annotation,
     align_with_pyannote,
@@ -229,7 +231,117 @@ class TestAlignWithPyannote:
         ]
         
         segments = align_with_pyannote(words, mock_annotation)
-        
+
         assert len(segments) == 2
         assert segments[0].speaker == "SPEAKER_00"
         assert segments[1].speaker == "SPEAKER_01"
+
+
+class TestMergeSimilarSpeakers:
+    """Tests for minor speaker merge post-processing."""
+
+    def _make_word(self, text, start, end, speaker):
+        w = Word(text, start, end)
+        w.speaker = speaker
+        return w
+
+    def _make_segment(self, speaker, words_data):
+        """Create a TranscriptSegment from list of (text, start, end) tuples."""
+        words = [self._make_word(text, start, end, speaker) for text, start, end in words_data]
+        return TranscriptSegment(speaker, words, words[0].start, words[-1].end)
+
+    def test_no_merge_when_all_speakers_significant(self):
+        """Should not merge when all speakers have sufficient segments and time."""
+        segments = [
+            self._make_segment("A", [("hello", 0, 10), ("there", 10, 20)]),
+            self._make_segment("B", [("hi", 20, 30), ("back", 30, 40)]),
+            self._make_segment("A", [("yes", 40, 50)]),
+            self._make_segment("B", [("ok", 50, 60)]),
+            self._make_segment("A", [("great", 60, 70)]),
+            self._make_segment("B", [("sure", 70, 80)]),
+        ]
+        result = merge_similar_speakers(segments)
+        speakers = set(seg.speaker for seg in result)
+        assert speakers == {"A", "B"}
+
+    def test_merges_minor_speaker_by_segment_count(self):
+        """Should merge a speaker with fewer than min_speaker_segments."""
+        # speaker C has only 1 segment (intro monologue), A and B have many
+        segments = [
+            self._make_segment("C", [("welcome", 0, 5), ("to", 5, 8), ("the", 8, 10)]),
+            self._make_segment("A", [("hello", 15, 25)]),
+            self._make_segment("B", [("hi", 25, 35)]),
+            self._make_segment("A", [("great", 35, 45)]),
+            self._make_segment("B", [("yes", 45, 55)]),
+            self._make_segment("A", [("thanks", 55, 65)]),
+            self._make_segment("B", [("bye", 65, 75)]),
+        ]
+        result = merge_similar_speakers(segments)
+        speakers = set(seg.speaker for seg in result)
+        assert len(speakers) == 2
+        assert "C" not in speakers
+
+    def test_merge_target_is_temporally_adjacent(self):
+        """Should merge minor speaker into the nearest dominant speaker."""
+        # C appears at 0-10s, A starts at 15s, B starts at 100s
+        # C should merge into A (temporally closer)
+        segments = [
+            self._make_segment("C", [("intro", 0, 10)]),
+            self._make_segment("A", [("hello", 15, 25)]),
+            self._make_segment("B", [("hi", 100, 110)]),
+            self._make_segment("A", [("great", 25, 35)]),
+            self._make_segment("B", [("yes", 110, 120)]),
+            self._make_segment("A", [("thanks", 35, 45)]),
+        ]
+        result = merge_similar_speakers(segments)
+        # C should have been merged into A (the first segment should now be A)
+        assert result[0].speaker == "A"
+        assert "intro" in result[0].text
+
+    def test_consecutive_segments_consolidated(self):
+        """After merge, consecutive same-speaker segments should be combined."""
+        # [A] [C] [A] where C is minor -> should become single [A]
+        segments = [
+            self._make_segment("A", [("first", 0, 10)]),
+            self._make_segment("C", [("minor", 10, 12)]),
+            self._make_segment("A", [("second", 12, 22)]),
+            self._make_segment("B", [("reply", 22, 32)]),
+            self._make_segment("A", [("third", 32, 42)]),
+            self._make_segment("B", [("end", 42, 52)]),
+        ]
+        result = merge_similar_speakers(segments)
+        # First segment should now contain "first minor second" (all A)
+        assert result[0].speaker == "A"
+        assert "first" in result[0].text
+        assert "minor" in result[0].text
+        assert "second" in result[0].text
+
+    def test_preserves_word_speaker_labels(self):
+        """Word objects should have their speaker field updated after merge."""
+        segments = [
+            self._make_segment("C", [("intro", 0, 5)]),
+            self._make_segment("A", [("hello", 10, 20)]),
+            self._make_segment("B", [("hi", 20, 30)]),
+            self._make_segment("A", [("great", 30, 40)]),
+            self._make_segment("B", [("ok", 40, 50)]),
+            self._make_segment("A", [("bye", 50, 60)]),
+        ]
+        result = merge_similar_speakers(segments)
+        # All words in the merged segment should have updated speaker
+        for seg in result:
+            for word in seg.words:
+                assert word.speaker == seg.speaker
+
+    def test_empty_segments_returns_empty(self):
+        """Should handle empty input."""
+        result = merge_similar_speakers([])
+        assert result == []
+
+    def test_single_speaker_returns_unchanged(self):
+        """Should return unchanged when only one speaker."""
+        segments = [
+            self._make_segment("A", [("hello", 0, 5)]),
+            self._make_segment("A", [("world", 5, 10)]),
+        ]
+        result = merge_similar_speakers(segments)
+        assert len(result) == len(segments)

@@ -10,13 +10,15 @@ export default function NotesPage() {
     const [notes, setNotes] = useState<Note[]>([]);
     const [loading, setLoading] = useState(true);
     const [statusFilter, setStatusFilter] = useState<string>('');
+    const [sourceTypeFilter, setSourceTypeFilter] = useState<string>('');
 
     useEffect(() => {
         const fetchNotes = async () => {
             try {
                 setLoading(true);
-                const params: { status?: string; limit: number } = { limit: 100 };
+                const params: { status?: string; source_type?: string; limit: number } = { limit: 100 };
                 if (statusFilter) params.status = statusFilter;
+                if (sourceTypeFilter) params.source_type = sourceTypeFilter;
 
                 const data = await api.listNotes(params);
                 setNotes(data.notes);
@@ -28,7 +30,7 @@ export default function NotesPage() {
         };
 
         fetchNotes();
-    }, [statusFilter]);
+    }, [statusFilter, sourceTypeFilter]);
 
     const getBadgeClass = (status: string) => {
         const classes: Record<string, string> = {
@@ -46,6 +48,7 @@ export default function NotesPage() {
             audio: '🎙️',
             markdown: '📝',
             rss: '📰',
+            image: '🖼️',
         };
         return emojis[type] || '📋';
     };
@@ -53,7 +56,7 @@ export default function NotesPage() {
     return (
         <div>
             <div className="page-header">
-                <h1 className="page-title">📚 Notes</h1>
+                <h1 className="page-title">Notes</h1>
             </div>
 
             <div className="filters-row">
@@ -66,6 +69,19 @@ export default function NotesPage() {
                     <option value="inbox">Inbox</option>
                     <option value="reviewed">Reviewed</option>
                     <option value="archived">Archived</option>
+                </select>
+                <select
+                    className="select"
+                    value={sourceTypeFilter}
+                    onChange={(e) => setSourceTypeFilter(e.target.value)}
+                >
+                    <option value="">All Types</option>
+                    <option value="pdf">PDF</option>
+                    <option value="web">Web</option>
+                    <option value="audio">Audio</option>
+                    <option value="markdown">Markdown</option>
+                    <option value="rss">RSS</option>
+                    <option value="image">Image</option>
                 </select>
                 <span className="text-muted">{notes.length} notes</span>
             </div>
