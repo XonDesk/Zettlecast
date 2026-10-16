@@ -5,7 +5,6 @@ Zettlecast Tests - Identity Module
 import tempfile
 from pathlib import Path
 
-import pytest
 
 from zettlecast.identity import (
     compute_content_hash,

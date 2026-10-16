@@ -2,7 +2,6 @@
 Zettlecast Tests - Chunker Module
 """
 
-import pytest
 
 from zettlecast.chunker import create_chunks, estimate_tokens, recursive_split
 

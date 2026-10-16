@@ -4,7 +4,6 @@ Tests for Aligner Module
 Unit tests for RTTM parsing and word-speaker alignment.
 """
 
-import pytest
 
 from zettlecast.podcast.aligner import (
     Word,
@@ -13,9 +12,7 @@ from zettlecast.podcast.aligner import (
     parse_rttm,
     assign_speakers_to_words,
     group_words_by_speaker,
-    merge_micro_segments,
     merge_similar_speakers,
-    align_transcription_with_diarization,
 )
 
 

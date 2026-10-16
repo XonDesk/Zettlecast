@@ -1,8 +1,6 @@
 
-import pytest
 from unittest.mock import patch, MagicMock
 from zettlecast.parser import parse_url
-from zettlecast.models import ProcessingResult
 
 def test_parse_url_fallback():
     """
@@ -30,7 +28,7 @@ def test_parse_url_fallback():
         mock_get.return_value = mock_response
         
         # Mock trafilatura.extract to return None (simulate failure)
-        with patch("trafilatura.extract", return_value=None) as mock_extract:
+        with patch("trafilatura.extract", return_value=None):
             
             result = parse_url(url)
             
