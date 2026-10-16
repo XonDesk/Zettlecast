@@ -5,7 +5,6 @@ Data structures for image queue management and vision processing results.
 """
 
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, List, Optional
 from uuid import uuid4
 

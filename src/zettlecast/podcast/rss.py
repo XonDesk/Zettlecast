@@ -6,7 +6,7 @@ Fetches podcast feeds and downloads episodes for transcription.
 
 import logging
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional
 from urllib.parse import urlparse
 import re
 
@@ -14,7 +14,6 @@ import feedparser
 import httpx
 from pydantic import BaseModel
 
-from ..config import settings
 
 logger = logging.getLogger(__name__)
 

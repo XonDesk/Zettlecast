@@ -72,3 +72,20 @@ class TestTokenEstimation:
         tokens = estimate_tokens(text)
         
         assert tokens == 100  # 400 / 4
+
+
+class TestTranscriptChunking:
+    def test_turns_kept_whole_and_long_turns_keep_header(self):
+        long_turn = "[100.0s - 400.0s] Jason Koop: " + " ".join(f"Sentence number {i}." for i in range(200))
+        text = (
+            "## Summary\n\nA summary of the episode that is comfortably long enough to be kept as a separate chunk of its own.\n"
+            "\n## Transcript\n\n"
+            "[0.0s - 5.0s] speaker_0: Welcome to the show, everyone, this is the intro.\n"
+            + long_turn
+        )
+        chunks = create_chunks(text, "n")
+        transcript_chunks = [c.text for c in chunks if "Sentence number" in c.text]
+        assert len(transcript_chunks) > 1
+        for c in transcript_chunks:
+            assert "[100.0s] Jason Koop:" in c or "[100.0s - 400.0s] Jason Koop:" in c
+        assert any(c.text.startswith("## Summary") for c in chunks)

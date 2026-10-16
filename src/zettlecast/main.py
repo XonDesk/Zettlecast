@@ -4,7 +4,11 @@ API endpoints for ingestion, search, and note management.
 """
 
 import logging
+import mimetypes
+import re
 import threading
+from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -13,52 +17,38 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
-from .config import settings
+from . import llm
+from .config import ENV_FILE, settings
 from .db import db
 from .models import ProcessingResult
-from .parser import parse_file, parse_url
+from .parser import AUDIO_EXTENSIONS, parse_url
+from .pipeline import ingest_note, ingest_path
 from .search import accept_link, get_suggestions_for_note, reject_link, search
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
+for _noisy in ("nemo_logger", "nemo", "lightning", "pytorch_lightning", "httpx", "sentence_transformers"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# --- Cleanup Handlers ---
-import atexit
-import signal
-import sys
-from .podcast.enhancer import TranscriptEnhancer
 
-def cleanup_ollama():
-    """Unload Ollama model on exit."""
-    if settings.llm_provider == "ollama":
-        logger.info("Shutdown: Requesting Ollama model unload...")
-        TranscriptEnhancer.unload_model(
-            settings.ollama_base_url, 
-            settings.ollama_model
-        )
-
-atexit.register(cleanup_ollama)
-
-def signal_handler(sig, frame):
-    """Handle termination signals."""
-    logger.info(f"Received signal {sig}, shutting down...")
-    sys.exit(0)  # This triggers atexit handlers
-
-# Only register invalid signals for the platform? 
-# SIGINT/SIGTERM are standard on Linux/macOS
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    logger.info("Starting Zettlecast API...")
+    settings.ensure_directories()
+    db.connect()
+    logger.info(f"Storage path: {settings.storage_path}")
+    yield
+    llm.unload()
 
 
-# Create FastAPI app
 app = FastAPI(
     title="Zettlecast",
-    description="Digital Zettelkasten Middleware API",
+    description="Digital Zettelkasten API",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 # CORS for frontend and bookmarklet
@@ -128,54 +118,40 @@ async def ingest(
         raise HTTPException(status_code=400, detail="Provide either url or file")
     
     result: ProcessingResult
-    
+
     if url:
-        # Check for duplicate URL
         existing = db.get_note_by_source_path(url)
         if existing:
-            logger.info(f"URL already ingested: {url}")
             return IngestResponse(
                 status="duplicate",
                 uuid=existing.uuid,
                 title=existing.title,
                 error=f"URL already exists as '{existing.title}'",
             )
-        
-        # Web ingestion
         logger.info(f"Ingesting URL: {url}")
         result = parse_url(url)
+        if result.status == "success" and result.note:
+            ingest_note(result.note)
     else:
-        # File ingestion
-        logger.info(f"Ingesting file: {file.filename}")
-        
-        # Save to temp file
-        import tempfile
-        suffix = Path(file.filename).suffix if file.filename else ""
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            content = await file.read()
-            tmp.write(content)
-            tmp_path = Path(tmp.name)
-        
-        try:
-            result = parse_file(tmp_path)
-        finally:
-            tmp_path.unlink()  # Clean up
-    
-    if result.status == "failed":
-        return IngestResponse(
-            status="failed",
-            error=result.error_message,
+        # Keep uploads so the note's source stays viewable; audio goes to the podcast folder
+        name = re.sub(r"[^\w.\- ]", "_", Path(file.filename or "upload").name)
+        target_dir = (
+            settings.podcasts_path / "Uploads"
+            if Path(name).suffix.lower() in AUDIO_EXTENSIONS
+            else settings.storage_path / "uploads"
         )
-    
-    # Save to database if note was generated
-    if result.note:
-        db.upsert_note(result.note)
-    
-    return IngestResponse(
-        status=result.status,
-        uuid=result.uuid,
-        title=result.title,
-    )
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / name
+        if target.exists():
+            target = target_dir / f"{target.stem}_{datetime.now():%Y%m%d%H%M%S}{target.suffix}"
+        target.write_bytes(await file.read())
+        logger.info(f"Ingesting file: {target}")
+        result = ingest_path(target, podcast_name="Uploads")
+
+    if result.status == "failed":
+        return IngestResponse(status="failed", error=result.error_message)
+
+    return IngestResponse(status=result.status, uuid=result.uuid, title=result.title)
 
 
 # --- Note Endpoints ---
@@ -257,24 +233,7 @@ async def get_note_source_file(
     if not source_path.exists():
         raise HTTPException(status_code=404, detail="Source file not found")
 
-    # Determine media type
-    media_type = "application/octet-stream"
-    if note.source_type == "image":
-        ext = source_path.suffix.lower()
-        media_types = {
-            ".png": "image/png",
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".gif": "image/gif",
-            ".webp": "image/webp",
-            ".bmp": "image/bmp",
-        }
-        media_type = media_types.get(ext, "image/png")
-    elif note.source_type == "audio":
-        media_type = "audio/mpeg"
-    elif note.source_type == "pdf":
-        media_type = "application/pdf"
-
+    media_type = mimetypes.guess_type(source_path.name)[0] or "application/octet-stream"
     return FileResponse(
         source_path,
         media_type=media_type,
@@ -352,7 +311,7 @@ async def search_notes(
     if len(q) < 3:
         raise HTTPException(status_code=400, detail="Query must be at least 3 characters")
     
-    results = search(query=q, top_k=top_k, rerank=rerank)
+    results = search(query=q, top_k=top_k, rerank_results=rerank)
     
     return {
         "query": q,
@@ -400,29 +359,35 @@ async def get_graph_data(
     for react-force-graph-2d.
     """
     notes = db.list_notes(limit=limit)
-    
+    ids = {n["uuid"] for n in notes}
+    links = [
+        {"source": e["source_uuid"], "target": e["target_uuid"], "value": round(float(e["weight"]), 3)}
+        for e in db.get_all_edges()
+        if e["source_uuid"] in ids and e["target_uuid"] in ids
+    ]
+    degree: dict = {}
+    for link in links:
+        for end in (link["source"], link["target"]):
+            degree[end] = degree.get(end, 0) + 1
+
     nodes = [
         {
             "id": n["uuid"],
             "name": n["title"],
             "source_type": n["source_type"],
-            "val": 1,  # node size factor
+            "val": 1 + degree.get(n["uuid"], 0),  # node size: more links, bigger node
         }
         for n in notes
     ]
-    
-    # Get edges from graph_edges table
-    edges = db.get_all_edges()
-    links = [
-        {
-            "source": e["source_uuid"],
-            "target": e["target_uuid"],
-            "value": e["weight"],
-        }
-        for e in edges
-    ]
-    
     return {"nodes": nodes, "links": links}
+
+
+@app.post("/graph/rebuild")
+async def rebuild_graph_endpoint(token: str = Query(...)):
+    """Recompute all graph edges."""
+    from .linker import rebuild_graph
+
+    return {"status": "rebuilt", "edges": rebuild_graph()}
 
 
 # --- Podcast Endpoints ---
@@ -584,16 +549,6 @@ _cancel_lock = threading.Lock()
 _cancel_episode_id: str | None = None
 
 
-def _check_cancel(episode_id: str) -> bool:
-    """Check if cancellation has been requested for an episode. Thread-safe."""
-    global _cancel_episode_id
-    with _cancel_lock:
-        if _cancel_episode_id == episode_id:
-            _cancel_episode_id = None
-            return True
-    return False
-
-
 def _clear_episode_state():
     """Reset per-episode fields in processing state."""
     _processing_state["current_episode"] = None
@@ -605,124 +560,60 @@ def _clear_episode_state():
     _processing_state["episode_started_at"] = None
 
 
-def _run_transcription_background(limit: int = None, backend: str = None):
-    """Background task to run transcription processing."""
-    global _processing_state, _cancel_episode_id
+def _run_transcription_background(limit: int = None):
+    """Background task: run the podcast queue, publishing progress to _processing_state."""
+    global _cancel_episode_id
+    from .pipeline import run_podcast_queue
 
-    try:
-        from .podcast.queue import TranscriptionQueue
-        from .podcast.enhancer import TranscriptEnhancer
-        from .podcast.formatter import save_result
-        from .podcast.transcriber_factory import TranscriberFactory
-        from .podcast.nemo_transcriber import CancellationError
-        from datetime import datetime
+    _processing_state.update(
+        is_running=True,
+        started_at=datetime.utcnow().isoformat(),
+        processed_count=0,
+        error_count=0,
+        device="cuda",
+    )
 
-        _processing_state["is_running"] = True
-        _processing_state["started_at"] = datetime.utcnow().isoformat()
-        _processing_state["processed_count"] = 0
-        _processing_state["error_count"] = 0
+    def on_start(episode_id: str, title: str) -> None:
+        _processing_state.update(
+            current_episode=title,
+            current_episode_id=episode_id,
+            current_stage="chunking",
+            current_chunk=0,
+            total_chunks=0,
+            chunk_device="cuda",
+            episode_started_at=datetime.utcnow().isoformat(),
+        )
 
-        queue = TranscriptionQueue()
-        queue.sync_with_storage()
-
-        transcriber = TranscriberFactory.create(backend=backend)
-        enhancer = TranscriptEnhancer()
-
-        # Detect primary device
-        _processing_state["device"] = getattr(transcriber, "device", "cpu")
-
-        processed = 0
-
-        while True:
-            if limit and processed >= limit:
-                break
-
-            item = queue.get_next_pending()
-            if not item:
-                break
-
-            episode = item.episode
-
-            # Check if this episode was cancelled while pending
-            if _check_cancel(episode.id):
-                logger.info(f"Skipping cancelled episode: {episode.episode_title}")
-                queue.mark_cancelled(episode.id)
-                continue
-
-            # Set per-episode state
-            _processing_state["current_episode"] = episode.episode_title
-            _processing_state["current_episode_id"] = episode.id
-            _processing_state["current_stage"] = "chunking"
-            _processing_state["current_chunk"] = 0
-            _processing_state["total_chunks"] = 0
-            _processing_state["chunk_device"] = None
-            _processing_state["episode_started_at"] = datetime.utcnow().isoformat()
-
-            queue.mark_started(episode.id)
-
-            # Progress callback closure — updates state and checks cancellation
-            def progress_callback(stage: str, chunk: int, total: int, device: str) -> bool:
-                _processing_state["current_stage"] = stage
+    def progress_for(episode_id: str):
+        def callback(stage: str, chunk: int, total: int, device: str) -> bool:
+            _processing_state["current_stage"] = stage
+            if total:
                 _processing_state["current_chunk"] = chunk
                 _processing_state["total_chunks"] = total
-                _processing_state["chunk_device"] = device
-                with _cancel_lock:
-                    if _cancel_episode_id == episode.id:
-                        return False  # Request cancellation
-                return True  # Continue
+            with _cancel_lock:
+                return _cancel_episode_id != episode_id
+        return callback
 
-            try:
-                # Transcribe with progress callback
-                from pathlib import Path as P
-                result = transcriber.transcribe(
-                    P(episode.audio_path),
-                    episode=episode,
-                    progress_callback=progress_callback,
-                )
-
-                # Check cancellation before enhancement
-                if _check_cancel(episode.id):
-                    logger.info(f"Cancelled after transcription: {episode.episode_title}")
-                    queue.mark_cancelled(episode.id)
-                    continue
-
-                # Enhance
-                _processing_state["current_stage"] = "enhancing"
-                enhanced = enhancer.enhance(result.full_text)
-                result.keywords = enhanced.get("keywords", [])
-                result.sections = enhanced.get("sections", [])
-                result.summary = enhanced.get("summary", "")
-                result.key_points = enhanced.get("key_points", [])
-
-                # Check cancellation before saving
-                if _check_cancel(episode.id):
-                    logger.info(f"Cancelled after enhancement: {episode.episode_title}")
-                    queue.mark_cancelled(episode.id)
-                    continue
-
-                # Save
-                _processing_state["current_stage"] = "saving"
-                output_path = save_result(result, episode, enhanced)
-                queue.mark_completed(episode.id, result, output_path)
-
-                processed += 1
-                _processing_state["processed_count"] = processed
-
-            except CancellationError:
-                logger.info(f"Episode cancelled mid-transcription: {episode.episode_title}")
-                with _cancel_lock:
-                    _cancel_episode_id = None
-                queue.mark_cancelled(episode.id)
-
-            except Exception as e:
-                logger.error(f"Failed to transcribe {episode.id}: {e}")
-                queue.mark_failed(episode.id, str(e), max_retries=3)
-                _processing_state["error_count"] += 1
-
+    def on_done(outcome) -> None:
+        global _cancel_episode_id
+        if outcome.status == "completed":
+            _processing_state["processed_count"] += 1
+        elif outcome.status == "failed":
+            _processing_state["error_count"] += 1
+        else:
+            with _cancel_lock:
+                _cancel_episode_id = None
         _clear_episode_state()
 
+    try:
+        run_podcast_queue(
+            limit=limit,
+            on_episode_start=on_start,
+            on_episode_done=on_done,
+            progress_for=progress_for,
+        )
     except Exception as e:
-        logger.error(f"Background transcription error: {e}")
+        logger.exception(f"Background transcription error: {e}")
     finally:
         _processing_state["is_running"] = False
         _clear_episode_state()
@@ -730,7 +621,6 @@ def _run_transcription_background(limit: int = None, backend: str = None):
 
 class PodcastRunRequest(BaseModel):
     limit: int = 5
-    backend: Optional[str] = None
 
 
 @app.post("/podcast/run")
@@ -765,7 +655,6 @@ async def run_podcast_processing(
         background_tasks.add_task(
             _run_transcription_background,
             limit=body.limit,
-            backend=body.backend,
         )
         
         return {
@@ -842,92 +731,60 @@ async def cancel_podcast_episode(episode_id: str, token: str = Query(...)):
 
 # --- Settings ---
 
+# Settings editable from the UI -> .env variable names
+EDITABLE_SETTINGS = {
+    "embedding_model": "EMBEDDING_MODEL",
+    "reranker_model": "RERANKER_MODEL",
+    "ollama_model": "OLLAMA_MODEL",
+    "vision_model": "VISION_MODEL",
+    "nemo_parakeet_model": "NEMO_PARAKEET_MODEL",
+    "nemo_diarization_model": "NEMO_DIARIZATION_MODEL",
+    "enable_auto_tagging": "ENABLE_AUTO_TAGGING",
+    "chunk_size": "CHUNK_SIZE",
+    "storage_path": "STORAGE_PATH",
+    "hf_token": "HF_TOKEN",
+}
+
+
 class SettingsUpdate(BaseModel):
     """Settings that can be updated via the API."""
     embedding_model: Optional[str] = None
     reranker_model: Optional[str] = None
-    whisper_model: Optional[str] = None
-    llm_provider: Optional[str] = None
     ollama_model: Optional[str] = None
-    enable_context_enrichment: Optional[bool] = None
+    vision_model: Optional[str] = None
+    nemo_parakeet_model: Optional[str] = None
+    nemo_diarization_model: Optional[str] = None
+    enable_auto_tagging: Optional[bool] = None
     chunk_size: Optional[int] = None
     storage_path: Optional[str] = None
-    asr_backend: Optional[str] = None
     hf_token: Optional[str] = None
 
 
-def update_env_file(updates: dict) -> bool:
-    """Update .env file with new values."""
-    env_path = Path(".env")
-    
-    if not env_path.exists():
-        logger.warning(".env file not found")
-        return False
-    
-    # Read current content
-    lines = env_path.read_text().splitlines()
-    
-    # Map of python setting names to env var names
-    setting_to_env = {
-        "embedding_model": "EMBEDDING_MODEL",
-        "reranker_model": "RERANKER_MODEL",
-        "whisper_model": "WHISPER_MODEL",
-        "llm_provider": "LLM_PROVIDER",
-        "ollama_model": "OLLAMA_MODEL",
-        "enable_context_enrichment": "ENABLE_CONTEXT_ENRICHMENT",
-        "chunk_size": "CHUNK_SIZE",
-        "storage_path": "STORAGE_PATH",
-        "asr_backend": "ASR_BACKEND",
-        "hf_token": "HF_TOKEN",
+def update_env_file(updates: dict) -> None:
+    """Write updated values into .env, replacing existing lines or appending."""
+    lines = ENV_FILE.read_text(encoding="utf-8").splitlines() if ENV_FILE.exists() else []
+    pending = {
+        EDITABLE_SETTINGS[k]: (str(v).lower() if isinstance(v, bool) else str(v))
+        for k, v in updates.items()
     }
-    
-    updated_keys = set()
-    new_lines = []
-    
+    out = []
     for line in lines:
-        modified = False
-        for setting_name, env_name in setting_to_env.items():
-            if setting_name in updates and updates[setting_name] is not None:
-                if line.startswith(f"{env_name}=") or line.startswith(f"# {env_name}="):
-                    value = updates[setting_name]
-                    # Convert bool to lowercase string
-                    if isinstance(value, bool):
-                        value = str(value).lower()
-                    new_lines.append(f"{env_name}={value}")
-                    updated_keys.add(setting_name)
-                    modified = True
-                    break
-        if not modified:
-            new_lines.append(line)
-    
-    # Add any new settings that weren't in the file
-    for setting_name, env_name in setting_to_env.items():
-        if setting_name in updates and updates[setting_name] is not None and setting_name not in updated_keys:
-            value = updates[setting_name]
-            if isinstance(value, bool):
-                value = str(value).lower()
-            new_lines.append(f"{env_name}={value}")
-    
-    # Write back
-    env_path.write_text("\n".join(new_lines) + "\n")
-    return True
+        key = line.split("=", 1)[0].lstrip("# ").strip()
+        if key in pending:
+            out.append(f"{key}={pending.pop(key)}")
+        else:
+            out.append(line)
+    out += [f"{k}={v}" for k, v in pending.items()]
+    ENV_FILE.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
 @app.get("/settings")
 async def get_settings(token: str = Query(...)):
     """Get current application settings."""
-    return {
-        "embedding_model": settings.embedding_model,
-        "reranker_model": settings.reranker_model,
-        "whisper_model": settings.whisper_model,
-        "llm_provider": settings.llm_provider,
-        "ollama_model": settings.ollama_model,
-        "enable_context_enrichment": settings.enable_context_enrichment,
-        "chunk_size": settings.chunk_size,
-        "storage_path": str(settings.storage_path),
-        "asr_backend": settings.asr_backend,
-        "hf_token": "***" if settings.hf_token else "",
-    }
+    values = {key: getattr(settings, key) for key in EDITABLE_SETTINGS}
+    values["storage_path"] = str(settings.storage_path)
+    values["hf_token"] = "***" if settings.hf_token else ""
+    return values
 
 
 @app.post("/settings")
@@ -935,24 +792,17 @@ async def update_settings_endpoint(
     body: SettingsUpdate,
     token: str = Query(...),
 ):
-    """
-    Update application settings.
-    
-    Changes are written to .env file and will take effect on next restart.
-    """
+    """Save settings to .env; they take effect after a restart."""
     updates = body.model_dump(exclude_none=True)
-    
+    updates.pop("hf_token", None) if updates.get("hf_token") == "***" else None
     if not updates:
         raise HTTPException(status_code=400, detail="No settings to update")
-    
-    if update_env_file(updates):
-        return {
-            "status": "updated",
-            "updated_keys": list(updates.keys()),
-            "message": "Settings saved. Restart the server for changes to take effect.",
-        }
-    else:
-        raise HTTPException(status_code=500, detail="Failed to update .env file")
+    update_env_file(updates)
+    return {
+        "status": "updated",
+        "updated_keys": list(updates.keys()),
+        "message": "Settings saved. Restart the server for changes to take effect.",
+    }
 
 
 # --- Image Processing Endpoints ---
@@ -1136,7 +986,7 @@ _image_processing_state = {
 }
 
 
-def _run_image_processing_background(limit: int = None, model: str = None):
+def _run_image_processing_background(limit: int = None):
     """Background task to run image processing."""
     global _image_processing_state
 
@@ -1174,8 +1024,7 @@ def _run_image_processing_background(limit: int = None, model: str = None):
                 result = parse_image(P(image.image_path))
 
                 if result.status == "success" and result.note:
-                    # Save to database
-                    db.upsert_note(result.note)
+                    ingest_note(result.note)
 
                     processing_time = time.time() - start_time
                     queue.mark_completed(image.id, processing_time)
@@ -1202,7 +1051,6 @@ def _run_image_processing_background(limit: int = None, model: str = None):
 
 class ImageRunRequest(BaseModel):
     limit: int = 5
-    model: Optional[str] = None
 
 
 @app.post("/image/run")
@@ -1237,7 +1085,6 @@ async def run_image_processing(
         background_tasks.add_task(
             _run_image_processing_background,
             limit=body.limit,
-            model=body.model,
         )
 
         return {
@@ -1263,16 +1110,3 @@ async def get_image_running_status(token: str = Query(...)):
         "error_count": _image_processing_state["error_count"],
         "started_at": _image_processing_state["started_at"],
     }
-
-
-# --- Startup ---
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize on startup."""
-    logger.info("Starting Zettlecast API...")
-    settings.ensure_directories()
-    db.connect()
-    logger.info(f"Storage path: {settings.storage_path}")
-    logger.info(f"API token: {settings.api_token[:8]}...")
-

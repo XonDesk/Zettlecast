@@ -30,7 +30,7 @@ export default function Sidebar() {
 
         try {
             const result = await api.ingest(url);
-            if (result.status === 'success' || result.status === 'partial') {
+            if (result.status === 'success') {
                 setMessage({ type: 'success', text: `Added: ${result.title || 'Untitled'}` });
                 setUrl('');
             } else if (result.status === 'duplicate') {

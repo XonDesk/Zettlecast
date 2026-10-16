@@ -1,7 +1,7 @@
 """
 Tests for Aligner Module
 
-Unit tests for RTTM parsing, pyannote annotation handling, and word-speaker alignment.
+Unit tests for RTTM parsing and word-speaker alignment.
 """
 
 import pytest
@@ -16,8 +16,6 @@ from zettlecast.podcast.aligner import (
     merge_micro_segments,
     merge_similar_speakers,
     align_transcription_with_diarization,
-    parse_pyannote_annotation,
-    align_with_pyannote,
 )
 
 
@@ -166,75 +164,6 @@ class TestGroupWordsBySpeaker:
         """Should return empty list for empty input."""
         segments = group_words_by_speaker([])
         assert segments == []
-
-
-class TestParsePyannoteAnnotation:
-    """Tests for pyannote annotation parsing."""
-
-    def test_parses_annotation_to_speaker_segments(self):
-        """Should convert pyannote Annotation to SpeakerSegment list."""
-        from unittest.mock import MagicMock
-        
-        mock_turn1 = MagicMock(start=0.0, end=5.0)
-        mock_turn2 = MagicMock(start=5.5, end=10.0)
-        
-        mock_annotation = MagicMock()
-        mock_annotation.itertracks.return_value = [
-            (mock_turn1, None, "SPEAKER_00"),
-            (mock_turn2, None, "SPEAKER_01"),
-        ]
-        
-        segments = parse_pyannote_annotation(mock_annotation)
-        
-        assert len(segments) == 2
-        assert segments[0].speaker == "SPEAKER_00"
-        assert segments[0].start == 0.0
-        assert segments[1].speaker == "SPEAKER_01"
-
-    def test_sorts_by_start_time(self):
-        """Should sort segments by start time."""
-        from unittest.mock import MagicMock
-        
-        mock_turn1 = MagicMock(start=5.0, end=10.0)
-        mock_turn2 = MagicMock(start=0.0, end=4.0)
-        
-        mock_annotation = MagicMock()
-        mock_annotation.itertracks.return_value = [
-            (mock_turn1, None, "SPEAKER_01"),
-            (mock_turn2, None, "SPEAKER_00"),
-        ]
-        
-        segments = parse_pyannote_annotation(mock_annotation)
-        
-        assert segments[0].start < segments[1].start
-
-
-class TestAlignWithPyannote:
-    """Tests for pyannote-based alignment pipeline."""
-
-    def test_full_alignment_pipeline(self):
-        """Should align words with pyannote annotation."""
-        from unittest.mock import MagicMock
-        
-        words = [
-            Word("hello", 1.0, 1.5),
-            Word("world", 6.0, 6.5),
-        ]
-        
-        mock_turn1 = MagicMock(start=0.0, end=5.0)
-        mock_turn2 = MagicMock(start=5.5, end=10.0)
-        
-        mock_annotation = MagicMock()
-        mock_annotation.itertracks.return_value = [
-            (mock_turn1, None, "SPEAKER_00"),
-            (mock_turn2, None, "SPEAKER_01"),
-        ]
-        
-        segments = align_with_pyannote(words, mock_annotation)
-
-        assert len(segments) == 2
-        assert segments[0].speaker == "SPEAKER_00"
-        assert segments[1].speaker == "SPEAKER_01"
 
 
 class TestMergeSimilarSpeakers:

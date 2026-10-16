@@ -1,603 +1,134 @@
 """
-NeMo-based Transcription and Diarization
+NeMo Transcription and Diarization (CUDA)
 
-Uses NVIDIA NeMo models:
-- Parakeet-TDT for transcription with word timestamps
-- Nemotron-3-Diarization (Sortformer, up to 8 speakers) for diarization,
-  or the legacy MSDD pipeline when NEMO_DIARIZATION_MODEL is an MSDD name
+- Parakeet-TDT (local attention) transcribes up to an hour per pass with word timestamps
+- Nemotron-3-Diarization (Sortformer, up to 8 speakers) diarizes the whole
+  episode in one pass so speaker labels are consistent end to end
 
 Pipeline:
-1. Chunk audio into NEMO_CHUNK_DURATION_MINUTES segments for ASR
-2. Transcribe each chunk
-3. Diarize: Sortformer runs once over the whole episode so speaker labels
-   stay consistent; MSDD runs per chunk
-4. Align word timestamps with speaker labels
+1. Decode the episode to 16 kHz mono WAV
+2. Transcribe in NEMO_CHUNK_DURATION_MINUTES pieces
+3. Free Parakeet, diarize the full episode
+4. Align words to speakers
 """
 
-import os
 import importlib.util
-
-# Sortformer models call torch.compile, which needs Triton. Triton is not
-# shipped for Windows, so fall back to eager mode when it's missing.
-if importlib.util.find_spec("triton") is None:
-    os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
-
-# Apply NumPy 2.0 compatibility patch BEFORE importing NeMo
-# This must happen before any NeMo imports to prevent np.sctypes errors
-import numpy as np
-if not hasattr(np, 'sctypes'):
-    # Recreate sctypes dict for NumPy 2.0+ (removed in NumPy 2.0)
-    np.sctypes = {
-        'int': [np.int8, np.int16, np.int32, np.int64],
-        'uint': [np.uint8, np.uint16, np.uint32, np.uint64],
-        'float': [np.float16, np.float32, np.float64],
-        'complex': [np.complex64, np.complex128],
-        'others': [bool, object, bytes, str, np.void],
-    }
-    if hasattr(np, 'longdouble'):
-        np.sctypes['float'].append(np.longdouble)
-    if hasattr(np, 'clongdouble'):
-        np.sctypes['complex'].append(np.clongdouble)
-
 import logging
+import os
 import shutil
 import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional
+
+# Sortformer calls torch.compile, which needs Triton. Triton isn't shipped for
+# Windows, so run in eager mode when it's missing.
+if importlib.util.find_spec("triton") is None:
+    os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
 
 from ..config import settings
 from .aligner import Word, align_transcription_with_diarization
-from .base_transcriber import BaseTranscriber, ProgressCallback, TranscriberCapabilities
-
-
-class CancellationError(Exception):
-    """Raised when transcription is cancelled by user."""
-    pass
-from .chunker import AudioChunk, chunk_audio
 from .models import PodcastEpisode, TranscriptSegment, TranscriptionResult
 
 logger = logging.getLogger(__name__)
 
+# (stage, chunk, total_chunks, device) -> False to cancel
+ProgressCallback = Callable[[str, int, int, str], bool]
 
-class NeMoTranscriber(BaseTranscriber):
-    """
-    Parallel transcription and diarization using NVIDIA NeMo models.
+SAMPLE_RATE = 16000
 
-    Models (configurable via settings):
-    - nemo_parakeet_model: transcription with word timestamps
-    - nemo_diarization_model: a Hugging Face Sortformer id such as
-      nvidia/Nemotron-3-Diarization, or a legacy MSDD name such as
-      diar_msdd_telephonic
-    """
+
+class CancellationError(Exception):
+    """Raised when transcription is cancelled by user."""
+
+
+class NeMoTranscriber:
+    """Parakeet-TDT transcription + Nemotron-3-Diarization on CUDA."""
 
     def __init__(
         self,
-        device: str = "cpu",
-        chunk_duration_minutes: int = 10,
+        chunk_duration_minutes: Optional[int] = None,
         enable_diarization: bool = True,
     ):
-        """
-        Initialize NeMo transcriber.
+        import torch
 
-        Args:
-            device: Device for inference ('cpu' or 'cuda')
-            chunk_duration_minutes: Duration of audio chunks for processing
-            enable_diarization: Whether to perform speaker diarization
-        """
-        super().__init__()
-        self.device = device or settings.whisper_device  # Reuse device config
-        self.chunk_duration_minutes = chunk_duration_minutes
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA GPU not available; NeMo transcription requires an NVIDIA GPU")
+        self.device = "cuda"
+        self.chunk_duration_minutes = chunk_duration_minutes or settings.nemo_chunk_duration_minutes
         self.enable_diarization = enable_diarization
         self.parakeet_model_id = settings.nemo_parakeet_model
         self.diarization_model_id = settings.nemo_diarization_model
-        # Hugging Face repo ids (org/name) are Sortformer models; bare names are MSDD
-        self.use_sortformer = "/" in self.diarization_model_id
+        self._parakeet = None
+        self._sortformer = None
 
-        # Models loaded lazily
-        self._parakeet_model = None
-        self._sortformer_model = None
-        self._frame_duration = None  # Computed from model config on first load
-        self._last_chunk_device = None  # Tracks actual device used per chunk (for fallback detection)
+    @property
+    def name(self) -> str:
+        return f"{self.parakeet_model_id} + {self.diarization_model_id}"
 
-    def get_capabilities(self) -> TranscriberCapabilities:
-        """Return NeMo transcriber capabilities."""
-        return TranscriberCapabilities(
-            platform="any",
-            transcriber_name=f"NeMo ({self.parakeet_model_id})",
-            diarizer_name=f"NeMo ({self.diarization_model_id})",
-            vad_name="MarbleNet",
-            supports_diarization=True,
-            supports_gpu=True,  # NeMo strongly prefers GPU
-            supports_streaming=False,
-            requires_container=False,
-        )
-
-    def cleanup_gpu(self):
-        """
-        Release GPU memory by deleting loaded models.
-        
-        Should be called after transcription is complete to prevent
-        GPU memory from staying allocated.
-        """
-        if self._parakeet_model is not None:
-            del self._parakeet_model
-            self._parakeet_model = None
-            logger.info("Released Parakeet model from memory")
-
-        if self._sortformer_model is not None:
-            del self._sortformer_model
-            self._sortformer_model = None
-            logger.info("Released Sortformer model from memory")
-
-        if self.device == "cuda":
-            import torch
-            import gc
-            gc.collect()
-            torch.cuda.empty_cache()
-            logger.info("Cleared CUDA cache")
-
-    def _transcribe_chunk_fallback(self, chunk: AudioChunk) -> Tuple[List[Word], float]:
-        """
-        Fallback transcription using faster-whisper if NeMo fails.
-        Uses CPU to avoid CUDA OOM issues that may have triggered the fallback.
-        """
-        start_time = time.time()
-        try:
-            # Clear GPU memory since OOM may have triggered this fallback
-            if self.device == "cuda":
-                import torch
-                torch.cuda.empty_cache()
-                logger.info("Cleared GPU memory before CPU fallback")
-
-            self._last_chunk_device = "cpu"  # Track fallback device
-
-            from faster_whisper import WhisperModel
-
-            # Use CPU for fallback to avoid CUDA OOM issues
-            whisper = WhisperModel("large-v3-turbo", device="cpu", compute_type="int8")
-            segments_raw, info = whisper.transcribe(str(chunk.path), beam_size=5, language="en", vad_filter=True)
-            segments_list = list(segments_raw)
-            
-            words = []
-            for seg in segments_list:
-                words.append(Word(
-                    text=seg.text.strip(),
-                    start=seg.start + chunk.start_time,
-                    end=seg.end + chunk.start_time,
-                ))
-            
-            logger.info(f"Chunk {chunk.chunk_index}: fallback transcribed {len(words)} words")
-            return words, time.time() - start_time
-        except Exception as e:
-            logger.error(f"Fallback transcription also failed: {e}")
-            return [], time.time() - start_time
+    # --- Models ---
 
     def _load_parakeet(self):
-        """Load Parakeet transcription model with memory optimizations."""
-        if self._parakeet_model is None:
-            try:
-                import os
-                import torch
-                import gc
-                
-                # Enable expandable segments to reduce fragmentation
-                os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
-                
-                # Clear GPU memory before loading
-                if self.device == "cuda":
-                    gc.collect()
-                    torch.cuda.empty_cache()
-                    logger.info("Cleared GPU cache before model loading")
-                
-                import nemo.collections.asr as nemo_asr
+        if self._parakeet is None:
+            import nemo.collections.asr as nemo_asr
 
-                logger.info(f"Loading {self.parakeet_model_id} in half-precision...")
-                self._parakeet_model = nemo_asr.models.ASRModel.from_pretrained(
-                    self.parakeet_model_id,
-                    map_location=torch.device(self.device),
-                )
-                self._parakeet_model.eval()
-
-                # Local attention keeps memory linear in audio length (full attention
-                # is quadratic and fails past ~10 min on 32 GB); an hour of audio
-                # then fits in ~14 GB in one pass.
-                self._parakeet_model.change_attention_model("rel_pos_local_attn", [256, 256])
-                self._parakeet_model.change_subsampling_conv_chunking_factor(1)
-
-                # Compute frame duration from model config for timestamp conversion
-                # Parakeet outputs timestamps in encoder frame indices, not seconds
-                window_stride = self._parakeet_model.cfg.preprocessor.window_stride
-                subsampling_factor = self._parakeet_model.cfg.encoder.get("subsampling_factor", 8)
-                self._frame_duration = window_stride * subsampling_factor
-                logger.info(f"Frame duration: {self._frame_duration}s (stride={window_stride}, sub={subsampling_factor})")
-
-                # Convert to half-precision for memory efficiency (~50% reduction)
-                if self.device == "cuda":
-                    self._parakeet_model = self._parakeet_model.cuda().half()
-                    logger.info("Parakeet model loaded in fp16 (half-precision)")
-                else:
-                    logger.info("Parakeet model loaded")
-                    
-            except Exception as e:
-                logger.error(f"Failed to load Parakeet model: {e}")
-                raise
-
-        return self._parakeet_model
-
-    def _get_diarization_config(self, output_dir: Path, manifest_path: Path):
-        """
-        Create diarization config for NeuralDiarizer.
-
-        NeMo's NeuralDiarizer requires a Hydra config with manifest and output paths.
-        """
-        from omegaconf import OmegaConf
-
-        config = OmegaConf.create({
-            "device": self.device,
-            "verbose": True,  # Required by ClusteringDiarizer (NeMo 2.1.0)
-            "batch_size": 25,
-            "num_workers": 0,  # Required by NeMo dataloaders
-            "sample_rate": 16000, # Required by NeMo
-            "diarizer": {
-                "manifest_filepath": str(manifest_path),
-                "out_dir": str(output_dir),
-                "oracle_vad": False,
-                "collar": 0.25,
-                "ignore_overlap": True,
-                "vad": {
-                    "model_path": "vad_multilingual_marblenet",
-                    "parameters": {
-                        "window_length_in_sec": 0.15,
-                        "shift_length_in_sec": 0.01,
-                        "onset": 0.8,
-                        "offset": 0.6,
-                        "min_duration_on": 0.5,  # Reverted - 0.8 was too aggressive
-                        "min_duration_off": 0.5,
-                        "pad_onset": 0.1,
-                        "pad_offset": 0.1,
-                        "smoothing": "median",  # Required by ClusteringDiarizer (NeMo 2.1.0)
-                        "overlap": 0.5,  # Overlap ratio for smoothing (NeMo 2.1.0)
-                    },
-                },
-                "speaker_embeddings": {
-                    "model_path": "titanet_large",
-                    "parameters": {
-                        # Restored all window lengths - short windows needed for accuracy
-                        "window_length_in_sec": [1.5, 1.25, 1.0, 0.75, 0.5],
-                        "shift_length_in_sec": [0.75, 0.625, 0.5, 0.375, 0.25],
-                        "multiscale_weights": [1, 1, 1, 1, 1],
-                        "save_embeddings": True,  # Required by MSDD decoder step
-                    },
-                },
-                "clustering": {
-                    "parameters": {
-                        "oracle_num_speakers": False,
-                        "max_num_speakers": 5,
-                        "enhanced_count_thres": 80,
-                        "max_rp_threshold": 0.35,  # Slightly increased from 0.25 (moderate)
-                        "sparse_search_volume": 30,
-                    },
-                },
-                "msdd_model": {
-                    "model_path": "diar_msdd_telephonic",
-                    "parameters": {
-                        "use_speaker_model_from_ckpt": True,
-                        "infer_batch_size": 25,
-                        "sigmoid_threshold": [0.75],  # Slightly increased from 0.7 (moderate)
-                        "seq_eval_mode": False,
-                        "split_infer": True,
-                        "diar_window_length": 50,
-                        "overlap_infer_spk_limit": 5,
-                    },
-                },
-            },
-        })
-        return config
-
-    def _transcribe_chunk(self, chunk: AudioChunk) -> Tuple[List[Word], float]:
-        """
-        Transcribe a single audio chunk.
-
-        Args:
-            chunk: AudioChunk object
-
-        Returns:
-            Tuple of (words with timestamps, processing time)
-        """
-        start_time = time.time()
-        
-        try:
-            model = self._load_parakeet()
-        except Exception as e:
-            logger.error(f"Failed to load Parakeet model: {e}")
-            logger.warning("Falling back to faster-whisper for chunk transcription")
-            return self._transcribe_chunk_fallback(chunk)
-
-        try:
-            # Transcribe with word timestamps
-            # NeMo 2.x API uses positional audio argument instead of paths2audio_files
-            transcription = model.transcribe(
-                [str(chunk.path)],
-                timestamps=True,
-                return_hypotheses=True,
-            )
-
-            # Extract words with timestamps
-            words = []
-            # NeMo RNNT models return tuple (hypotheses, optional_beam_hypotheses)
-            if isinstance(transcription, tuple):
-                transcription = transcription[0]
-            
-            if transcription and len(transcription) > 0:
-                hypothesis = transcription[0]
-
-                # Parakeet returns word-level timestamps in timestep attribute
-                # NOTE: Timestamps are in encoder frame indices, not seconds.
-                # Convert using frame_duration (window_stride * subsampling_factor).
-                frame_dur = self._frame_duration or 0.08  # fallback: 0.01s * 8
-
-                # NeMo 3.x: hypothesis.timestamp["word"] with start/end in seconds
-                timestamp = getattr(hypothesis, "timestamp", None)
-                if isinstance(timestamp, dict) and timestamp.get("word"):
-                    for word_info in timestamp["word"]:
-                        words.append(Word(
-                            text=word_info["word"],
-                            start=word_info["start"] + chunk.start_time,
-                            end=word_info["end"] + chunk.start_time,
-                        ))
-                elif hasattr(hypothesis, "timestep") and hypothesis.timestep:
-                    # NeMo 2.x uses timestep dict with 'word' key for word-level timestamps
-                    word_timestamps = hypothesis.timestep.get("word", [])
-                    for word_info in word_timestamps:
-                        word = Word(
-                            text=word_info["word"],
-                            start=word_info["start_offset"] * frame_dur + chunk.start_time,
-                            end=word_info["end_offset"] * frame_dur + chunk.start_time,
-                        )
-                        words.append(word)
-                elif hasattr(hypothesis, "words") and hypothesis.words:
-                    for word_info in hypothesis.words:
-                        # Adjust timestamps by chunk offset
-                        word = Word(
-                            text=word_info.word,
-                            start=word_info.start_offset * frame_dur + chunk.start_time,
-                            end=word_info.end_offset * frame_dur + chunk.start_time,
-                        )
-                        words.append(word)
-                elif hasattr(hypothesis, "text"):
-                    # Fallback: no word timestamps, create single segment
-                    logger.warning(f"No word timestamps for chunk {chunk.chunk_index}")
-                    words = [
-                        Word(
-                            text=hypothesis.text,
-                            start=chunk.start_time,
-                            end=chunk.end_time,
-                        )
-                    ]
-
-            self._last_chunk_device = self.device  # Track successful device
-
-            processing_time = time.time() - start_time
-            logger.info(
-                f"Chunk {chunk.chunk_index}: transcribed {len(words)} words "
-                f"in {processing_time:.2f}s"
-            )
-
-            return words, processing_time
-
-        except Exception as e:
-            logger.error(f"Transcription failed for chunk {chunk.chunk_index}: {e}")
-            logger.warning("Falling back to faster-whisper for this chunk")
-            return self._transcribe_chunk_fallback(chunk)
-
-    def _diarize_chunk(self, chunk: AudioChunk) -> Tuple[str, float]:
-        """
-        Perform speaker diarization on a single audio chunk.
-
-        Args:
-            chunk: AudioChunk object
-
-        Returns:
-            Tuple of (RTTM content string, processing time)
-        """
-        start_time = time.time()
-
-        # Skip very short chunks - CNN kernel requires minimum input size
-        # TitaNet/MSDD models need at least ~3 seconds for stable embeddings
-        MIN_DIARIZATION_DURATION = 3.0
-        if chunk.duration < MIN_DIARIZATION_DURATION:
-            logger.warning(
-                f"Chunk {chunk.chunk_index} too short for diarization "
-                f"({chunk.duration:.1f}s < {MIN_DIARIZATION_DURATION}s), skipping"
-            )
-            return "", time.time() - start_time
-
-        try:
-            from nemo.collections.asr.models import NeuralDiarizer
-
-            # Create temp directory for diarization output
-            with tempfile.TemporaryDirectory(prefix="diarization_") as temp_dir:
-                temp_dir_path = Path(temp_dir)
-                manifest_path = temp_dir_path / "manifest.json"
-                output_dir = temp_dir_path / "output"
-                output_dir.mkdir()
-
-                # Create manifest file (required by NeMo diarization)
-                # NeMo uses the audio filename (stem) for output RTTM naming
-                import json
-
-                manifest = {
-                    "audio_filepath": str(chunk.path),
-                    "offset": 0,  # Offset within the chunk file itself
-                    "duration": chunk.duration,
-                    "label": "infer",
-                    "uniq_id": f"chunk_{chunk.chunk_index:03d}",
-                    "rttm_filepath": None,  # Required by some NeMo versions even for inference
-                }
-                with open(manifest_path, "w") as f:
-                    json.dump(manifest, f)
-                    f.write("\n")
-
-                # Get diarization config
-                config = self._get_diarization_config(output_dir, manifest_path)
-
-                # Create and run NeuralDiarizer
-                logger.info(f"Running NeuralDiarizer on chunk {chunk.chunk_index}...")
-                diarizer = NeuralDiarizer(cfg=config).to(self.device)
-                diarizer.diarize()
-
-                # Release diarizer GPU memory immediately
-                del diarizer
-                if self.device == "cuda":
-                    import torch
-                    torch.cuda.empty_cache()
-
-                # Find RTTM output - NeMo names it based on audio file stem
-                audio_stem = chunk.path.stem  # e.g., "chunk_000"
-                rttm_path = output_dir / "pred_rttms" / f"{audio_stem}.rttm"
-
-                # Also check alternative paths NeMo might use
-                if not rttm_path.exists():
-                    rttm_path = output_dir / f"{audio_stem}.rttm"
-                if not rttm_path.exists():
-                    # Search for any .rttm file
-                    rttm_files = list(output_dir.rglob("*.rttm"))
-                    if rttm_files:
-                        rttm_path = rttm_files[0]
-                        logger.debug(f"Found RTTM at: {rttm_path}")
-
-                if rttm_path.exists():
-                    rttm_content = rttm_path.read_text()
-
-                    # Adjust timestamps by chunk offset (chunk's position in original audio)
-                    adjusted_lines = []
-                    for line in rttm_content.strip().split("\n"):
-                        if line.startswith("SPEAKER"):
-                            parts = line.split()
-                            if len(parts) >= 4:
-                                parts[3] = str(float(parts[3]) + chunk.start_time)
-                                adjusted_lines.append(" ".join(parts))
-                    rttm_content = "\n".join(adjusted_lines)
-                else:
-                    logger.warning(
-                        f"No RTTM output for chunk {chunk.chunk_index}. "
-                        f"Searched in {output_dir}"
-                    )
-                    rttm_content = ""
-
-            processing_time = time.time() - start_time
-            logger.info(f"Chunk {chunk.chunk_index}: diarized in {processing_time:.2f}s")
-
-            return rttm_content, processing_time
-
-        except Exception as e:
-            logger.error(f"Diarization failed for chunk {chunk.chunk_index}: {e}")
-            import traceback
-            logger.debug(traceback.format_exc())
-            return "", time.time() - start_time
+            logger.info(f"Loading {self.parakeet_model_id}")
+            model = nemo_asr.models.ASRModel.from_pretrained(self.parakeet_model_id)
+            model.eval()
+            # Local attention keeps memory linear in audio length (full attention is
+            # quadratic and fails past ~10 min on 32 GB); an hour fits in ~14 GB.
+            model.change_attention_model("rel_pos_local_attn", [256, 256])
+            model.change_subsampling_conv_chunking_factor(1)
+            self._parakeet = model.to(self.device).half()
+        return self._parakeet
 
     def _load_sortformer(self):
-        """Load the Sortformer diarization model (e.g. Nemotron-3-Diarization)."""
-        if self._sortformer_model is None:
-            import torch
+        if self._sortformer is None:
             from nemo.collections.asr.models import SortformerEncLabelModel
 
-            logger.info(f"Loading {self.diarization_model_id}...")
-            self._sortformer_model = SortformerEncLabelModel.from_pretrained(
-                self.diarization_model_id,
-                map_location=torch.device(self.device),
-            )
-            self._sortformer_model.eval()
-        return self._sortformer_model
+            logger.info(f"Loading {self.diarization_model_id}")
+            self._sortformer = SortformerEncLabelModel.from_pretrained(self.diarization_model_id)
+            self._sortformer.to(self.device).eval()
+        return self._sortformer
 
-    def _diarize_full(self, audio_path: Path, temp_dir: Path) -> Tuple[str, float]:
-        """
-        Diarize the whole episode in one pass with Sortformer.
+    def _release(self, attr: str) -> None:
+        # Never call torch.cuda.empty_cache() between Parakeet transcribe() calls:
+        # it frees buffers the decoder still holds and aborts the process.
+        if getattr(self, attr) is not None:
+            import gc
 
-        Running over the full file (rather than per chunk) keeps speaker
-        labels consistent across the episode. Sortformer streams internally,
-        so memory stays flat regardless of episode length.
+            import torch
 
-        Returns:
-            Tuple of (RTTM content string, processing time)
-        """
-        start_time = time.time()
-        try:
-            from pydub import AudioSegment
+            setattr(self, attr, None)
+            gc.collect()
+            torch.cuda.empty_cache()
 
-            # Sortformer expects 16 kHz mono
-            wav_path = temp_dir / "diarize_16k.wav"
-            AudioSegment.from_file(str(audio_path)).set_channels(1).set_frame_rate(16000).export(
-                str(wav_path), format="wav"
-            )
+    def cleanup_gpu(self) -> None:
+        """Free all model VRAM."""
+        self._release("_parakeet")
+        self._release("_sortformer")
 
-            model = self._load_sortformer()
-            segments = model.diarize(audio=[str(wav_path)], batch_size=1)[0]
+    # --- Steps ---
 
-            # Segments are "start end speaker_N" strings; convert to RTTM lines
-            rttm_lines = []
-            for seg in segments:
-                start, end, speaker = seg.split()
-                start, end = float(start), float(end)
-                rttm_lines.append(
-                    f"SPEAKER episode 1 {start:.3f} {end - start:.3f} <NA> <NA> {speaker} <NA> <NA>"
-                )
+    def _transcribe_wav(self, wav_path: Path, offset: float) -> List[Word]:
+        output = self._load_parakeet().transcribe(
+            [str(wav_path)], timestamps=True, return_hypotheses=True, verbose=False
+        )
+        hypothesis = (output[0] if isinstance(output, tuple) else output)[0]
+        return [
+            Word(text=w["word"], start=w["start"] + offset, end=w["end"] + offset)
+            for w in hypothesis.timestamp["word"]
+        ]
 
-            processing_time = time.time() - start_time
-            logger.info(f"Diarized {len(rttm_lines)} segments in {processing_time:.2f}s")
-            return "\n".join(rttm_lines), processing_time
-
-        except Exception as e:
-            logger.error(f"Sortformer diarization failed: {e}")
-            import traceback
-            logger.debug(traceback.format_exc())
-            return "", time.time() - start_time
-
-    def _process_chunk_parallel(
-        self,
-        chunk: AudioChunk,
-        total_chunks: int = 0,
-        progress_callback: Optional[ProgressCallback] = None,
-    ) -> Tuple[List[Word], str, float, float]:
-        """
-        Process a chunk with transcription and diarization.
-
-        NOTE: Running these in parallel can cause deadlocks with NeMo's module loading.
-        Processing sequentially is safer and still fast enough.
-
-        Args:
-            chunk: AudioChunk object
-            total_chunks: Total number of chunks (for progress reporting)
-            progress_callback: Optional progress callback
-
-        Returns:
-            Tuple of (words, rttm_content, transcription_time, diarization_time)
-        """
-        logger.info(f"Processing {chunk}")
-        chunk_num = chunk.chunk_index + 1
-
-        # Report transcription stage
-        if progress_callback:
-            if not progress_callback("transcribing", chunk_num, total_chunks, self.device):
-                raise CancellationError("Cancelled by user")
-
-        # Transcribe first
-        words, trans_time = self._transcribe_chunk(chunk)
-
-        # Report diarization stage (with actual device used for transcription).
-        # Sortformer diarizes the whole episode after all chunks are transcribed.
-        if self.enable_diarization and not self.use_sortformer:
-            if progress_callback:
-                if not progress_callback("diarizing", chunk_num, total_chunks, self._last_chunk_device or self.device):
-                    raise CancellationError("Cancelled by user")
-            rttm_content, diar_time = self._diarize_chunk(chunk)
-        else:
-            rttm_content = ""
-            diar_time = 0.0
-
-        return words, rttm_content, trans_time, diar_time
+    def _diarize_wav(self, wav_path: Path) -> str:
+        """Diarize a whole file; returns RTTM text."""
+        segments = self._load_sortformer().diarize(audio=[str(wav_path)], batch_size=1)[0]
+        lines = []
+        for seg in segments:
+            start, end, speaker = seg.split()
+            start, end = float(start), float(end)
+            lines.append(f"SPEAKER episode 1 {start:.3f} {end - start:.3f} <NA> <NA> {speaker} <NA> <NA>")
+        return "\n".join(lines)
 
     def transcribe(
         self,
@@ -605,149 +136,80 @@ class NeMoTranscriber(BaseTranscriber):
         episode: Optional[PodcastEpisode] = None,
         progress_callback: Optional[ProgressCallback] = None,
     ) -> TranscriptionResult:
-        """
-        Transcribe podcast episode with speaker diarization.
+        """Transcribe and diarize one episode."""
+        from pydub import AudioSegment
 
-        Args:
-            audio_path: Path to audio file
-            episode: Optional episode metadata
-            progress_callback: Optional callback for progress reporting
+        def report(stage: str, chunk: int = 0, total: int = 0) -> None:
+            if progress_callback and progress_callback(stage, chunk, total, self.device) is False:
+                raise CancellationError("Cancelled by user")
 
-        Returns:
-            TranscriptionResult with speaker-labeled segments
-        """
         start_time = time.time()
         audio_path = Path(audio_path)
-
-        logger.info(f"Starting NeMo transcription: {audio_path.name}")
-
-        # Create temp directory for chunks
-        temp_dir = Path(tempfile.mkdtemp(prefix="nemo_chunks_"))
+        temp_dir = Path(tempfile.mkdtemp(prefix="zettlecast_asr_"))
+        logger.info(f"Transcribing {audio_path.name}")
 
         try:
-            # Step 1: Chunk audio
-            chunks = list(chunk_audio(audio_path, self.chunk_duration_minutes, temp_dir))
-            logger.info(f"Created {len(chunks)} audio chunks")
+            report("chunking")
+            audio = AudioSegment.from_file(str(audio_path)).set_channels(1).set_frame_rate(SAMPLE_RATE)
+            duration = len(audio) / 1000.0
+            full_wav = temp_dir / "episode.wav"
+            audio.export(str(full_wav), format="wav")
 
-            # Step 2: Process chunks (transcription + diarization in parallel)
-            all_words = []
-            all_rttm_lines = []
-            total_trans_time = 0.0
-            total_diar_time = 0.0
+            chunk_ms = self.chunk_duration_minutes * 60 * 1000
+            starts = list(range(0, len(audio), chunk_ms))
+            words: List[Word] = []
+            for i, start_ms in enumerate(starts):
+                report("transcribing", i + 1, len(starts))
+                if len(starts) == 1:
+                    chunk_wav = full_wav
+                else:
+                    chunk_wav = temp_dir / f"chunk_{i:03d}.wav"
+                    audio[start_ms:start_ms + chunk_ms].export(str(chunk_wav), format="wav")
+                words.extend(self._transcribe_wav(chunk_wav, offset=start_ms / 1000.0))
+            del audio
+            self._release("_parakeet")
+            logger.info(f"Transcribed {len(words)} words")
 
-            num_chunks = len(chunks)
+            rttm = ""
+            if self.enable_diarization:
+                report("diarizing", len(starts), len(starts))
+                rttm = self._diarize_wav(full_wav)
+                self._release("_sortformer")
 
-            # Report chunking complete
-            if progress_callback:
-                progress_callback("chunking", 0, num_chunks, self.device)
-
-            for chunk in chunks:
-                words, rttm_content, trans_time, diar_time = self._process_chunk_parallel(
-                    chunk,
-                    total_chunks=num_chunks,
-                    progress_callback=progress_callback,
-                )
-                all_words.extend(words)
-                if rttm_content:
-                    all_rttm_lines.append(rttm_content)
-                total_trans_time += trans_time
-                total_diar_time += diar_time
-
-                # NOTE: don't call torch.cuda.empty_cache() between Parakeet transcribe()
-                # calls - it frees buffers the decoder still holds and aborts the process.
-
-            if self.enable_diarization and self.use_sortformer:
-                # Free Parakeet before loading the diarizer
-                if self._parakeet_model is not None:
-                    del self._parakeet_model
-                    self._parakeet_model = None
-                    if self.device == "cuda":
-                        import torch
-                        torch.cuda.empty_cache()
-                if progress_callback:
-                    if not progress_callback("diarizing", num_chunks, num_chunks, self.device):
-                        raise CancellationError("Cancelled by user")
-                rttm_content, total_diar_time = self._diarize_full(audio_path, temp_dir)
-                if rttm_content:
-                    all_rttm_lines.append(rttm_content)
-
-            logger.info(f"Transcribed {len(all_words)} total words")
-            logger.info(f"Total transcription time: {total_trans_time:.2f}s")
-            logger.info(f"Total diarization time: {total_diar_time:.2f}s")
-
-            # Step 3: Align words with speakers
-            if progress_callback:
-                progress_callback("aligning", num_chunks, num_chunks, self.device)
-            if self.enable_diarization and all_rttm_lines:
-                combined_rttm = "\n".join(all_rttm_lines)
-                aligned_segments = align_transcription_with_diarization(
-                    all_words, combined_rttm
-                )
-
-                # Convert to TranscriptSegment objects
-                transcript_segments = []
-                speakers = set()
-                for seg in aligned_segments:
-                    transcript_segments.append(
-                        TranscriptSegment(
-                            start=seg.start,
-                            end=seg.end,
-                            text=seg.text,
-                            speaker=seg.speaker,
-                        )
-                    )
-                    speakers.add(seg.speaker)
-
-                speakers_detected = len(speakers)
-            else:
-                # No diarization - create segments from words
-                transcript_segments = [
-                    TranscriptSegment(
-                        start=all_words[0].start if all_words else 0.0,
-                        end=all_words[-1].end if all_words else 0.0,
-                        text=" ".join(w.text for w in all_words),
-                        speaker=None,
-                    )
+            report("aligning", len(starts), len(starts))
+            if rttm:
+                segments = [
+                    TranscriptSegment(start=s.start, end=s.end, text=s.text, speaker=s.speaker)
+                    for s in align_transcription_with_diarization(words, rttm)
                 ]
-                speakers_detected = 1
+            else:
+                segments = [TranscriptSegment(
+                    start=words[0].start if words else 0.0,
+                    end=words[-1].end if words else 0.0,
+                    text=" ".join(w.text for w in words),
+                    speaker=None,
+                )]
 
-            # Format full transcript
-            full_text = self._format_transcript(transcript_segments)
-
-            # Calculate metrics
-            duration = chunks[-1].end_time if chunks else 0.0
             processing_time = time.time() - start_time
-
-            logger.info(
-                f"Transcription complete in {processing_time:.1f}s "
-                f"({processing_time/duration:.2f}x realtime)"
-            )
+            logger.info(f"Transcription complete in {processing_time:.1f}s for {duration / 60:.1f} min of audio")
 
             return TranscriptionResult(
                 episode_id=episode.id if episode else "unknown",
-                segments=transcript_segments,
-                full_text=full_text,
+                segments=segments,
+                full_text=self._format_transcript(segments),
                 language="en",
-                speakers_detected=speakers_detected,
+                speakers_detected=len({s.speaker for s in segments if s.speaker}) or 1,
                 duration_seconds=duration,
                 processing_time_seconds=processing_time,
             )
-
         finally:
-            # Clean up temp directory
-            if temp_dir.exists():
-                shutil.rmtree(temp_dir)
-                logger.debug(f"Cleaned up temp directory: {temp_dir}")
-            
-            # Release GPU memory
+            shutil.rmtree(temp_dir, ignore_errors=True)
             self.cleanup_gpu()
 
-    def _format_transcript(self, segments: List[TranscriptSegment]) -> str:
-        """Format segments into readable transcript."""
+    @staticmethod
+    def _format_transcript(segments: List[TranscriptSegment]) -> str:
         lines = []
         for seg in segments:
-            timestamp = f"[{seg.start:.1f}s - {seg.end:.1f}s]"
             speaker = f"{seg.speaker}: " if seg.speaker else ""
-            lines.append(f"{timestamp} {speaker}{seg.text}")
-
+            lines.append(f"[{seg.start:.1f}s - {seg.end:.1f}s] {speaker}{seg.text}")
         return "\n".join(lines)

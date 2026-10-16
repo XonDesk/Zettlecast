@@ -45,7 +45,7 @@ interface RunningStatus {
     episode_started_at: string | null;
 }
 
-const STAGES = ['chunking', 'transcribing', 'diarizing', 'aligning', 'enhancing', 'saving'];
+const STAGES = ['chunking', 'transcribing', 'diarizing', 'aligning', 'enhancing', 'saving', 'indexing'];
 const STAGE_LABELS: Record<string, string> = {
     chunking: 'Chunk',
     transcribing: 'Transcribe',
@@ -53,6 +53,7 @@ const STAGE_LABELS: Record<string, string> = {
     aligning: 'Align',
     enhancing: 'Enhance',
     saving: 'Save',
+    indexing: 'Index',
 };
 
 function StagePipeline({ currentStage }: { currentStage: string | null }) {

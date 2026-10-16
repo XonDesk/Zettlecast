@@ -27,7 +27,7 @@ def compute_content_hash(text: str) -> str:
 
 def parse_image(file_path: Path) -> ProcessingResult:
     """
-    Parse image file using Qwen2.5-VL vision model.
+    Parse image file using the configured Ollama vision model.
 
     Complete pipeline:
     1. Validate file and check size
@@ -79,11 +79,7 @@ def parse_image(file_path: Path) -> ProcessingResult:
 
         # 4. Run vision analysis
         try:
-            backend = VisionBackend(
-                model=settings.vision_model,
-                base_url=settings.ollama_base_url,
-            )
-            vision_data = backend.analyze_image(file_path)
+            vision_data = VisionBackend().analyze_image(file_path)
         except VisionModelNotFoundError as e:
             return ProcessingResult(
                 status="failed",

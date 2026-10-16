@@ -80,7 +80,6 @@ export default function NotesPage() {
                     <option value="web">Web</option>
                     <option value="audio">Audio</option>
                     <option value="markdown">Markdown</option>
-                    <option value="rss">RSS</option>
                     <option value="image">Image</option>
                 </select>
                 <span className="text-muted">{notes.length} notes</span>

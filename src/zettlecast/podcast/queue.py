@@ -269,7 +269,7 @@ class TranscriptionQueue:
 
         # Default download dir
         if not download_dir:
-            download_dir = settings.storage_path / "podcasts"
+            download_dir = settings.podcasts_path
 
         feed = parse_feed(feed_url, limit=limit)
         job_ids = []
@@ -481,8 +481,8 @@ class TranscriptionQueue:
         Returns:
             Dict with sync statistics
         """
-        podcasts_dir = podcasts_dir or (settings.storage_path / "podcasts")
-        transcripts_dir = transcripts_dir or settings.storage_path
+        podcasts_dir = podcasts_dir or settings.podcasts_path
+        transcripts_dir = transcripts_dir or settings.transcripts_path
         
         stats = {
             "podcasts_found": 0,

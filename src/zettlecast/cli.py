@@ -1,203 +1,181 @@
 """
 Zettlecast CLI
-Command-line interface for common operations.
 """
 
+import subprocess
 import sys
 from pathlib import Path
 
 import click
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 
 @click.group()
 @click.version_option(version="0.1.0")
 def cli():
-    """Zettlecast - Digital Zettelkasten Middleware"""
-    pass
+    """Zettlecast - Digital Zettelkasten with podcast transcription and semantic search."""
+    import logging
+
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+    for name in ("nemo_logger", "nemo", "lightning", "pytorch_lightning", "sentence_transformers"):
+        logging.getLogger(name).setLevel(logging.ERROR)
 
 
 @cli.command()
-@click.option("--port", "-p", default=8000, help="API server port")
-def serve(port: int):
-    """Start the Zettlecast API server."""
-    import subprocess
-    import signal
-    import os
-    
+@click.option("--port", "-p", default=None, type=int, help="API port (default: API_PORT)")
+@click.option("--no-frontend", is_flag=True, help="Only start the API")
+def serve(port: int, no_frontend: bool):
+    """Start the API server and the web UI."""
     from .config import settings
-    
-    click.echo("🧠 Starting Zettlecast...")
-    settings.ensure_directories()
-    
-    processes = []
-    
-    # Start API
-    click.echo(f"Starting API server on port {port}...")
-    api_proc = subprocess.Popen([
-        sys.executable, "-m", "uvicorn",
-        "zettlecast.main:app",
-        "--host", "0.0.0.0",
-        "--port", str(port),
-    ])
-    processes.append(api_proc)
-    
-    click.echo(f"\n✅ Zettlecast running!")
-    click.echo(f"   API: http://localhost:{port}")
-    click.echo(f"   Frontend: Run 'cd frontend && npm run dev' in another terminal")
-    click.echo(f"\n🔑 API Token: {settings.api_token[:16]}...")
-    click.echo("\nPress Ctrl+C to stop")
-    
-    def shutdown(signum, frame):
-        click.echo("\nShutting down...")
-        
-        # Cleanup Ollama
-        try:
-            from .podcast.enhancer import TranscriptEnhancer
-            click.echo("Unloading Ollama model...")
-            TranscriptEnhancer.unload_model(
-                settings.ollama_base_url,
-                settings.ollama_model
-            )
-        except Exception:
-            pass
 
-        for p in processes:
+    settings.ensure_directories()
+    port = port or settings.api_port
+
+    procs = [subprocess.Popen([
+        sys.executable, "-m", "uvicorn", "zettlecast.main:app",
+        "--host", settings.api_host, "--port", str(port),
+    ])]
+    frontend = PROJECT_ROOT / "frontend"
+    if not no_frontend and (frontend / "node_modules").exists():
+        procs.append(subprocess.Popen("npm run dev", cwd=frontend, shell=True))
+
+    click.echo(f"API:      http://localhost:{port}  (docs: /docs)")
+    if len(procs) > 1:
+        click.echo("Web UI:   http://localhost:3000")
+    click.echo("Press Ctrl+C to stop")
+    try:
+        for p in procs:
+            p.wait()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        for p in procs:
             p.terminate()
-        sys.exit(0)
-    
-    signal.signal(signal.SIGINT, shutdown)
-    signal.signal(signal.SIGTERM, shutdown)
-    
-    # Wait for processes
-    for p in processes:
-        p.wait()
+        from . import llm
+        llm.unload()
 
 
 @cli.command()
 @click.argument("path", type=click.Path(exists=True))
-def ingest(path: str):
-    """Ingest a file or directory."""
-    from .parser import parse_file
-    from .db import db
-    from .chunker import create_chunks
-    from .identity import compute_content_hash
-    from .models import NoteModel
-    
+@click.option("--name", "-n", help="Podcast name for audio files")
+def ingest(path: str, name: str):
+    """Ingest a file or folder (PDF, markdown, text, images; audio is queued for transcription)."""
+    from .parser import AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, TEXT_EXTENSIONS
+    from .pipeline import ingest_path
+
     path = Path(path)
-    db.connect()
-    
-    if path.is_file():
-        files = [path]
-    else:
-        # Find all supported files
-        files = list(path.glob("**/*.pdf")) + \
-                list(path.glob("**/*.md")) + \
-                list(path.glob("**/*.mp3")) + \
-                list(path.glob("**/*.m4a"))
-    
-    click.echo(f"Found {len(files)} files to process")
-    
+    supported = AUDIO_EXTENSIONS | IMAGE_EXTENSIONS | TEXT_EXTENSIONS | {".pdf"}
+    files = [path] if path.is_file() else sorted(
+        p for p in path.rglob("*") if p.is_file() and p.suffix.lower() in supported
+    )
+    click.echo(f"Found {len(files)} files")
+
+    queued = 0
     for file_path in files:
-        click.echo(f"Processing: {file_path.name}...", nl=False)
-        result = parse_file(file_path)
-        
+        click.echo(f"  {file_path.name} ... ", nl=False)
+        result = ingest_path(file_path, podcast_name=name)
         if result.status == "success":
-            click.echo(f" ✅ {result.uuid[:8]}")
+            click.echo(f"ok ({result.uuid[:8]})")
+        elif result.status == "queued":
+            queued += 1
+            click.echo("queued for transcription")
+        elif result.status == "duplicate":
+            click.echo("already ingested")
         else:
-            click.echo(f" ❌ {result.error_message}")
+            click.echo(f"FAILED: {result.error_message}")
+    if queued:
+        click.echo(f"\n{queued} audio file(s) queued. Run: zettlecast podcast run")
 
 
 @cli.command()
 @click.argument("query")
 @click.option("--top-k", "-k", default=5, help="Number of results")
 def search(query: str, top_k: int):
-    """Search notes."""
+    """Semantic search across all notes."""
     from .search import search as do_search
-    from .db import db
-    
-    db.connect()
-    
+
     results = do_search(query=query, top_k=top_k)
-    
     if not results:
         click.echo("No results found.")
         return
-    
-    click.echo(f"\n📚 Found {len(results)} results for '{query}':\n")
-    
     for i, r in enumerate(results, 1):
-        click.echo(f"{i}. [{r.source_type}] {r.title}")
-        click.echo(f"   Score: {r.score:.3f}")
-        click.echo(f"   {r.snippet[:100]}...")
+        at = f" @ {int(r.timestamp_seconds // 60)}:{int(r.timestamp_seconds % 60):02d}" if r.timestamp_seconds is not None else ""
+        click.echo(f"{i}. [{r.source_type}] {r.title}{at}  (score {r.score:.3f})")
+        click.echo("   " + r.snippet[:300].replace("\n", "\n   "))
         click.echo()
 
 
 @cli.command()
 @click.argument("url")
 def add(url: str):
-    """Quick-add a URL."""
+    """Ingest a web page."""
     from .parser import parse_url
-    from .db import db
-    
-    db.connect()
-    
-    click.echo(f"Ingesting: {url}...", nl=False)
+    from .pipeline import ingest_note
+
     result = parse_url(url)
-    
     if result.status == "success":
-        click.echo(f" ✅")
-        click.echo(f"   Title: {result.title}")
-        click.echo(f"   UUID: {result.uuid}")
+        ingest_note(result.note)
+        click.echo(f"ok: {result.title} ({result.uuid[:8]})")
     else:
-        click.echo(f" ❌ {result.error_message}")
+        click.echo(f"FAILED: {result.error_message}")
 
 
 @cli.command()
 def token():
-    """Print the current API token."""
+    """Print the API token and bookmarklet."""
     from .config import settings
+
     click.echo(f"API Token: {settings.api_token}")
-    click.echo(f"\nBookmarklet (copy this to a bookmark):")
-    click.echo(f"javascript:(function(){{fetch('http://localhost:{settings.api_port}/ingest?token={settings.api_token}&url='+encodeURIComponent(location.href))}})();")
+    click.echo("\nBookmarklet (save as a bookmark URL):")
+    click.echo(
+        f"javascript:(function(){{fetch('http://localhost:{settings.api_port}/ingest?token="
+        f"{settings.api_token}&url='+encodeURIComponent(location.href),{{method:'POST'}})"
+        f".then(r=>r.json()).then(j=>alert('Zettlecast: '+j.status))}})();"
+    )
 
 
 @cli.command()
 def stats():
     """Show database statistics."""
     from .db import db
-    
-    db.connect()
-    
-    try:
-        notes = db.notes.search().limit(10000).to_list()
-        rejected = db.rejected_edges.search().limit(10000).to_list()
-        
-        click.echo("📊 Zettlecast Statistics")
-        click.echo("=" * 40)
-        click.echo(f"Total notes: {len(notes)}")
-        click.echo(f"Rejected edges: {len(rejected)}")
-        
-        # Count by type
-        by_type = {}
-        for n in notes:
-            t = n.get("source_type", "unknown")
-            by_type[t] = by_type.get(t, 0) + 1
-        
-        click.echo("\nBy source type:")
-        for t, count in sorted(by_type.items()):
-            click.echo(f"  {t}: {count}")
-    except Exception as e:
-        click.echo(f"Error: {e}")
+
+    s = db.stats()
+    click.echo(f"Notes:  {s['notes']}")
+    click.echo(f"Chunks: {s['chunks']}")
+    click.echo(f"Edges:  {s['edges']}")
+    for t, count in sorted(s["by_source_type"].items()):
+        click.echo(f"  {t}: {count}")
+
+
+@cli.command()
+def reindex():
+    """Re-read all transcript notes from disk, re-embed them and rebuild the graph."""
+    from .pipeline import reindex_all
+
+    click.echo(f"Reindexed {reindex_all()} notes")
+
+
+@cli.group()
+def graph():
+    """Knowledge graph commands."""
+
+
+@graph.command("rebuild")
+def graph_rebuild():
+    """Recompute all graph edges."""
+    from .linker import rebuild_graph
+
+    click.echo(f"Graph rebuilt: {rebuild_graph()} edges")
 
 
 # =============================================================================
-# Podcast Transcription Commands
+# Podcast commands
 # =============================================================================
 
 @cli.group()
 def podcast():
-    """Podcast transcription pipeline commands."""
-    pass
+    """Podcast transcription pipeline."""
 
 
 @podcast.command("add")
@@ -205,388 +183,169 @@ def podcast():
 @click.option("--name", "-n", help="Podcast/show name")
 @click.option("--recursive/--no-recursive", default=True, help="Scan subdirectories")
 def podcast_add(path: str, name: str, recursive: bool):
-    """Add audio files to transcription queue."""
-    from .podcast.queue import TranscriptionQueue, DuplicateEpisodeError
-    
+    """Add audio files to the transcription queue."""
+    from .podcast.queue import DuplicateEpisodeError, TranscriptionQueue
+
     path = Path(path)
     queue = TranscriptionQueue()
-    
     if path.is_file():
         try:
-            job_id = queue.add(path, podcast_name=name)
-            click.echo(f"✅ Added: {path.name} (ID: {job_id[:8]})")
+            queue.add(path, podcast_name=name)
+            click.echo(f"Added: {path.name}")
         except DuplicateEpisodeError:
-            click.echo(f"⏭️  Skipped (already processed): {path.name}")
+            click.echo(f"Already queued or processed: {path.name}")
     else:
         job_ids = queue.add_directory(path, podcast_name=name, recursive=recursive)
-        click.echo(f"✅ Added {len(job_ids)} episodes to queue")
-    
-    # Show queue status
-    status = queue.get_status_summary()
-    click.echo(f"\n📋 Queue: {status['by_status']['pending']} pending, ETA: {status['estimated_remaining']}")
+        click.echo(f"Added {len(job_ids)} episodes")
+    click.echo(f"Pending: {queue.get_pending_count()}")
 
 
 @podcast.command("import")
 @click.argument("url")
 @click.option("--limit", "-l", default=5, help="Max episodes to download")
 def podcast_import(url: str, limit: int):
-    """Import episodes from RSS feed URL."""
+    """Download the latest episodes of an RSS feed and queue them."""
     from .podcast.queue import TranscriptionQueue
-    
-    click.echo(f"📡 Fetching feed: {url}...")
+
+    click.echo(f"Fetching feed: {url}")
     queue = TranscriptionQueue()
-    
-    try:
-        job_ids = queue.add_from_feed(url, limit=limit)
-        
-        if job_ids:
-            click.echo(f"✅ Added {len(job_ids)} episodes to queue")
-            
-            # Show queue status
-            status = queue.get_status_summary()
-            click.echo(f"\n📋 Queue: {status['by_status']['pending']} pending, ETA: {status['estimated_remaining']}")
-            click.echo("Run 'zettlecast podcast run' to process them")
-        else:
-            click.echo("⚠️  No new episodes added (duplicates or empty feed)")
-            
-    except Exception as e:
-        click.echo(f"❌ Failed to import feed: {e}")
+    job_ids = queue.add_from_feed(url, limit=limit)
+    click.echo(f"Added {len(job_ids)} episodes. Pending: {queue.get_pending_count()}")
 
 
 @podcast.command("run")
 @click.option("--limit", "-l", type=int, help="Max episodes to process")
-@click.option("--no-enhance", is_flag=True, help="Skip LLM enhancement")
-@click.option("--backend", "-b", type=str, help="Force specific backend (parakeet-mlx, mlx-whisper, whisper, nemo)")
-@click.option("--no-sync", is_flag=True, help="Skip auto-sync with storage (just process existing queue)")
-def podcast_run(limit: int, no_enhance: bool, backend: str, no_sync: bool):
-    """Process pending episodes in queue.
-    
-    Automatically syncs queue with storage: scans downloaded podcasts,
-    compares against transcripts, and adds missing items to queue.
-    Use --no-sync to skip this and just process existing queue items.
-    """
+@click.option("--no-enhance", is_flag=True, help="Skip LLM summary/cleanup")
+@click.option("--no-sync", is_flag=True, help="Don't scan storage/podcasts for new audio first")
+def podcast_run(limit: int, no_enhance: bool, no_sync: bool):
+    """Transcribe, diarize, enhance and index pending episodes."""
+    from .pipeline import run_podcast_queue
     from .podcast.queue import TranscriptionQueue
-    from .podcast.enhancer import TranscriptEnhancer
-    from .podcast.formatter import save_result
-    from .podcast.transcriber_factory import TranscriberFactory
-    from .parser import parse_file
-    from .db import db
-    from .config import settings
-    import time
-    import shutil
-    
-    def cleanup_gpu_memory():
-        """Aggressively clean up GPU memory and stale processes."""
-        import gc
-        import torch
-        import os
-        
-        click.echo("🧹 Cleaning up GPU memory...")
-        
-        # 1. Python GC
-        gc.collect()
-        
-        # 2. PyTorch Cache
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
-            
-        # 3. Kill stale zettlecast processes (careful!)
-        try:
-            import psutil
-            current_pid = os.getpid()
-            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-                try:
-                    # Look for other python processes running zettlecast
-                    if proc.info['pid'] != current_pid and \
-                       proc.info['name'] == 'python' and \
-                       any('zettlecast' in arg for arg in proc.info['cmdline'] or []):
-                        click.echo(f"   Killing stale process: {proc.info['pid']}")
-                        proc.kill()
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-        except ImportError:
-            click.echo("   (psutil not installed, skipping process cleanup)")
 
-        # 4. Unload Ollama Model
-        try:
-            from .podcast.enhancer import TranscriptEnhancer
-            click.echo("   Unloading Ollama model...")
-            TranscriptEnhancer.unload_model(
-                settings.ollama_base_url,
-                settings.ollama_model
-            )
-        except Exception as e:
-            click.echo(f"   (Failed to unload Ollama model: {e})")
-
-    cleanup_gpu_memory()
-    
     queue = TranscriptionQueue()
-    
-    # Auto-sync queue with storage (unless disabled)
     if not no_sync:
-        click.echo("🔄 Syncing queue with storage...")
-        sync_stats = queue.sync_with_storage()
-        
-        if sync_stats["reset_stuck"] > 0:
-            click.echo(f"   Reset {sync_stats['reset_stuck']} stuck processing items")
-        if sync_stats["added_to_queue"] > 0:
-            click.echo(f"   Added {sync_stats['added_to_queue']} new episodes from downloads")
-        
-        click.echo(f"   📁 {sync_stats['podcasts_found']} podcasts, {sync_stats['transcripts_found']} transcripts")
-    
+        queue.sync_with_storage()
     pending = queue.get_pending_count()
-    
     if pending == 0:
-        click.echo("✅ All podcasts are transcribed!")
+        click.echo("Nothing pending.")
         return
-    
-    # Create transcriber using factory (respects ASR_BACKEND setting)
-    transcriber = TranscriberFactory.create(backend=backend)
-    caps = transcriber.get_capabilities()
-    
-    click.echo("=" * 60)
-    click.echo("🎙️  Zettlecast Podcast Transcription")
-    click.echo("=" * 60)
-    click.echo(f"   Backend:     {caps.transcriber_name}")
-    click.echo(f"   Diarization: {caps.diarizer_name or 'disabled'}")
-    click.echo(f"   Episodes:    {min(limit, pending) if limit else pending} of {pending} pending")
-    click.echo(f"   Est. time:   {queue.estimate_time_remaining()}")
-    click.echo("=" * 60)
-    click.echo("")
-    
-    # Initialize enhancer
-    enhancer = TranscriptEnhancer() if not no_enhance else None
-    
-    processed = 0
-    total_time = 0
-    start_time = time.time()
-    
-    while True:
-        if limit and processed >= limit:
-            break
-        
-        item = queue.get_next_pending()
-        if not item:
-            break
-        
-        episode = item.episode
-        episode_num = processed + 1
-        total_to_process = min(limit, pending) if limit else pending
-        
-        click.echo(f"[{episode_num}/{total_to_process}] {episode.episode_title[:50]}...")
-        click.echo(f"        ↳ Downloading... ", nl=False)
-        
-        queue.mark_started(episode.id)
-        
-        try:
-            # Transcribe
-            click.echo("Transcribing... ", nl=False)
-            result = transcriber.transcribe(
-                Path(episode.audio_path),
-                episode=episode,
+    total = min(limit, pending) if limit else pending
+    click.echo(f"Processing {total} of {pending} pending episode(s)\n")
+
+    count = {"n": 0}
+
+    def start(_id, title):
+        count["n"] += 1
+        click.echo(f"[{count['n']}/{total}] {title}")
+
+    def progress_for(_id):
+        last = {"stage": None}
+
+        def cb(stage, chunk, total_chunks, device):
+            if stage != last["stage"]:
+                last["stage"] = stage
+                click.echo(f"    {stage}...")
+            return True
+
+        return cb
+
+    def done(o):
+        if o.status == "completed":
+            click.echo(
+                f"    done: {o.duration_seconds / 60:.1f} min audio in {o.processing_seconds:.0f}s, "
+                f"{o.speakers} speakers -> {o.note_path.name}\n"
             )
-            
-            # Enhance (optional)
-            enhanced = None
-            if enhancer:
-                click.echo("Enhancing... ", nl=False)
-                enhanced = enhancer.enhance(result.full_text)
-                result.keywords = enhanced.get("keywords", [])
-                result.sections = enhanced.get("sections", [])
-                result.summary = enhanced.get("summary", "")
-                result.key_points = enhanced.get("key_points", [])
-            
-            # Save
-            output_path = save_result(result, episode, enhanced)
-            queue.mark_completed(episode.id, result, output_path)
-            
-            # Auto-ingest into database
-            try:
-                ingest_result = parse_file(output_path)
-                if ingest_result.status == "success":
-                    db.connect()
-                    db.upsert_note(ingest_result.note)
-                    click.echo("        ↳ 💾 Ingested to database")
-                else:
-                    click.echo(f"        ↳ ⚠️ Ingestion failed: {ingest_result.error_message}")
-            except Exception as e:
-                click.echo(f"        ↳ ⚠️ Ingestion error: {e}")
-            
-            total_time += result.processing_time_seconds
-            
-            click.echo(f"✅ Done!")
-            click.echo(f"        ↳ Duration: {result.duration_seconds/60:.1f}min | "
-                      f"Time: {result.processing_time_seconds:.0f}s | "
-                      f"Speakers: {result.speakers_detected}")
-            processed += 1
-            
-        except Exception as e:
-            queue.mark_failed(episode.id, str(e), max_retries=settings.podcast_max_retries)
-            click.echo(f"❌ Failed: {str(e)[:60]}")
-    
-    # Summary
-    elapsed = time.time() - start_time
-    click.echo("")
-    click.echo("=" * 60)
-    click.echo(f"✅ Completed: {processed} episodes in {elapsed/60:.1f} minutes")
-    if processed > 0:
-        click.echo(f"   Avg time per episode: {total_time/processed:.0f}s")
-    click.echo("=" * 60)
-    
-    # Show remaining
-    status = queue.get_status_summary()
-    if status["by_status"]["pending"] > 0:
-        click.echo(f"📋 Remaining: {status['by_status']['pending']} pending")
-    if status["by_status"]["review"] > 0:
-        click.echo(f"⚠️  {status['by_status']['review']} episodes need review (use: ./zc podcast retry)")
+        else:
+            click.echo(f"    {o.status.upper()}: {o.error or ''}\n")
+
+    summary = run_podcast_queue(
+        limit=limit,
+        enhance=not no_enhance,
+        sync=False,
+        on_episode_start=start,
+        on_episode_done=done,
+        progress_for=progress_for,
+    )
+    click.echo(f"Completed {summary.completed}, failed {summary.failed}")
 
 
 @podcast.command("status")
 def podcast_status():
-    """Show queue status and time estimate."""
+    """Show queue status."""
     from .podcast.queue import TranscriptionQueue
-    
-    queue = TranscriptionQueue()
-    status = queue.get_status_summary()
-    
-    click.echo("📊 Podcast Queue Status")
-    click.echo("=" * 40)
-    click.echo(f"Total items: {status['total']}")
-    click.echo(f"  Pending:    {status['by_status']['pending']}")
-    click.echo(f"  Processing: {status['by_status']['processing']}")
-    click.echo(f"  Completed:  {status['by_status']['completed']}")
-    click.echo(f"  Review:     {status['by_status']['review']}")
-    click.echo(f"\nEstimated time remaining: {status['estimated_remaining']}")
-    click.echo(f"Avg processing time: {status['avg_processing_time']}")
+
+    status = TranscriptionQueue().get_status_summary()
+    click.echo(f"Total: {status['total']}")
+    for k, v in status["by_status"].items():
+        click.echo(f"  {k}: {v}")
 
 
 @podcast.command("retry")
 def podcast_retry():
-    """Retry failed episodes marked for review."""
+    """Reset failed episodes to pending."""
     from .podcast.queue import TranscriptionQueue
-    
-    queue = TranscriptionQueue()
-    count = queue.retry_failed()
-    
-    if count > 0:
-        click.echo(f"✅ Reset {count} failed episodes for retry")
-        click.echo("Run 'zettlecast podcast run' to process them")
-    else:
-        click.echo("No failed episodes to retry")
+
+    click.echo(f"Reset {TranscriptionQueue().retry_failed()} episodes")
 
 
-# ===========================================
-# IMAGE PROCESSING COMMANDS
-# ===========================================
-
+# =============================================================================
+# Image commands
+# =============================================================================
 
 @cli.group()
 def image():
-    """Image processing pipeline commands."""
-    pass
+    """Image processing pipeline."""
 
 
 @image.command("add")
 @click.argument("path", type=click.Path(exists=True))
-@click.option("--collection", "-c", help="Collection/folder name")
+@click.option("--collection", "-c", help="Collection name")
 @click.option("--recursive/--no-recursive", default=True, help="Scan subdirectories")
 def image_add(path: str, collection: str, recursive: bool):
-    """Add images to processing queue."""
-    from pathlib import Path
-    from .image.queue import ImageQueue, DuplicateImageError
+    """Add images to the processing queue."""
+    from .image.queue import DuplicateImageError, ImageQueue
 
     path = Path(path)
     queue = ImageQueue()
-
     if path.is_file():
         try:
-            job_id = queue.add(path, collection_name=collection)
-            click.echo(f"✅ Added: {path.name} (ID: {job_id[:8]})")
+            queue.add(path, collection_name=collection)
+            click.echo(f"Added: {path.name}")
         except DuplicateImageError as e:
-            click.echo(f"⚠️  {e}")
-            return
+            click.echo(str(e))
     else:
-        try:
-            job_ids = queue.add_directory(path, collection_name=collection, recursive=recursive)
-            click.echo(f"✅ Added {len(job_ids)} images to queue")
-        except Exception as e:
-            click.echo(f"❌ Error: {e}")
-            return
-
-    status = queue.get_status_summary()
-    click.echo(f"\n📋 Queue: {status['by_status']['pending']} pending, ETA: {status['estimated_remaining']}")
+        click.echo(f"Added {len(queue.add_directory(path, collection_name=collection, recursive=recursive))} images")
 
 
 @image.command("run")
 @click.option("--limit", "-l", type=int, help="Max images to process")
-@click.option("--model", "-m", help="Vision model (e.g., qwen2.5-vl:7b)")
-def image_run(limit: int, model: str):
-    """Process pending images in queue."""
+def image_run(limit: int):
+    """Analyse pending images and index them."""
     import time
-    from pathlib import Path
-    from .image.queue import ImageQueue
-    from .image.image_parser import parse_image
-    from .db import Database
-    from .config import settings
 
-    # Override model if specified
-    if model:
-        settings.vision_model = model
+    from .image.image_parser import parse_image
+    from .image.queue import ImageQueue
+    from .pipeline import ingest_note
 
     queue = ImageQueue()
-    pending = queue.get_pending_count()
-
-    if pending == 0:
-        click.echo("✅ All images are processed!")
-        return
-
-    click.echo("=" * 60)
-    click.echo("🖼️  Zettlecast Image Processing")
-    click.echo("=" * 60)
-    click.echo(f"   Model:    {settings.vision_model}")
-    click.echo(f"   Images:   {min(limit, pending) if limit else pending} of {pending}")
-    click.echo(f"   Est time: {queue.estimate_time_remaining()}")
-    click.echo("=" * 60)
-
-    db = Database()
-    db.connect()
-
     processed = 0
-    start_time = time.time()
-
-    while True:
-        if limit and processed >= limit:
-            break
-
+    while not limit or processed < limit:
         item = queue.get_next_pending()
         if not item:
             break
-
-        click.echo(f"[{processed+1}] {Path(item.image.image_path).name}... ", nl=False)
+        click.echo(f"{Path(item.image.image_path).name} ... ", nl=False)
         queue.mark_started(item.image.id)
-
-        item_start = time.time()
-        try:
-            result = parse_image(Path(item.image.image_path))
-
-            if result.status == "success":
-                db.upsert_note(result.note)
-                processing_time = time.time() - item_start
-                queue.mark_completed(item.image.id, processing_time)
-                click.echo(f"✅ {result.uuid[:8]} ({processing_time:.1f}s)")
-            else:
-                queue.mark_failed(item.image.id, result.error_message)
-                click.echo(f"❌ {result.error_message}")
-
-            processed += 1
-
-        except Exception as e:
-            queue.mark_failed(item.image.id, str(e))
-            click.echo(f"❌ {str(e)}")
-
-    elapsed = time.time() - start_time
-    click.echo(f"\n✅ Completed: {processed} images in {elapsed/60:.1f} minutes")
+        started = time.time()
+        result = parse_image(Path(item.image.image_path))
+        if result.status == "success":
+            ingest_note(result.note)
+            queue.mark_completed(item.image.id, time.time() - started)
+            click.echo(f"ok ({time.time() - started:.1f}s)")
+        else:
+            queue.mark_failed(item.image.id, result.error_message)
+            click.echo(f"FAILED: {result.error_message}")
+        processed += 1
+    click.echo(f"Processed {processed} images")
 
 
 @image.command("status")
@@ -594,33 +353,18 @@ def image_status():
     """Show queue status."""
     from .image.queue import ImageQueue
 
-    queue = ImageQueue()
-    status = queue.get_status_summary()
-
-    click.echo("📊 Image Queue Status")
-    click.echo("=" * 40)
-    click.echo(f"Total:      {status['total']}")
-    click.echo(f"  Pending:    {status['by_status']['pending']}")
-    click.echo(f"  Processing: {status['by_status']['processing']}")
-    click.echo(f"  Completed:  {status['by_status']['completed']}")
-    click.echo(f"  Failed:     {status['by_status']['failed']}")
-    click.echo(f"  Review:     {status['by_status']['review']}")
-    click.echo(f"\nETA: {status['estimated_remaining']}")
+    status = ImageQueue().get_status_summary()
+    click.echo(f"Total: {status['total']}")
+    for k, v in status["by_status"].items():
+        click.echo(f"  {k}: {v}")
 
 
 @image.command("retry")
 def image_retry():
-    """Retry failed images."""
+    """Reset failed images to pending."""
     from .image.queue import ImageQueue
 
-    queue = ImageQueue()
-    count = queue.retry_failed()
-
-    if count > 0:
-        click.echo(f"✅ Reset {count} failed images for retry")
-        click.echo("Run 'zettlecast image run' to process them")
-    else:
-        click.echo("No failed images to retry")
+    click.echo(f"Reset {ImageQueue().retry_failed()} images")
 
 
 def main():
@@ -629,4 +373,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

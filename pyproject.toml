@@ -1,90 +1,57 @@
 [project]
 name = "zettlecast"
 version = "0.1.0"
-description = "Digital Zettelkasten Middleware - Local-First AI Knowledge System"
+description = "Local-first Zettelkasten: podcast transcription, semantic search and a knowledge graph (Windows + NVIDIA GPU)"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12,<3.14"
 license = {text = "MIT"}
 authors = [
     {name = "Zettlecast Team"}
 ]
 
+# Install with setup.ps1, which pulls torch from the CUDA 13 wheel index:
+#   uv pip install -e ".[dev]" --extra-index-url https://download.pytorch.org/whl/cu130 --index-strategy unsafe-best-match
 dependencies = [
-    # Core
+    # API / CLI
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
     "pydantic>=2.10.0",
     "pydantic-settings>=2.6.0",
-    
+    "python-multipart>=0.0.17",
+    "click>=8.1.0",
+
     # Database
     "lancedb>=0.17.0",
     "pyarrow>=15.0.0,<18.0.0",  # <18 required for NeMo/datasets compatibility
-    
-    # Embeddings & ML
-    "sentence-transformers>=3.3.0",
-    "torch>=2.5.0",
-    
-    # PDF Parsing (Tiered)
+
+    # GPU models
+    "torch>=2.7.0",  # RTX 50-series (sm_120) needs 2.7+; use the cu130 wheels
+    "torchaudio>=2.7.0",
+    "sentence-transformers>=5.0.0",  # Qwen3-Reranker CrossEncoder support
+    # NeMo Speech: Nemotron-3-Diarization needs rope attention, newer than the 3.0.0 PyPI release
+    "nemo-toolkit[asr] @ git+https://github.com/NVIDIA-NeMo/Speech@218d0b443441b7d8aa1c832f47df310f186cf0a4",
+    "pydub>=0.25.0",
+
+    # Document parsing
     "pypdf>=5.1.0",
     "marker-pdf>=0.3.0",
-    
-    # Web Scraping
     "trafilatura>=2.0.0",
+    "beautifulsoup4>=4.12.0",
     "feedparser>=6.0.0",
-    
-    # Audio Transcription
-    "faster-whisper>=1.1.0",
-    "av<19",  # PyAV 19 dropped the metadata_errors arg faster-whisper 1.2.1 passes to av.open()
-    "pydub>=0.25.0",  # Audio chunking/resampling for the NeMo pipeline
-    
+    "pillow>=10.0.0",
+
     # Utilities
-    "python-multipart>=0.0.17",
     "pyyaml>=6.0.0",
     "httpx>=0.28.0",
+    "numpy>=1.26.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
-    "pytest-cov>=6.0.0",
     "ruff>=0.8.0",
-    "mypy>=1.13.0",
 ]
-
-# Mac-specific (Apple Silicon with MLX)
-mac = [
-    "parakeet-mlx>=0.1.0",
-    "mlx-whisper>=0.4.0",
-    "pyannote.audio>=3.1.0",
-    "torchaudio>=2.0.0",
-]
-
-# Windows-specific (NeMo in container)
-windows = [
-    "docker>=7.0.0",
-]
-
-# Full podcast processing (platform-agnostic)
-podcast = [
-    # Diarization (works on all platforms)
-    "pyannote.audio>=3.1.0",
-    "speechbrain>=1.0.0",
-    # VAD / Audio
-    "torchaudio>=2.0.0",
-    "pydub>=0.25.0",
-]
-
-# NeMo Speech 3.x (Python 3.12+, PyTorch 2.7+). Install a CUDA PyTorch build first:
-#   uv pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu130
-# nvidia/Nemotron-3-Diarization needs rope attention, which is newer than the 3.0.0
-# PyPI release; until 3.1 ships, install from GitHub:
-#   uv pip install "nemo-toolkit[asr] @ git+https://github.com/NVIDIA-NeMo/Speech@218d0b443441b7d8aa1c832f47df310f186cf0a4"
-nemo = [
-    "nemo_toolkit[asr]>=3.0.0",
-    "omegaconf>=2.3.0",
-]
-
 
 [project.scripts]
 zettlecast = "zettlecast.cli:main"
@@ -93,12 +60,15 @@ zettlecast = "zettlecast.cli:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/zettlecast"]
 
 [tool.ruff]
-line-length = 100
-target-version = "py310"
+line-length = 110
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]
@@ -106,7 +76,3 @@ select = ["E", "F", "I", "N", "W"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-
-[tool.mypy]
-python_version = "3.10"
-strict = true

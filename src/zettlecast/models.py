@@ -17,9 +17,6 @@ class ChunkModel(BaseModel):
     text: str = Field(description="Chunk content")
     start_char: int = Field(description="Start position in original document")
     end_char: int = Field(description="End position in original document")
-    context_prefix: Optional[str] = Field(
-        default=None, description="LLM-generated context (optional)"
-    )
 
 
 class NoteMetadata(BaseModel):
@@ -44,32 +41,12 @@ class NoteModel(BaseModel):
     source_type: str = Field(description="pdf | web | audio | markdown | rss | image")
     source_path: str = Field(description="Original file path or URL")
     full_text: str = Field(description="Complete extracted text")
-    chunks: List[ChunkModel] = Field(default_factory=list)
     metadata: NoteMetadata = Field(default_factory=NoteMetadata)
     content_hash: str = Field(description="SHA256 of full_text for dedup")
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     status: str = Field(default="inbox", description="inbox | reviewed | archived")
 
-    # Vector field - will be populated by LanceDB embedding function
-    # Not defined here as it's handled by LanceDB's VectorField
-
-
-class RejectedEdge(BaseModel):
-    """Represents a user-rejected link suggestion."""
-
-    source_uuid: str = Field(description="Note A UUID")
-    target_uuid: str = Field(description="Note B UUID")
-    rejected_at: datetime = Field(default_factory=datetime.utcnow)
-
-
-class SuggestionCache(BaseModel):
-    """Cached link suggestions for a note."""
-
-    note_uuid: str
-    suggested_uuids: List[str] = Field(description="Ordered list of suggestion UUIDs")
-    scores: List[float] = Field(description="Relevance scores for each suggestion")
-    cached_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class ProcessingResult(BaseModel):
@@ -90,8 +67,11 @@ class SearchResult(BaseModel):
     uuid: str
     title: str
     score: float
-    snippet: str = Field(description="Relevant text snippet")
+    snippet: str = Field(description="Best-matching chunk of the note")
     source_type: str
+    timestamp_seconds: Optional[float] = Field(
+        default=None, description="Start of the matching transcript turn (audio notes)"
+    )
 
 
 class LinkSuggestion(BaseModel):

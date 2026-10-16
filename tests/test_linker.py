@@ -1,178 +1,86 @@
-"""
-Unit tests for the linker module.
-Tests composite weighting algorithm, Jaccard similarity, and temporal direction.
-"""
+"""Tests for graph edge construction."""
 
+from unittest.mock import patch
+
+import numpy as np
 import pytest
-from datetime import datetime, timedelta
-from unittest.mock import MagicMock, patch
 
-from zettlecast.linker import (
-    calculate_jaccard_similarity,
-    calculate_composite_weight,
-    get_temporal_direction,
-    GraphEdge,
-)
-from zettlecast.models import NoteModel, NoteMetadata
+from zettlecast.linker import _edges_from, calculate_composite_weight, calculate_jaccard_similarity
 
 
 class TestJaccardSimilarity:
-    """Tests for calculate_jaccard_similarity function."""
-    
     def test_identical_tags(self):
-        """Identical tag sets should return 1.0."""
-        tags = ["python", "machine-learning", "ai"]
-        assert calculate_jaccard_similarity(tags, tags) == 1.0
-    
+        assert calculate_jaccard_similarity(["a", "b"], ["a", "b"]) == 1.0
+
     def test_no_overlap(self):
-        """Completely different tags should return 0.0."""
-        tags_a = ["python", "javascript"]
-        tags_b = ["rust", "golang"]
-        assert calculate_jaccard_similarity(tags_a, tags_b) == 0.0
-    
+        assert calculate_jaccard_similarity(["a"], ["b"]) == 0.0
+
     def test_partial_overlap(self):
-        """Partial overlap should return correct ratio."""
-        tags_a = ["python", "javascript", "react"]
-        tags_b = ["python", "react", "vue"]
-        # Intersection: python, react = 2
-        # Union: python, javascript, react, vue = 4
-        # Jaccard = 2/4 = 0.5
-        assert calculate_jaccard_similarity(tags_a, tags_b) == 0.5
-    
+        assert calculate_jaccard_similarity(["a", "b", "c"], ["b", "c", "d"]) == pytest.approx(0.5)
+
     def test_empty_tags(self):
-        """Empty tag sets should return 0.0."""
         assert calculate_jaccard_similarity([], []) == 0.0
-        assert calculate_jaccard_similarity(["python"], []) == 0.0
-        assert calculate_jaccard_similarity([], ["python"]) == 0.0
-    
-    def test_case_insensitive(self):
-        """Tags should be compared case-insensitively."""
-        tags_a = ["Python", "REACT"]
-        tags_b = ["python", "react"]
-        assert calculate_jaccard_similarity(tags_a, tags_b) == 1.0
-    
-    def test_whitespace_handling(self):
-        """Whitespace should be stripped from tags."""
-        tags_a = ["  python  ", "react"]
-        tags_b = ["python", "  react  "]
-        assert calculate_jaccard_similarity(tags_a, tags_b) == 1.0
+
+    def test_case_and_whitespace_insensitive(self):
+        assert calculate_jaccard_similarity(["Gut Training "], ["gut training"]) == 1.0
 
 
 class TestCompositeWeight:
-    """Tests for calculate_composite_weight function."""
-    
     def test_pure_vector_sim(self):
-        """With beta=0, only vector similarity matters."""
-        result = calculate_composite_weight(0.8, 0.5, alpha=1.0, beta=0.0)
-        assert result == 0.8
-    
+        assert calculate_composite_weight(0.8, 0.0, alpha=1.0, beta=0.0) == 0.8
+
     def test_pure_tag_sim(self):
-        """With alpha=0, only tag similarity matters."""
-        result = calculate_composite_weight(0.8, 0.5, alpha=0.0, beta=1.0)
-        assert result == 0.5
-    
-    def test_default_weights(self):
-        """Default 0.7/0.3 split should work correctly."""
-        # 0.7 * 0.8 + 0.3 * 0.5 = 0.56 + 0.15 = 0.71
-        result = calculate_composite_weight(0.8, 0.5, alpha=0.7, beta=0.3)
-        assert result == 0.71
-    
+        assert calculate_composite_weight(0.0, 0.6, alpha=0.0, beta=1.0) == 0.6
+
     def test_negative_vector_sim_clamped(self):
-        """Negative vector similarity should be clamped to 0."""
-        result = calculate_composite_weight(-0.5, 0.5, alpha=0.5, beta=0.5)
-        # -0.5 clamped to 0, so 0.5 * 0 + 0.5 * 0.5 = 0.25
-        assert result == 0.25
-    
+        assert calculate_composite_weight(-0.5, 0.0, alpha=1.0, beta=0.0) == 0.0
+
     def test_weights_normalized(self):
-        """Weights should be normalized if they don't sum to 1."""
-        # alpha=2, beta=2 should normalize to 0.5/0.5
-        result = calculate_composite_weight(0.8, 0.4, alpha=2.0, beta=2.0)
-        # 0.5 * 0.8 + 0.5 * 0.4 = 0.4 + 0.2 = 0.6
-        assert result == 0.6
+        assert calculate_composite_weight(1.0, 1.0, alpha=2.0, beta=2.0) == 1.0
 
 
-class TestTemporalDirection:
-    """Tests for get_temporal_direction function."""
-    
-    def create_note(self, uuid: str, created_at: datetime) -> NoteModel:
-        """Helper to create a mock note."""
-        return NoteModel(
-            uuid=uuid,
-            title="Test",
-            source_type="web",
-            source_path="http://test.com",
-            full_text="Test content",
-            content_hash="abc123",
-            created_at=created_at,
-            metadata=NoteMetadata(),
-        )
-    
-    @patch("zettlecast.linker.settings")
-    def test_older_to_newer(self, mock_settings):
-        """Older note should point to newer note."""
-        mock_settings.graph_temporal_direction = True
-        
-        old_note = self.create_note("old-uuid", datetime(2024, 1, 1))
-        new_note = self.create_note("new-uuid", datetime(2024, 6, 1))
-        
-        source, target, is_directed = get_temporal_direction(old_note, new_note)
-        
-        assert source == "old-uuid"
-        assert target == "new-uuid"
-        assert is_directed is True
-    
-    @patch("zettlecast.linker.settings")
-    def test_newer_to_older_reversed(self, mock_settings):
-        """Arguments in reverse order should still produce older→newer."""
-        mock_settings.graph_temporal_direction = True
-        
-        old_note = self.create_note("old-uuid", datetime(2024, 1, 1))
-        new_note = self.create_note("new-uuid", datetime(2024, 6, 1))
-        
-        source, target, is_directed = get_temporal_direction(new_note, old_note)
-        
-        assert source == "old-uuid"
-        assert target == "new-uuid"
-        assert is_directed is True
-    
-    @patch("zettlecast.linker.settings")
-    def test_undirected_mode(self, mock_settings):
-        """With temporal direction disabled, edges are undirected."""
-        mock_settings.graph_temporal_direction = False
-        
-        note_a = self.create_note("b-uuid", datetime(2024, 1, 1))
-        note_b = self.create_note("a-uuid", datetime(2024, 6, 1))
-        
-        source, target, is_directed = get_temporal_direction(note_a, note_b)
-        
-        # Should be alphabetically ordered
-        assert source == "a-uuid"
-        assert target == "b-uuid"
-        assert is_directed is False
+def unit(v):
+    v = np.asarray(v, dtype=np.float32)
+    return v / np.linalg.norm(v)
 
 
-class TestGraphEdge:
-    """Tests for GraphEdge class."""
-    
-    def test_to_dict(self):
-        """to_dict should return all fields."""
-        edge = GraphEdge(
-            source_uuid="source",
-            target_uuid="target",
-            weight=0.85,
-            vector_sim=0.9,
-            tag_sim=0.7,
-            is_directed=True,
-            edge_type="semantic",
-        )
-        
-        d = edge.to_dict()
-        
-        assert d["source_uuid"] == "source"
-        assert d["target_uuid"] == "target"
-        assert d["weight"] == 0.85
-        assert d["vector_sim"] == 0.9
-        assert d["tag_sim"] == 0.7
-        assert d["is_directed"] is True
-        assert d["edge_type"] == "semantic"
-        assert "created_at" in d
+def note(uuid, vector, created, tags=()):
+    return {"uuid": uuid, "title": uuid, "created_at": created, "tags": list(tags), "vector": unit(vector)}
+
+
+@pytest.fixture(autouse=True)
+def graph_settings():
+    with patch("zettlecast.linker.settings") as s:
+        s.graph_alpha = 0.7
+        s.graph_beta = 0.3
+        s.graph_edge_threshold = 0.5
+        s.graph_max_edges_per_note = 8
+        yield s
+
+
+class TestEdgesFrom:
+    def test_links_similar_notes_older_to_newer(self):
+        a = note("a", [1, 0.1], "2026-02-01", ["gut"])
+        b = note("b", [1, 0.0], "2026-01-01", ["gut"])
+        edges = _edges_from(a, [a, b], rejected=set())
+        assert len(edges) == 1
+        assert (edges[0]["source_uuid"], edges[0]["target_uuid"]) == ("b", "a")
+        assert edges[0]["tag_sim"] == 1.0
+
+    def test_skips_dissimilar_and_self(self):
+        a = note("a", [1, 0], "2026-01-01")
+        c = note("c", [0, 1], "2026-01-02")
+        assert _edges_from(a, [a, c], rejected=set()) == []
+
+    def test_respects_rejected_pairs(self):
+        a = note("a", [1, 0], "2026-01-01")
+        b = note("b", [1, 0], "2026-01-02")
+        assert _edges_from(a, [a, b], rejected={("a", "b")}) == []
+
+    def test_caps_edges_per_note(self, graph_settings):
+        graph_settings.graph_max_edges_per_note = 2
+        a = note("a", [1, 0], "2026-01-01")
+        others = [note(f"n{i}", [1, 0.01 * i], f"2026-01-0{i + 2}") for i in range(5)]
+        edges = _edges_from(a, [a, *others], rejected=set())
+        assert len(edges) == 2
+        assert edges[0]["weight"] >= edges[1]["weight"]

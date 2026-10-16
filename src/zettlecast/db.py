@@ -1,250 +1,189 @@
 """
-Zettlecast Database Layer
-LanceDB operations for notes and embeddings.
+Zettlecast Database Layer (LanceDB)
+
+Tables:
+- notes:          one row per note, with a note-level vector (mean of its chunk
+                  vectors) used for graph similarity
+- chunks:         text chunks of every note with their own vectors; search runs
+                  here so the whole of a long transcript is searchable
+- graph_edges:    computed links between notes
+- rejected_edges: user-rejected link suggestions
 """
 
-from datetime import datetime, timedelta
+import json
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
 import lancedb
-from lancedb.embeddings import get_registry
-from lancedb.pydantic import LanceModel, Vector
+import numpy as np
+import pyarrow as pa
 
+from .chunker import create_chunks
 from .config import settings
-from .models import NoteModel, RejectedEdge, SearchResult, SuggestionCache
+from .models import NoteModel
+
+DIM = settings.embedding_dimensions
+
+NOTES_SCHEMA = pa.schema([
+    ("uuid", pa.string()),
+    ("title", pa.string()),
+    ("source_type", pa.string()),
+    ("source_path", pa.string()),
+    ("full_text", pa.string()),
+    ("content_hash", pa.string()),
+    ("status", pa.string()),
+    ("created_at", pa.string()),
+    ("updated_at", pa.string()),
+    ("metadata_json", pa.string()),
+    ("vector", pa.list_(pa.float32(), DIM)),
+])
+
+CHUNKS_SCHEMA = pa.schema([
+    ("chunk_id", pa.string()),
+    ("note_uuid", pa.string()),
+    ("text", pa.string()),
+    ("start_char", pa.int32()),
+    ("vector", pa.list_(pa.float32(), DIM)),
+])
+
+EDGES_SCHEMA = pa.schema([
+    ("source_uuid", pa.string()),
+    ("target_uuid", pa.string()),
+    ("weight", pa.float32()),
+    ("vector_sim", pa.float32()),
+    ("tag_sim", pa.float32()),
+    ("created_at", pa.string()),
+])
+
+REJECTED_SCHEMA = pa.schema([
+    ("source_uuid", pa.string()),
+    ("target_uuid", pa.string()),
+    ("rejected_at", pa.string()),
+])
 
 
-# Initialize embedding function from registry
-def get_embedding_function():
-    """Get the sentence-transformers embedding function."""
-    import os
-    if settings.hf_token:
-        os.environ["HF_TOKEN"] = settings.hf_token
-        
-    import torch
-
-    model = get_registry().get("sentence-transformers")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    return model.create(name=settings.embedding_model, device=device)
+def _q(value: str) -> str:
+    """Quote a string literal for a LanceDB filter."""
+    return "'" + value.replace("'", "''") + "'"
 
 
-# Initialize embedding function
-func = get_embedding_function()
-
-# LanceDB schema with embedded vector field
-class NoteTable(LanceModel):
-    """LanceDB table schema for notes with auto-embedding."""
-    
-    uuid: str
-    title: str
-    source_type: str
-    source_path: str
-    full_text: str = func.SourceField()  # Mark as source for embedding
-    content_hash: str
-    status: str
-    created_at: str  # ISO format string
-    updated_at: str
-    metadata_json: str  # JSON serialized metadata
-    chunks_json: str  # JSON serialized chunks
-    
-    # Vector field - auto-populated from full_text
-    vector: Vector(settings.embedding_dimensions) = func.VectorField(default=None)
-
-
-class RejectedEdgeTable(LanceModel):
-    """LanceDB table schema for rejected edges."""
-    
-    source_uuid: str
-    target_uuid: str
-    rejected_at: str
-
-
-class SuggestionCacheTable(LanceModel):
-    """LanceDB table schema for suggestion cache."""
-    
-    note_uuid: str
-    suggested_uuids_json: str  # JSON array
-    scores_json: str  # JSON array
-    cached_at: str
-
-
-class GraphEdgeTable(LanceModel):
-    """LanceDB table schema for computed graph edges."""
-    
-    source_uuid: str
-    target_uuid: str
-    weight: float  # Composite score
-    vector_sim: float  # Vector similarity component
-    tag_sim: float  # Jaccard tag similarity component
-    is_directed: bool  # True if temporal direction applied
-    edge_type: str  # "semantic" | "prerequisite"
-    created_at: str
+def _row_to_note(row: dict) -> NoteModel:
+    return NoteModel(
+        uuid=row["uuid"],
+        title=row["title"],
+        source_type=row["source_type"],
+        source_path=row["source_path"],
+        full_text=row["full_text"],
+        content_hash=row["content_hash"],
+        status=row["status"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+        updated_at=datetime.fromisoformat(row["updated_at"]),
+        metadata=json.loads(row["metadata_json"]),
+    )
 
 
 class Database:
     """Database wrapper for LanceDB operations."""
-    
+
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = db_path or settings.lancedb_path
         self._db = None
-        self._notes_table = None
-        self._rejected_table = None
-        self._cache_table = None
-    
+        self._tables: dict = {}
+
     def connect(self) -> "Database":
-        """Connect to LanceDB."""
         self.db_path.mkdir(parents=True, exist_ok=True)
         self._db = lancedb.connect(str(self.db_path))
+        self._tables = {}
         return self
-    
+
     @property
     def db(self):
         if self._db is None:
             self.connect()
         return self._db
-    
-    def _get_or_create_table(self, name: str, schema):
-        """Get existing table or create new one."""
-        if name in self.db.table_names():
-            return self.db.open_table(name)
-        return self.db.create_table(name, schema=schema)
-    
+
+    def _table(self, name: str, schema: pa.Schema):
+        if name not in self._tables:
+            if name in self.db.table_names():
+                self._tables[name] = self.db.open_table(name)
+            else:
+                self._tables[name] = self.db.create_table(name, schema=schema)
+        return self._tables[name]
+
     @property
     def notes(self):
-        """Get or create notes table."""
-        if self._notes_table is None:
-            self._notes_table = self._get_or_create_table("notes", NoteTable)
-        return self._notes_table
-    
+        return self._table("notes", NOTES_SCHEMA)
+
     @property
-    def rejected_edges(self):
-        """Get or create rejected edges table."""
-        if self._rejected_table is None:
-            self._rejected_table = self._get_or_create_table("rejected_edges", RejectedEdgeTable)
-        return self._rejected_table
-    
-    @property
-    def suggestion_cache(self):
-        """Get or create suggestion cache table."""
-        if self._cache_table is None:
-            self._cache_table = self._get_or_create_table("suggestion_cache", SuggestionCacheTable)
-        return self._cache_table
-    
+    def chunks(self):
+        return self._table("chunks", CHUNKS_SCHEMA)
+
     @property
     def graph_edges(self):
-        """Get or create graph edges table."""
-        if not hasattr(self, "_graph_edges_table") or self._graph_edges_table is None:
-            self._graph_edges_table = self._get_or_create_table("graph_edges", GraphEdgeTable)
-        return self._graph_edges_table
-    
-    # --- Graph Edge Operations ---
-    
-    def save_edges(self, edges: list) -> int:
-        """Save computed edges to database. Returns count of edges saved."""
-        from datetime import datetime
-        
-        records = []
-        for edge in edges:
-            records.append({
-                "source_uuid": edge.source_uuid,
-                "target_uuid": edge.target_uuid,
-                "weight": edge.weight,
-                "vector_sim": edge.vector_sim,
-                "tag_sim": edge.tag_sim,
-                "is_directed": edge.is_directed,
-                "edge_type": edge.edge_type,
-                "created_at": edge.created_at.isoformat() if hasattr(edge.created_at, 'isoformat') else datetime.utcnow().isoformat(),
-            })
-        
-        if records:
-            self.graph_edges.add(records)
-        return len(records)
-    
-    def get_all_edges(self) -> list:
-        """Get all edges for graph visualization."""
-        try:
-            results = self.graph_edges.search().limit(10000).to_list()
-            return results
-        except Exception:
-            return []
-    
-    def delete_edges_for_note(self, uuid: str) -> None:
-        """Delete all edges involving a note (for rebuilding)."""
-        self.graph_edges.delete(f"source_uuid = '{uuid}' OR target_uuid = '{uuid}'")
-    
-    # --- Note Operations ---
-    
+        return self._table("graph_edges", EDGES_SCHEMA)
+
+    @property
+    def rejected_edges(self):
+        return self._table("rejected_edges", REJECTED_SCHEMA)
+
+    # --- Notes ---
+
     def upsert_note(self, note: NoteModel) -> None:
-        """Insert or update a note."""
-        import json
-        
-        # Convert to table format
-        record = NoteTable(
-            uuid=note.uuid,
-            title=note.title,
-            source_type=note.source_type,
-            source_path=note.source_path,
-            full_text=note.full_text,
-            content_hash=note.content_hash,
-            status=note.status,
-            created_at=note.created_at.isoformat(),
-            updated_at=datetime.utcnow().isoformat(),
-            metadata_json=json.dumps(note.metadata.model_dump()),
-            chunks_json=json.dumps([c.model_dump() for c in note.chunks]),
-        )
-        
-        # Check if exists
-        existing = self.get_note_by_uuid(note.uuid)
-        if existing:
-            # Update (convert to dict for update)
-            self.notes.update(
-                where=f"uuid = '{note.uuid}'",
-                values=record.model_dump(exclude={"vector"}), # Vector update might be tricky if not recalculated? 
-            )
-        else:
-            # Insert
-            self.notes.add([record])
-    
+        """Insert or replace a note: chunk it, embed the chunks, store both."""
+        from .embeddings import embed_documents
+
+        chunks = create_chunks(note.full_text, note.uuid)
+        # Prefix each chunk with the title so short chunks keep their context
+        vectors = embed_documents([f"{note.title}\n\n{c.text}" for c in chunks])
+        note_vector = vectors.mean(axis=0) if len(vectors) else np.zeros(DIM, np.float32)
+        norm = np.linalg.norm(note_vector)
+        if norm > 0:
+            note_vector = note_vector / norm
+
+        self.delete_note(note.uuid, keep_edges=True)
+
+        self.notes.add([{
+            "uuid": note.uuid,
+            "title": note.title,
+            "source_type": note.source_type,
+            "source_path": note.source_path,
+            "full_text": note.full_text,
+            "content_hash": note.content_hash,
+            "status": note.status,
+            "created_at": note.created_at.isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+            "metadata_json": json.dumps(note.metadata.model_dump()),
+            "vector": note_vector.astype(np.float32).tolist(),
+        }])
+        if chunks:
+            self.chunks.add([
+                {
+                    "chunk_id": c.chunk_id,
+                    "note_uuid": note.uuid,
+                    "text": c.text,
+                    "start_char": c.start_char,
+                    "vector": v.tolist(),
+                }
+                for c, v in zip(chunks, vectors)
+            ])
+
     def get_note_by_uuid(self, uuid: str) -> Optional[NoteModel]:
-        """Get a note by UUID."""
-        import json
-        
-        results = self.notes.search().where(f"uuid = '{uuid}'").limit(1).to_list()
-        if not results:
-            return None
-        
-        row = results[0]
-        return NoteModel(
-            uuid=row["uuid"],
-            title=row["title"],
-            source_type=row["source_type"],
-            source_path=row["source_path"],
-            full_text=row["full_text"],
-            content_hash=row["content_hash"],
-            status=row["status"],
-            created_at=datetime.fromisoformat(row["created_at"]),
-            updated_at=datetime.fromisoformat(row["updated_at"]),
-            metadata=json.loads(row["metadata_json"]),
-            chunks=[json.loads(c) for c in json.loads(row["chunks_json"])],
-        )
-    
+        rows = self.notes.search().where(f"uuid = {_q(uuid)}").limit(1).to_list()
+        return _row_to_note(rows[0]) if rows else None
+
+    def get_note_vector(self, uuid: str) -> Optional[np.ndarray]:
+        rows = self.notes.search().where(f"uuid = {_q(uuid)}").select(["vector"]).limit(1).to_list()
+        return np.asarray(rows[0]["vector"], dtype=np.float32) if rows else None
+
     def get_note_by_hash(self, content_hash: str) -> Optional[NoteModel]:
-        """Get a note by content hash (for deduplication)."""
-        results = self.notes.search().where(f"content_hash = '{content_hash}'").limit(1).to_list()
-        if not results:
-            return None
-        return self.get_note_by_uuid(results[0]["uuid"])
-    
+        rows = self.notes.search().where(f"content_hash = {_q(content_hash)}").limit(1).to_list()
+        return _row_to_note(rows[0]) if rows else None
+
     def get_note_by_source_path(self, source_path: str) -> Optional[NoteModel]:
-        """Get a note by source path/URL (for URL deduplication)."""
-        # Escape single quotes in URL
-        escaped_path = source_path.replace("'", "''")
-        results = self.notes.search().where(f"source_path = '{escaped_path}'").limit(1).to_list()
-        if not results:
-            return None
-        return self.get_note_by_uuid(results[0]["uuid"])
-    
+        rows = self.notes.search().where(f"source_path = {_q(source_path)}").limit(1).to_list()
+        return _row_to_note(rows[0]) if rows else None
+
     def list_notes(
         self,
         status: Optional[str] = None,
@@ -252,19 +191,19 @@ class Database:
         limit: int = 50,
         offset: int = 0,
     ) -> List[dict]:
-        """List notes with optional status and source_type filter."""
-        query = self.notes.search()
-
+        query = self.notes.search().select(
+            ["uuid", "title", "source_type", "status", "created_at", "metadata_json"]
+        )
         conditions = []
         if status:
-            conditions.append(f"status = '{status}'")
+            conditions.append(f"status = {_q(status)}")
         if source_type:
-            conditions.append(f"source_type = '{source_type}'")
+            conditions.append(f"source_type = {_q(source_type)}")
         if conditions:
             query = query.where(" AND ".join(conditions))
-        
-        results = query.limit(limit + offset).to_list()
-        
+
+        rows = query.limit(100_000).to_list()
+        rows.sort(key=lambda r: r["created_at"], reverse=True)
         return [
             {
                 "uuid": r["uuid"],
@@ -272,131 +211,123 @@ class Database:
                 "source_type": r["source_type"],
                 "status": r["status"],
                 "created_at": r["created_at"],
+                "tags": json.loads(r["metadata_json"]).get("tags", []),
             }
-            for r in results[offset:offset + limit]
+            for r in rows[offset:offset + limit]
         ]
-    
-    def delete_note(self, uuid: str) -> bool:
-        """Delete a note by UUID."""
-        self.notes.delete(f"uuid = '{uuid}'")
-        return True
-    
-    # --- Search Operations ---
-    
-    def vector_search(
-        self,
-        query_text: str,
-        top_k: int = 50,
-        status_filter: Optional[str] = None,
-    ) -> List[SearchResult]:
-        """Perform vector similarity search."""
-        search = self.notes.search(query_text).limit(top_k)
-        
-        if status_filter:
-            search = search.where(f"status = '{status_filter}'")
-        
-        results = search.to_list()
-        
+
+    def all_note_vectors(self) -> List[dict]:
+        """uuid, title, created_at, tags and vector for every note (graph building)."""
+        rows = self.notes.search().select(
+            ["uuid", "title", "created_at", "metadata_json", "vector"]
+        ).limit(100_000).to_list()
         return [
-            SearchResult(
-                uuid=r["uuid"],
-                title=r["title"],
-                score=float(r.get("_distance", 0)),
-                snippet=r["full_text"][:200] + "...",
-                source_type=r["source_type"],
-            )
-            for r in results
+            {
+                "uuid": r["uuid"],
+                "title": r["title"],
+                "created_at": r["created_at"],
+                "tags": json.loads(r["metadata_json"]).get("tags", []),
+                "vector": np.asarray(r["vector"], dtype=np.float32),
+            }
+            for r in rows
         ]
-    
-    # --- Rejected Edges ---
-    
-    def add_rejected_edge(self, source_uuid: str, target_uuid: str) -> None:
-        """Add a rejected edge (user said "don't suggest this link")."""
-        # Ensure consistent ordering
-        if source_uuid > target_uuid:
-            source_uuid, target_uuid = target_uuid, source_uuid
-        
-        record = {
-            "source_uuid": source_uuid,
-            "target_uuid": target_uuid,
-            "rejected_at": datetime.utcnow().isoformat(),
-        }
-        self.rejected_edges.add([record])
-    
-    def is_edge_rejected(self, source_uuid: str, target_uuid: str) -> bool:
-        """Check if an edge has been rejected."""
-        # Check both directions
-        if source_uuid > target_uuid:
-            source_uuid, target_uuid = target_uuid, source_uuid
-        
-        results = self.rejected_edges.search().where(
-            f"source_uuid = '{source_uuid}' AND target_uuid = '{target_uuid}'"
-        ).limit(1).to_list()
-        
-        return len(results) > 0
-    
-    def get_rejected_targets(self, source_uuid: str) -> List[str]:
-        """Get all UUIDs that are rejected for a given source."""
-        results = self.rejected_edges.search().where(
-            f"source_uuid = '{source_uuid}' OR target_uuid = '{source_uuid}'"
-        ).to_list()
-        
-        rejected = set()
-        for r in results:
-            if r["source_uuid"] == source_uuid:
-                rejected.add(r["target_uuid"])
-            else:
-                rejected.add(r["source_uuid"])
-        
-        return list(rejected)
-    
-    # --- Suggestion Cache ---
-    
-    def get_cached_suggestions(self, note_uuid: str) -> Optional[SuggestionCache]:
-        """Get cached suggestions if still valid."""
-        import json
-        
-        results = self.suggestion_cache.search().where(
-            f"note_uuid = '{note_uuid}'"
-        ).limit(1).to_list()
-        
-        if not results:
-            return None
-        
-        row = results[0]
-        cached_at = datetime.fromisoformat(row["cached_at"])
-        
-        # Check if cache is still valid
-        if datetime.utcnow() - cached_at > timedelta(hours=settings.suggestion_cache_hours):
-            return None
-        
-        return SuggestionCache(
-            note_uuid=row["note_uuid"],
-            suggested_uuids=json.loads(row["suggested_uuids_json"]),
-            scores=json.loads(row["scores_json"]),
-            cached_at=cached_at,
-        )
-    
-    def cache_suggestions(
+
+    def delete_note(self, uuid: str, keep_edges: bool = False) -> None:
+        self.notes.delete(f"uuid = {_q(uuid)}")
+        self.chunks.delete(f"note_uuid = {_q(uuid)}")
+        if not keep_edges:
+            self.delete_edges_for_note(uuid)
+
+    # --- Chunk search ---
+
+    def search_chunks(
         self,
-        note_uuid: str,
-        suggested_uuids: List[str],
-        scores: List[float],
-    ) -> None:
-        """Cache suggestions for a note."""
-        import json
-        
-        # Delete old cache
-        self.suggestion_cache.delete(f"note_uuid = '{note_uuid}'")
-        
-        # Add new cache
-        record = {
-            "note_uuid": note_uuid,
-            "suggested_uuids_json": json.dumps(suggested_uuids),
-            "scores_json": json.dumps(scores),
-            "cached_at": datetime.utcnow().isoformat(),
+        query_vector: np.ndarray,
+        top_k: int = 50,
+        exclude_note: Optional[str] = None,
+    ) -> List[dict]:
+        """Nearest chunks by cosine similarity. Returns rows with 'similarity'."""
+        query = self.chunks.search(query_vector.tolist()).metric("cosine").limit(top_k)
+        if exclude_note:
+            query = query.where(f"note_uuid != {_q(exclude_note)}", prefilter=True)
+        rows = query.select(["chunk_id", "note_uuid", "text", "start_char", "_distance"]).to_list()
+        for r in rows:
+            r["similarity"] = 1.0 - float(r.pop("_distance", 1.0))
+        return rows
+
+    def note_titles(self, uuids: List[str]) -> dict:
+        """uuid -> (title, source_type) for the given notes."""
+        if not uuids:
+            return {}
+        in_list = ", ".join(_q(u) for u in set(uuids))
+        rows = self.notes.search().where(f"uuid IN ({in_list})").select(
+            ["uuid", "title", "source_type"]
+        ).limit(len(uuids)).to_list()
+        return {r["uuid"]: (r["title"], r["source_type"]) for r in rows}
+
+    # --- Graph edges ---
+
+    def add_edges(self, edges: List[dict]) -> None:
+        if edges:
+            now = datetime.utcnow().isoformat()
+            self.graph_edges.add([{**e, "created_at": now} for e in edges])
+
+    def replace_edges_for_note(self, uuid: str, edges: List[dict]) -> None:
+        self.delete_edges_for_note(uuid)
+        self.add_edges(edges)
+
+    def get_all_edges(self) -> List[dict]:
+        return self.graph_edges.search().limit(1_000_000).to_list()
+
+    def get_edges_for_note(self, uuid: str) -> List[dict]:
+        return self.graph_edges.search().where(
+            f"source_uuid = {_q(uuid)} OR target_uuid = {_q(uuid)}"
+        ).limit(1000).to_list()
+
+    def delete_edges_for_note(self, uuid: str) -> None:
+        self.graph_edges.delete(f"source_uuid = {_q(uuid)} OR target_uuid = {_q(uuid)}")
+
+    def clear_edges(self) -> None:
+        self.graph_edges.delete("true")
+
+    # --- Rejected edges ---
+
+    def add_rejected_edge(self, source_uuid: str, target_uuid: str) -> None:
+        a, b = sorted((source_uuid, target_uuid))
+        self.rejected_edges.add([{
+            "source_uuid": a,
+            "target_uuid": b,
+            "rejected_at": datetime.utcnow().isoformat(),
+        }])
+        self.graph_edges.delete(
+            f"(source_uuid = {_q(a)} AND target_uuid = {_q(b)}) OR "
+            f"(source_uuid = {_q(b)} AND target_uuid = {_q(a)})"
+        )
+
+    def get_rejected_targets(self, uuid: str) -> set:
+        rows = self.rejected_edges.search().where(
+            f"source_uuid = {_q(uuid)} OR target_uuid = {_q(uuid)}"
+        ).limit(100_000).to_list()
+        return {r["target_uuid"] if r["source_uuid"] == uuid else r["source_uuid"] for r in rows}
+
+    def get_all_rejected_pairs(self) -> set:
+        rows = self.rejected_edges.search().limit(1_000_000).to_list()
+        return {(r["source_uuid"], r["target_uuid"]) for r in rows}
+
+    # --- Stats ---
+
+    def stats(self) -> dict:
+        notes = self.notes.search().select(["source_type"]).limit(1_000_000).to_list()
+        by_type: dict = {}
+        for n in notes:
+            by_type[n["source_type"]] = by_type.get(n["source_type"], 0) + 1
+        return {
+            "notes": len(notes),
+            "chunks": self.chunks.count_rows(),
+            "edges": self.graph_edges.count_rows(),
+            "rejected_edges": self.rejected_edges.count_rows(),
+            "by_source_type": by_type,
         }
-        self.suggestion_cache.add([record])
 
 
 # Global database instance

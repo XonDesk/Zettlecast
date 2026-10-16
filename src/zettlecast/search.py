@@ -1,223 +1,113 @@
 """
 Zettlecast Search & Retrieval
-Vector search with reranking and rejection filtering.
+
+Query -> embed -> nearest chunks -> rerank chunks -> best chunk per note.
 """
 
 import logging
+import re
 from typing import List, Optional
-
-from sentence_transformers import CrossEncoder
 
 from .config import settings
 from .db import db
+from .embeddings import embed_query, rerank
 from .models import LinkSuggestion, SearchResult
 
 logger = logging.getLogger(__name__)
 
-# Lazy-loaded reranker
-_reranker: Optional[CrossEncoder] = None
+_TIMESTAMP_RE = re.compile(r"^\[([\d.]+)s")
 
 
-def get_reranker() -> CrossEncoder:
-    """Get or load the reranker model (cached)."""
-    global _reranker
-    if _reranker is None:
-        logger.info(f"Loading reranker: {settings.reranker_model}")
-        _reranker = CrossEncoder(settings.reranker_model)
-    return _reranker
-
-
-def rerank_results(
-    query: str,
-    results: List[SearchResult],
-    top_k: int = None,
-) -> List[SearchResult]:
-    """
-    Rerank search results using cross-encoder.
-    
-    Args:
-        query: The search query
-        results: Initial results from vector search
-        top_k: Number of results to return after reranking
-        
-    Returns:
-        Reranked and filtered results
-    """
-    top_k = top_k or settings.return_top_k
-    
-    if not results:
-        return []
-    
-    reranker = get_reranker()
-    
-    # Prepare pairs for reranking
-    pairs = [(query, r.snippet) for r in results]
-    
-    # Get reranker scores
-    scores = reranker.predict(pairs)
-    
-    # Combine with results and sort
-    scored_results = list(zip(results, scores))
-    scored_results.sort(key=lambda x: x[1], reverse=True)
-    
-    # Update scores and return top_k
-    final_results = []
-    for result, score in scored_results[:top_k]:
-        result.score = float(score)
-        final_results.append(result)
-    
-    return final_results
+def _chunk_timestamp(text: str) -> Optional[float]:
+    match = _TIMESTAMP_RE.match(text.lstrip())
+    return float(match.group(1)) if match else None
 
 
 def search(
     query: str,
     top_k: int = None,
-    rerank: bool = True,
-    status_filter: Optional[str] = None,
+    rerank_results: bool = True,
 ) -> List[SearchResult]:
     """
-    Full search pipeline: vector search → rerank → return.
-    
-    Args:
-        query: Search query text
-        top_k: Number of final results to return
-        rerank: Whether to apply reranking
-        status_filter: Optional status filter (inbox, reviewed, archived)
-        
-    Returns:
-        List of SearchResult
+    Semantic search over every chunk of every note.
+
+    Returns one result per note (its best-matching chunk), best first.
     """
     top_k = top_k or settings.return_top_k
-    
-    # Step 1: Vector search (get more candidates than needed)
-    candidates = db.vector_search(
-        query_text=query,
-        top_k=settings.rerank_top_k if rerank else top_k,
-        status_filter=status_filter,
-    )
-    
+
+    candidates = db.search_chunks(embed_query(query), top_k=settings.rerank_top_k)
     if not candidates:
         return []
-    
-    # Step 2: Rerank (optional)
-    if rerank and len(candidates) > top_k:
-        results = rerank_results(query, candidates, top_k=top_k)
+
+    if rerank_results:
+        ranked = rerank(query, [c["text"] for c in candidates])
+        scored = [(candidates[i], score) for i, score in ranked if score >= settings.search_min_score]
     else:
-        results = candidates[:top_k]
-    
+        scored = [(c, c["similarity"]) for c in candidates]
+
+    # Keep the best chunk per note
+    best: dict = {}
+    for chunk, score in scored:
+        if chunk["note_uuid"] not in best:
+            best[chunk["note_uuid"]] = (chunk, score)
+        if len(best) >= top_k:
+            break
+
+    titles = db.note_titles(list(best))
+    results = []
+    for uuid, (chunk, score) in best.items():
+        title, source_type = titles.get(uuid, ("Untitled", "unknown"))
+        results.append(SearchResult(
+            uuid=uuid,
+            title=title,
+            score=round(float(score), 4),
+            snippet=chunk["text"],
+            source_type=source_type,
+            timestamp_seconds=_chunk_timestamp(chunk["text"]),
+        ))
     return results
 
 
-def get_suggestions_for_note(
-    note_uuid: str,
-    use_cache: bool = True,
-) -> List[LinkSuggestion]:
-    """
-    Get link suggestions for a note.
-    
-    Args:
-        note_uuid: UUID of the note to get suggestions for
-        use_cache: Whether to use cached suggestions
-        
-    Returns:
-        List of LinkSuggestion
-    """
-    # Check cache first
-    if use_cache:
-        cached = db.get_cached_suggestions(note_uuid)
-        if cached:
-            suggestions = []
-            for uuid, score in zip(cached.suggested_uuids, cached.scores):
-                note = db.get_note_by_uuid(uuid)
-                if note:
-                    suggestions.append(LinkSuggestion(
-                        uuid=uuid,
-                        title=note.title,
-                        score=score,
-                    ))
-            return suggestions
-    
-    # Get the source note
-    source_note = db.get_note_by_uuid(note_uuid)
-    if not source_note:
-        return []
-    
-    # Search for similar notes
-    candidates = db.vector_search(
-        query_text=source_note.full_text[:1000],  # Use first 1000 chars as query
-        top_k=settings.rerank_top_k,
-    )
-    
-    # Remove self
-    candidates = [c for c in candidates if c.uuid != note_uuid]
-    
-    if not candidates:
-        return []
-    
-    # Rerank
-    reranked = rerank_results(
-        query=source_note.title + " " + source_note.full_text[:500],
-        results=candidates,
-        top_k=10,  # Get more than needed for filtering
-    )
-    
-    # Filter rejected edges
-    rejected = set(db.get_rejected_targets(note_uuid))
-    filtered = [r for r in reranked if r.uuid not in rejected]
-    
-    # Take top 3
-    final = filtered[:3]
-    
-    # Build suggestions
-    suggestions = [
+def get_suggestions_for_note(note_uuid: str, limit: int = 5) -> List[LinkSuggestion]:
+    """Related notes for the detail view: the note's graph edges, strongest first."""
+    edges = db.get_edges_for_note(note_uuid)
+    edges.sort(key=lambda e: e["weight"], reverse=True)
+    others = [e["target_uuid"] if e["source_uuid"] == note_uuid else e["source_uuid"] for e in edges]
+    titles = db.note_titles(others)
+    return [
         LinkSuggestion(
-            uuid=r.uuid,
-            title=r.title,
-            score=r.score,
+            uuid=other,
+            title=titles[other][0],
+            score=round(float(edge["weight"]), 4),
+            reason=f"similarity {edge['vector_sim']:.2f}, shared tags {edge['tag_sim']:.2f}",
         )
-        for r in final
-    ]
-    
-    # Cache results
-    if suggestions:
-        db.cache_suggestions(
-            note_uuid=note_uuid,
-            suggested_uuids=[s.uuid for s in suggestions],
-            scores=[s.score for s in suggestions],
-        )
-    
-    return suggestions
+        for edge, other in zip(edges, others)
+        if other in titles
+    ][:limit]
 
 
 def accept_link(source_uuid: str, target_uuid: str) -> bool:
     """
-    Accept a suggested link by adding wikilink to source file.
-    
+    Accept a suggested link by adding a [[wikilink]] to the source note's file.
+
     Returns:
-        True if link was added, False if already exists
+        True if link was added, False if already present or no file to edit
     """
     from pathlib import Path
+
     from .identity import add_wikilink_to_file
-    
+
     source_note = db.get_note_by_uuid(source_uuid)
     target_note = db.get_note_by_uuid(target_uuid)
-    
     if not source_note or not target_note:
         return False
-    
-    # Add wikilink to source file
-    source_path = Path(source_note.source_path)
-    if source_path.exists():
-        return add_wikilink_to_file(source_path, target_note.title)
-    
+
+    path = Path(source_note.metadata.custom.get("note_path") or source_note.source_path)
+    if path.suffix.lower() in {".md", ".markdown"} and path.exists():
+        return add_wikilink_to_file(path, target_note.title)
     return False
 
 
 def reject_link(source_uuid: str, target_uuid: str) -> None:
-    """
-    Reject a suggested link (adds to rejected_edges).
-    """
+    """Reject a link: remember it and remove the edge from the graph."""
     db.add_rejected_edge(source_uuid, target_uuid)
-    
-    # Invalidate cache
-    db.suggestion_cache.delete(f"note_uuid = '{source_uuid}'")

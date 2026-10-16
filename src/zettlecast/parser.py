@@ -1,12 +1,11 @@
 """
 Zettlecast Parser Module
-Tiered PDF parsing, web scraping, and audio transcription.
+PDF parsing, web scraping, markdown and image ingestion.
 """
 
 import logging
-import tempfile
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Tuple
 from urllib.parse import urlparse
 
 import httpx
@@ -137,30 +136,32 @@ def parse_url(url: str) -> ProcessingResult:
     Enhanced to extract richer metadata and embedded media.
     """
     try:
-        import re
         import trafilatura
         from bs4 import BeautifulSoup
         
-        # Browser-like headers to bypass bot detection
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        # Sites disagree on what they block: Wikipedia rejects browser-looking
+        # agents, others reject anything that isn't a browser. Try both.
+        common = {
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "DNT": "1",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-            "Cache-Control": "max-age=0",
         }
-        
-        # Download page with custom headers
+        user_agents = [
+            "Zettlecast/0.1 (personal knowledge base; +https://github.com/XonDesk/Zettlecast)",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+        ]
+
         logger.info(f"Fetching URL: {url}")
         try:
-            response = httpx.get(url, headers=headers, follow_redirects=True, timeout=30)
+            for user_agent in user_agents:
+                response = httpx.get(
+                    url,
+                    headers={**common, "User-Agent": user_agent},
+                    follow_redirects=True,
+                    timeout=30,
+                )
+                if response.status_code not in (403, 429):
+                    break
             response.raise_for_status()
             downloaded = response.text
         except httpx.HTTPStatusError as e:
@@ -254,12 +255,11 @@ def parse_url(url: str) -> ProcessingResult:
         word_count = len(text.split()) if text else None
         
         # Extract tags/categories
-        tags = []
+        # Site categories/tags are often navigation junk ("See More Articles"):
+        # keep them as metadata and let the LLM enricher choose topic tags.
+        site_tags = []
         if metadata_dict:
-            if hasattr(metadata_dict, "categories") and metadata_dict.categories:
-                tags.extend(metadata_dict.categories)
-            if hasattr(metadata_dict, "tags") and metadata_dict.tags:
-                tags.extend(metadata_dict.tags)
+            site_tags = list(getattr(metadata_dict, "categories", None) or []) + list(getattr(metadata_dict, "tags", None) or [])
         
         # Extract language
         language = None
@@ -284,7 +284,7 @@ def parse_url(url: str) -> ProcessingResult:
             metadata=NoteMetadata(
                 source_url=url,
                 author=metadata_dict.author if metadata_dict else None,
-                tags=tags,
+                custom={"site_tags": site_tags} if site_tags else {},
                 language=language,
                 word_count=word_count,
                 embedded_media=embedded_media,
@@ -310,188 +310,83 @@ def parse_url(url: str) -> ProcessingResult:
         )
 
 
-# --- Audio Transcription ---
-
-def parse_audio(file_path: Path) -> ProcessingResult:
-    """
-    Transcribe audio file using faster-whisper.
-    """
-    try:
-        from faster_whisper import WhisperModel
-        
-        # Check file size
-        size_mb = file_path.stat().st_size / (1024 * 1024)
-        if size_mb > settings.max_file_size_mb * 2:  # Allow larger for audio
-            return ProcessingResult(
-                status="failed",
-                error_type="parse",
-                error_message=f"Audio file too large: {size_mb:.1f}MB",
-            )
-        
-        logger.info(f"Transcribing audio: {file_path.name} (model: {settings.whisper_model})")
-        
-        # Load model
-        model = WhisperModel(
-            settings.whisper_model,
-            device=settings.whisper_device if settings.whisper_device != "auto" else "auto",
-            compute_type="int8",
-        )
-        
-        # Transcribe
-        segments, info = model.transcribe(str(file_path), beam_size=5)
-        
-        # Build transcript with timestamps
-        lines = []
-        for segment in segments:
-            timestamp = f"[{segment.start:.1f}s]"
-            lines.append(f"{timestamp} {segment.text.strip()}")
-        
-        text = "\n".join(lines)
-        
-        if not text.strip():
-            return ProcessingResult(
-                status="failed",
-                error_type="parse",
-                error_message="No speech detected in audio",
-            )
-        
-        uuid = generate_uuid()
-        title = file_path.stem.replace("_", " ").replace("-", " ")
-        duration = int(info.duration) if info.duration else None
-        
-        note = NoteModel(
-            uuid=uuid,
-            title=title,
-            source_type="audio",
-            source_path=str(file_path),
-            full_text=text,
-            content_hash=compute_content_hash(text),
-            metadata=NoteMetadata(
-                duration_seconds=duration,
-                language=info.language if hasattr(info, "language") else None,
-            ),
-        )
-        
-        return ProcessingResult(
-            status="success",
-            uuid=uuid,
-            title=title,
-            note=note,
-        )
-    
-    except Exception as e:
-        logger.exception(f"Audio transcription failed: {e}")
-        return ProcessingResult(
-            status="failed",
-            error_type="parse",
-            error_message=str(e),
-        )
-
-
-# --- RSS Parsing ---
-
-def parse_rss_feed(feed_url: str) -> list[ProcessingResult]:
-    """
-    Parse RSS feed and extract individual articles.
-    
-    Returns a list of ProcessingResult for each article.
-    """
-    try:
-        import feedparser
-        
-        logger.info(f"Parsing RSS feed: {feed_url}")
-        feed = feedparser.parse(feed_url)
-        
-        if feed.bozo:
-            return [ProcessingResult(
-                status="failed",
-                error_type="parse",
-                error_message=f"Invalid RSS feed: {feed.bozo_exception}",
-            )]
-        
-        results = []
-        for entry in feed.entries[:10]:  # Limit to 10 entries
-            # Extract full content via trafilatura if link available
-            if hasattr(entry, "link") and entry.link:
-                result = parse_url(entry.link)
-                if result.status == "success":
-                    result.title = entry.get("title", result.title)
-                results.append(result)
-        
-        return results
-    
-    except Exception as e:
-        logger.exception(f"RSS parsing failed: {e}")
-        return [ProcessingResult(
-            status="failed",
-            error_type="parse",
-            error_message=str(e),
-        )]
-
-
 # --- Markdown Parsing ---
 
 def parse_markdown(file_path: Path) -> ProcessingResult:
     """
-    Parse a local markdown file, ensuring UUID in frontmatter.
+    Parse a markdown note, ensuring it has a UUID in its frontmatter.
+
+    Frontmatter written by the podcast pipeline (source_type, source, tags,
+    summary, duration, created) is carried into the note, so transcripts
+    are stored as audio notes that point at their episode file.
     """
     try:
+        from datetime import datetime
+
         from .identity import ensure_uuid_in_file, parse_frontmatter
-        
-        content = file_path.read_text(encoding="utf-8")
-        uuid, was_modified = ensure_uuid_in_file(file_path)
-        
-        if was_modified:
-            content = file_path.read_text(encoding="utf-8")
-        
-        frontmatter, body = parse_frontmatter(content)
-        title = frontmatter.get("title", file_path.stem)
-        
+
+        uuid, _ = ensure_uuid_in_file(file_path)
+        frontmatter, body = parse_frontmatter(file_path.read_text(encoding="utf-8"))
+        title = str(frontmatter.get("title") or file_path.stem)
+
+        custom = {"note_path": str(file_path)}
+        for key in ("summary", "podcast", "speaker_names", "speakers"):
+            if frontmatter.get(key):
+                custom[key] = frontmatter[key]
+
+        created = frontmatter.get("created")
+        if isinstance(created, str):
+            try:
+                created = datetime.fromisoformat(created)
+            except ValueError:
+                created = None
+
+        tags = frontmatter.get("tags") or []
         note = NoteModel(
             uuid=uuid,
             title=title,
-            source_type="markdown",
-            source_path=str(file_path),
+            source_type=frontmatter.get("source_type", "markdown"),
+            source_path=str(frontmatter.get("source") or file_path),
             full_text=body,
             content_hash=compute_content_hash(body),
+            status=frontmatter.get("status", "inbox"),
             metadata=NoteMetadata(
-                tags=frontmatter.get("tags", []),
+                tags=[str(t) for t in tags] if isinstance(tags, list) else [],
+                duration_seconds=frontmatter.get("duration_seconds"),
+                language=frontmatter.get("language"),
+                word_count=len(body.split()),
+                custom=custom,
             ),
+            **({"created_at": created} if isinstance(created, datetime) else {}),
         )
-        
-        return ProcessingResult(
-            status="success",
-            uuid=uuid,
-            title=title,
-            note=note,
-        )
-    
+        return ProcessingResult(status="success", uuid=uuid, title=title, note=note)
+
     except Exception as e:
         logger.exception(f"Markdown parsing failed: {e}")
-        return ProcessingResult(
-            status="failed",
-            error_type="parse",
-            error_message=str(e),
-        )
+        return ProcessingResult(status="failed", error_type="parse", error_message=str(e))
 
 
 # --- Unified Parser ---
 
+AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".webm", ".aac", ".opus"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+TEXT_EXTENSIONS = {".md", ".markdown", ".txt"}
+
+
 def parse_file(file_path: Path) -> ProcessingResult:
     """
-    Parse any supported file type.
+    Parse a PDF, markdown/text or image file into a note.
 
-    Dispatches to appropriate parser based on file extension.
+    Audio is not handled here; it goes through the podcast queue
+    (see pipeline.ingest_path) for transcription with speaker labels.
     """
     suffix = file_path.suffix.lower()
 
     if suffix == ".pdf":
         result = parse_pdf(file_path)
-    elif suffix in {".md", ".markdown", ".txt"}:
+    elif suffix in TEXT_EXTENSIONS:
         result = parse_markdown(file_path)
-    elif suffix in {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".webm"}:
-        result = parse_audio(file_path)
-    elif suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}:
+    elif suffix in IMAGE_EXTENSIONS:
         from .image.image_parser import parse_image
         result = parse_image(file_path)
     else:
@@ -501,9 +396,8 @@ def parse_file(file_path: Path) -> ProcessingResult:
             error_message=f"Unsupported file type: {suffix}",
         )
 
-    # Enrich successful parses with LLM-generated tags and summary
-    # Skip enrichment for images since vision model already provided tags
-    if result.status == "success" and result.note and result.note.source_type != "image":
+    # Images get tags from the vision step and transcripts from the enhancer
+    if result.status == "success" and result.note and result.note.source_type not in ("image", "audio"):
         result.note = enrich_note(result.note)
 
     return result

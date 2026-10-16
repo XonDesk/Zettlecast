@@ -3,9 +3,10 @@
 export interface Note {
     uuid: string;
     title: string;
-    source_type: 'pdf' | 'web' | 'audio' | 'markdown' | 'rss' | 'image';
+    source_type: 'pdf' | 'web' | 'audio' | 'markdown' | 'image';
     status: 'inbox' | 'reviewed' | 'archived';
     created_at: string;
+    tags?: string[];
 }
 
 export interface NoteDetail extends Note {
@@ -40,10 +41,11 @@ export interface SearchResult {
     score: number;
     snippet: string;
     source_type: string;
+    timestamp_seconds?: number | null;
 }
 
 export interface IngestResponse {
-    status: 'success' | 'partial' | 'failed' | 'duplicate';
+    status: 'success' | 'queued' | 'failed' | 'duplicate';
     uuid?: string;
     title?: string;
     error?: string;
@@ -70,13 +72,13 @@ export interface GraphData {
 export interface Settings {
     embedding_model: string;
     reranker_model: string;
-    whisper_model: string;
-    llm_provider: string;
     ollama_model: string;
-    enable_context_enrichment: boolean;
+    vision_model: string;
+    nemo_parakeet_model: string;
+    nemo_diarization_model: string;
+    enable_auto_tagging: boolean;
     chunk_size: number;
     storage_path: string;
-    asr_backend: string;
     hf_token: string;
 }
 

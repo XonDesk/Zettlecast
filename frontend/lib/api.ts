@@ -141,10 +141,10 @@ export const api = {
             method: 'POST',
         }),
 
-    runPodcasts: (limit: number = 5, backend?: string) =>
+    runPodcasts: (limit: number = 5) =>
         fetchAPI<{ status: string; pending_count?: number; limit?: number; message: string }>('/podcast/run', {
             method: 'POST',
-            body: JSON.stringify({ limit, backend }),
+            body: JSON.stringify({ limit }),
         }),
 
     getRunningStatus: () =>
@@ -215,10 +215,10 @@ export const api = {
             method: 'POST',
         }),
 
-    runImages: (limit: number = 5, model?: string) =>
+    runImages: (limit: number = 5) =>
         fetchAPI<{ status: string; pending_count?: number; limit?: number; message: string }>('/image/run', {
             method: 'POST',
-            body: JSON.stringify({ limit, model }),
+            body: JSON.stringify({ limit }),
         }),
 
     getImageRunningStatus: () =>

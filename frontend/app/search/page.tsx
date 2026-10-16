@@ -4,6 +4,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import type { SearchResult } from '@/lib/types';
+import { formatTimestamp } from '@/lib/utils';
 
 export default function SearchPage() {
     const [query, setQuery] = useState('');
@@ -35,7 +36,7 @@ export default function SearchPage() {
             web: '🌐',
             audio: '🎙️',
             markdown: '📝',
-            rss: '📰',
+            image: '🖼️',
         };
         return emojis[type] || '📋';
     };
@@ -103,7 +104,9 @@ export default function SearchPage() {
                             {results.map((result, index) => (
                                 <Link
                                     key={result.uuid}
-                                    href={`/notes/${result.uuid}`}
+                                    href={result.timestamp_seconds != null
+                                        ? `/notes/${result.uuid}?t=${Math.floor(result.timestamp_seconds)}`
+                                        : `/notes/${result.uuid}`}
                                     style={{ textDecoration: 'none' }}
                                 >
                                     <div className="search-result">
@@ -112,9 +115,12 @@ export default function SearchPage() {
                                         </div>
                                         <div className="search-result-meta">
                                             Score: {result.score.toFixed(3)} · {result.source_type}
+                                            {result.timestamp_seconds != null && (
+                                                <> · ▶ {formatTimestamp(result.timestamp_seconds)}</>
+                                            )}
                                         </div>
-                                        <div className="search-result-snippet">
-                                            &quot;{result.snippet}&quot;
+                                        <div className="search-result-snippet" style={{ whiteSpace: 'pre-line' }}>
+                                            {result.snippet.length > 600 ? result.snippet.slice(0, 600) + '…' : result.snippet}
                                         </div>
                                     </div>
                                 </Link>

@@ -41,10 +41,14 @@ Thumbs.db
 
 # Storage (user data)
 _BRAIN_STORAGE/
-test_models/
-models/
-brain/
+
+
+
 
 # LanceDB
 *.lance
 .lancedb/
+
+# Frontend build output
+frontend/.next/
+frontend/node_modules/

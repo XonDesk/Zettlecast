@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
-import { formatDate } from '@/lib/utils';
+import { formatDate, formatTimestamp } from '@/lib/utils';
 import MarkdownContent from '@/components/MarkdownContent';
 import type { NoteDetail as NoteDetailType } from '@/lib/types';
 
@@ -34,6 +35,8 @@ export default function NoteDetailPage() {
     const params = useParams();
     const router = useRouter();
     const uuid = params.uuid as string;
+    const startAt = Number(useSearchParams().get('t') || 0);
+    const audioRef = useRef<HTMLAudioElement>(null);
 
     const [note, setNote] = useState<NoteDetailType | null>(null);
     const [loading, setLoading] = useState(true);
@@ -107,6 +110,26 @@ export default function NoteDetailPage() {
                 </div>
             </div>
 
+            {note.source_type === 'audio' && (
+                <div className="card mb-4">
+                    <audio
+                        ref={audioRef}
+                        controls
+                        preload="metadata"
+                        src={api.getNoteSourceUrl(uuid)}
+                        style={{ width: '100%' }}
+                        onLoadedMetadata={() => {
+                            if (startAt && audioRef.current) audioRef.current.currentTime = startAt;
+                        }}
+                    />
+                    {startAt > 0 && (
+                        <p className="text-muted mt-2" style={{ fontSize: '0.875rem' }}>
+                            Search match at {formatTimestamp(startAt)} — press play to listen from there.
+                        </p>
+                    )}
+                </div>
+            )}
+
             <div className="note-detail">
                 <div className="note-content">
                     <MarkdownContent content={note.full_text} />
@@ -177,13 +200,15 @@ export default function NoteDetailPage() {
                     </div>
 
                     <div className="card">
-                        <h3 className="card-title mb-2">Suggested Links</h3>
+                        <h3 className="card-title mb-2">Related Notes</h3>
                         {note.suggestions && note.suggestions.length > 0 ? (
                             <div className="suggestions-list">
                                 {note.suggestions.map((s) => (
                                     <div key={s.uuid} className="suggestion-card">
-                                        <div className="suggestion-title">{s.title}</div>
-                                        <div className="suggestion-score">Score: {s.score.toFixed(3)}</div>
+                                        <Link href={`/notes/${s.uuid}`} className="suggestion-title" style={{ display: 'block' }}>
+                                            {s.title}
+                                        </Link>
+                                        <div className="suggestion-score" title={s.reason}>Score: {s.score.toFixed(3)}</div>
                                         <div className="suggestion-actions">
                                             <button
                                                 className="btn btn-primary"
@@ -202,7 +227,7 @@ export default function NoteDetailPage() {
                                 ))}
                             </div>
                         ) : (
-                            <p className="text-muted">No suggestions yet</p>
+                            <p className="text-muted">No related notes yet</p>
                         )}
                     </div>
 
