@@ -13,7 +13,7 @@ Complete reference for AI agents operating the Zettlecast system.
 | Database | LanceDB (768-dim embeddings) |
 | Embedding | `google/embeddinggemma-300m` |
 | Reranker | `BAAI/bge-reranker-v2-m3` |
-| ASR | NeMo Parakeet-TDT + MSDD diarization, faster-whisper fallback |
+| ASR | NeMo Parakeet-TDT + Nemotron-3-Diarization (Sortformer), faster-whisper fallback |
 | LLM | Ollama (default: `llama3.2:3b`) |
 | Vision | Ollama (`qwen2.5-vl:7b`) |
 
@@ -31,7 +31,7 @@ src/zettlecast/           # Backend source
   identity.py             # UUID/frontmatter management
   cli.py                  # Click CLI commands
   podcast/                # Podcast transcription pipeline
-    nemo_transcriber.py   # NeMo Parakeet + MSDD transcription
+    nemo_transcriber.py   # NeMo Parakeet + Sortformer/MSDD diarization
     aligner.py            # Word-to-speaker alignment
     enhancer.py           # LLM cleanup, summary, key points
     formatter.py          # Markdown output formatting
@@ -127,7 +127,7 @@ All commands can be run via `zettlecast <command>` or `./zc <command>`.
 | `retry` | | Retry failed episodes |
 
 **Backend options for `podcast run --backend`:**
-- `nemo` - NeMo Parakeet-TDT + MSDD diarization (GPU recommended)
+- `nemo` - NeMo Parakeet-TDT + Nemotron-3-Diarization (GPU recommended)
 - `whisper` - faster-whisper (CPU-friendly)
 - `parakeet-mlx` - Parakeet on Apple Silicon
 - `mlx-whisper` - Whisper on Apple Silicon
@@ -342,9 +342,9 @@ Response: { "status": "updated", "updated_keys": [str], "message": str }
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `NEMO_CHUNK_DURATION_MINUTES` | `10` | Audio chunk size |
+| `NEMO_CHUNK_DURATION_MINUTES` | `60` | ASR chunk size (local attention: ~14 GB VRAM per hour) |
 | `NEMO_PARAKEET_MODEL` | `nvidia/parakeet-tdt-0.6b-v2` | Transcription model |
-| `NEMO_DIARIZATION_MODEL` | `diar_msdd_telephonic` | Speaker diarization model |
+| `NEMO_DIARIZATION_MODEL` | `nvidia/Nemotron-3-Diarization` | HF id = Sortformer, whole episode, up to 8 speakers; `diar_msdd_telephonic` = legacy per-chunk MSDD |
 
 ### LLM
 
@@ -402,9 +402,9 @@ Response: { "status": "updated", "updated_keys": [str], "message": str }
 
 ```
 Audio File
-  → Chunk into 10-min segments (NeMo) or full file (Whisper)
+  → Chunk into 60-min segments (NeMo) or full file (Whisper)
   → Transcribe (word-level timestamps)
-  → Diarize (speaker labels via MSDD or pyannote)
+  → Diarize whole episode (Nemotron-3-Diarization; MSDD or pyannote as alternatives)
   → Align words to speakers (aligner.py)
   → Merge micro-segments (<1.5s bounces)
   → Merge minor speakers (auto-detect over-segmentation)

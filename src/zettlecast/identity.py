@@ -121,7 +121,7 @@ def ensure_uuid_in_file(file_path: Path) -> Tuple[str, bool]:
         # Atomic write: write to temp file, then rename
         temp_path = file_path.with_suffix(".tmp")
         temp_path.write_text(new_content, encoding="utf-8")
-        temp_path.rename(file_path)
+        temp_path.replace(file_path)  # replace() overwrites on Windows; rename() raises
     
     return uuid, was_modified
 

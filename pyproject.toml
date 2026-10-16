@@ -34,6 +34,8 @@ dependencies = [
     
     # Audio Transcription
     "faster-whisper>=1.1.0",
+    "av<19",  # PyAV 19 dropped the metadata_errors arg faster-whisper 1.2.1 passes to av.open()
+    "pydub>=0.25.0",  # Audio chunking/resampling for the NeMo pipeline
     
     # Utilities
     "python-multipart>=0.0.17",
@@ -73,12 +75,14 @@ podcast = [
     "pydub>=0.25.0",
 ]
 
-# NeMo (for direct installation, not recommended - use container instead)
+# NeMo Speech 3.x (Python 3.12+, PyTorch 2.7+). Install a CUDA PyTorch build first:
+#   uv pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu130
+# nvidia/Nemotron-3-Diarization needs rope attention, which is newer than the 3.0.0
+# PyPI release; until 3.1 ships, install from GitHub:
+#   uv pip install "nemo-toolkit[asr] @ git+https://github.com/NVIDIA-NeMo/Speech@218d0b443441b7d8aa1c832f47df310f186cf0a4"
 nemo = [
-    "nemo_toolkit[asr]>=2.0.0",
+    "nemo_toolkit[asr]>=3.0.0",
     "omegaconf>=2.3.0",
-    "whisperx>=3.1.0",
-    "cuda-python>=12.3,<13.0",  # NeMo requires v12 API (v13 has breaking changes)
 ]
 
 

@@ -22,8 +22,11 @@ def get_embedding_function():
     if settings.hf_token:
         os.environ["HF_TOKEN"] = settings.hf_token
         
+    import torch
+
     model = get_registry().get("sentence-transformers")
-    return model.create(name=settings.embedding_model, device="cpu")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    return model.create(name=settings.embedding_model, device=device)
 
 
 # Initialize embedding function

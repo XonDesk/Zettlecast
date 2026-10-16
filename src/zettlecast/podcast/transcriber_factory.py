@@ -169,7 +169,7 @@ class TranscriberFactory:
             from .nemo_transcriber import NeMoTranscriber
             transcriber = NeMoTranscriber(
                 device=config.device if config.device != "auto" else "cuda",
-                chunk_duration_minutes=config.chunk_duration_minutes,
+                chunk_duration_minutes=settings.nemo_chunk_duration_minutes,
                 enable_diarization=config.enable_diarization,
             )
             logger.info("Using NeMoTranscriber (direct)")

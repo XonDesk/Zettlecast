@@ -54,9 +54,10 @@ class Settings(BaseSettings):
 
     # --- NeMo Transcription (Container-based on Windows) ---
     use_nemo: bool = False  # Legacy flag, prefer asr_backend
-    nemo_chunk_duration_minutes: int = 10  # Macro-chunk size for stable memory
-    nemo_parakeet_model: str = "nvidia/parakeet-tdt-0.6b-v2"  # Fast transcription
-    nemo_diarization_model: str = "diar_msdd_telephonic"  # MSDD speaker diarization
+    nemo_chunk_duration_minutes: int = 60  # ASR chunk size; 60 min uses ~14 GB VRAM with local attention
+    nemo_parakeet_model: str = "nvidia/parakeet-tdt-0.6b-v2"  # English; use -v3 for 25 European languages
+    # HF id = Sortformer (whole-episode, up to 8 speakers); bare name (e.g. diar_msdd_telephonic) = legacy MSDD
+    nemo_diarization_model: str = "nvidia/Nemotron-3-Diarization"
     nemo_container_image: str = "zettlecast/nemo-asr:latest"
     nemo_container_auto_start: bool = True
 

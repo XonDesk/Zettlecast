@@ -1,16 +1,26 @@
 """
-NeMo-based Parallel Transcription and Diarization
+NeMo-based Transcription and Diarization
 
-Uses NVIDIA NeMo models for fast, parallel processing:
-- Parakeet-TDT for transcription (~60 min in <2 sec)
-- MSDD for speaker diarization (~1/10th real-time)
+Uses NVIDIA NeMo models:
+- Parakeet-TDT for transcription with word timestamps
+- Nemotron-3-Diarization (Sortformer, up to 8 speakers) for diarization,
+  or the legacy MSDD pipeline when NEMO_DIARIZATION_MODEL is an MSDD name
 
 Pipeline:
-1. Chunk audio into 10-minute segments
-2. Run transcription and diarization in parallel for each chunk
-3. Align word timestamps with speaker labels
-4. Merge chunks back into complete transcript
+1. Chunk audio into NEMO_CHUNK_DURATION_MINUTES segments for ASR
+2. Transcribe each chunk
+3. Diarize: Sortformer runs once over the whole episode so speaker labels
+   stay consistent; MSDD runs per chunk
+4. Align word timestamps with speaker labels
 """
+
+import os
+import importlib.util
+
+# Sortformer models call torch.compile, which needs Triton. Triton is not
+# shipped for Windows, so fall back to eager mode when it's missing.
+if importlib.util.find_spec("triton") is None:
+    os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
 
 # Apply NumPy 2.0 compatibility patch BEFORE importing NeMo
 # This must happen before any NeMo imports to prevent np.sctypes errors
@@ -55,9 +65,11 @@ class NeMoTranscriber(BaseTranscriber):
     """
     Parallel transcription and diarization using NVIDIA NeMo models.
 
-    Models:
-    - nvidia/parakeet-tdt-0.6b-v2: Fast transcription with word timestamps
-    - diar_msdd_telephonic: MSDD speaker diarization (RTTM output)
+    Models (configurable via settings):
+    - nemo_parakeet_model: transcription with word timestamps
+    - nemo_diarization_model: a Hugging Face Sortformer id such as
+      nvidia/Nemotron-3-Diarization, or a legacy MSDD name such as
+      diar_msdd_telephonic
     """
 
     def __init__(
@@ -78,9 +90,14 @@ class NeMoTranscriber(BaseTranscriber):
         self.device = device or settings.whisper_device  # Reuse device config
         self.chunk_duration_minutes = chunk_duration_minutes
         self.enable_diarization = enable_diarization
+        self.parakeet_model_id = settings.nemo_parakeet_model
+        self.diarization_model_id = settings.nemo_diarization_model
+        # Hugging Face repo ids (org/name) are Sortformer models; bare names are MSDD
+        self.use_sortformer = "/" in self.diarization_model_id
 
         # Models loaded lazily
         self._parakeet_model = None
+        self._sortformer_model = None
         self._frame_duration = None  # Computed from model config on first load
         self._last_chunk_device = None  # Tracks actual device used per chunk (for fallback detection)
 
@@ -88,8 +105,8 @@ class NeMoTranscriber(BaseTranscriber):
         """Return NeMo transcriber capabilities."""
         return TranscriberCapabilities(
             platform="any",
-            transcriber_name="NeMo (Parakeet-TDT)",
-            diarizer_name="NeMo (MSDD)",
+            transcriber_name=f"NeMo ({self.parakeet_model_id})",
+            diarizer_name=f"NeMo ({self.diarization_model_id})",
             vad_name="MarbleNet",
             supports_diarization=True,
             supports_gpu=True,  # NeMo strongly prefers GPU
@@ -108,7 +125,12 @@ class NeMoTranscriber(BaseTranscriber):
             del self._parakeet_model
             self._parakeet_model = None
             logger.info("Released Parakeet model from memory")
-        
+
+        if self._sortformer_model is not None:
+            del self._sortformer_model
+            self._sortformer_model = None
+            logger.info("Released Sortformer model from memory")
+
         if self.device == "cuda":
             import torch
             import gc
@@ -171,13 +193,19 @@ class NeMoTranscriber(BaseTranscriber):
                 
                 import nemo.collections.asr as nemo_asr
 
-                logger.info("Loading Parakeet-TDT model in half-precision...")
-                self._parakeet_model = nemo_asr.models.EncDecRNNTBPEModel.from_pretrained(
-                    "nvidia/parakeet-tdt-0.6b-v2",
+                logger.info(f"Loading {self.parakeet_model_id} in half-precision...")
+                self._parakeet_model = nemo_asr.models.ASRModel.from_pretrained(
+                    self.parakeet_model_id,
                     map_location=torch.device(self.device),
                 )
                 self._parakeet_model.eval()
-                
+
+                # Local attention keeps memory linear in audio length (full attention
+                # is quadratic and fails past ~10 min on 32 GB); an hour of audio
+                # then fits in ~14 GB in one pass.
+                self._parakeet_model.change_attention_model("rel_pos_local_attn", [256, 256])
+                self._parakeet_model.change_subsampling_conv_chunking_factor(1)
+
                 # Compute frame duration from model config for timestamp conversion
                 # Parakeet outputs timestamps in encoder frame indices, not seconds
                 window_stride = self._parakeet_model.cfg.preprocessor.window_stride
@@ -310,7 +338,16 @@ class NeMoTranscriber(BaseTranscriber):
                 # Convert using frame_duration (window_stride * subsampling_factor).
                 frame_dur = self._frame_duration or 0.08  # fallback: 0.01s * 8
 
-                if hasattr(hypothesis, "timestep") and hypothesis.timestep:
+                # NeMo 3.x: hypothesis.timestamp["word"] with start/end in seconds
+                timestamp = getattr(hypothesis, "timestamp", None)
+                if isinstance(timestamp, dict) and timestamp.get("word"):
+                    for word_info in timestamp["word"]:
+                        words.append(Word(
+                            text=word_info["word"],
+                            start=word_info["start"] + chunk.start_time,
+                            end=word_info["end"] + chunk.start_time,
+                        ))
+                elif hasattr(hypothesis, "timestep") and hypothesis.timestep:
                     # NeMo 2.x uses timestep dict with 'word' key for word-level timestamps
                     word_timestamps = hypothesis.timestep.get("word", [])
                     for word_info in word_timestamps:
@@ -461,6 +498,63 @@ class NeMoTranscriber(BaseTranscriber):
             logger.debug(traceback.format_exc())
             return "", time.time() - start_time
 
+    def _load_sortformer(self):
+        """Load the Sortformer diarization model (e.g. Nemotron-3-Diarization)."""
+        if self._sortformer_model is None:
+            import torch
+            from nemo.collections.asr.models import SortformerEncLabelModel
+
+            logger.info(f"Loading {self.diarization_model_id}...")
+            self._sortformer_model = SortformerEncLabelModel.from_pretrained(
+                self.diarization_model_id,
+                map_location=torch.device(self.device),
+            )
+            self._sortformer_model.eval()
+        return self._sortformer_model
+
+    def _diarize_full(self, audio_path: Path, temp_dir: Path) -> Tuple[str, float]:
+        """
+        Diarize the whole episode in one pass with Sortformer.
+
+        Running over the full file (rather than per chunk) keeps speaker
+        labels consistent across the episode. Sortformer streams internally,
+        so memory stays flat regardless of episode length.
+
+        Returns:
+            Tuple of (RTTM content string, processing time)
+        """
+        start_time = time.time()
+        try:
+            from pydub import AudioSegment
+
+            # Sortformer expects 16 kHz mono
+            wav_path = temp_dir / "diarize_16k.wav"
+            AudioSegment.from_file(str(audio_path)).set_channels(1).set_frame_rate(16000).export(
+                str(wav_path), format="wav"
+            )
+
+            model = self._load_sortformer()
+            segments = model.diarize(audio=[str(wav_path)], batch_size=1)[0]
+
+            # Segments are "start end speaker_N" strings; convert to RTTM lines
+            rttm_lines = []
+            for seg in segments:
+                start, end, speaker = seg.split()
+                start, end = float(start), float(end)
+                rttm_lines.append(
+                    f"SPEAKER episode 1 {start:.3f} {end - start:.3f} <NA> <NA> {speaker} <NA> <NA>"
+                )
+
+            processing_time = time.time() - start_time
+            logger.info(f"Diarized {len(rttm_lines)} segments in {processing_time:.2f}s")
+            return "\n".join(rttm_lines), processing_time
+
+        except Exception as e:
+            logger.error(f"Sortformer diarization failed: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            return "", time.time() - start_time
+
     def _process_chunk_parallel(
         self,
         chunk: AudioChunk,
@@ -492,8 +586,9 @@ class NeMoTranscriber(BaseTranscriber):
         # Transcribe first
         words, trans_time = self._transcribe_chunk(chunk)
 
-        # Report diarization stage (with actual device used for transcription)
-        if self.enable_diarization:
+        # Report diarization stage (with actual device used for transcription).
+        # Sortformer diarizes the whole episode after all chunks are transcribed.
+        if self.enable_diarization and not self.use_sortformer:
             if progress_callback:
                 if not progress_callback("diarizing", chunk_num, total_chunks, self._last_chunk_device or self.device):
                     raise CancellationError("Cancelled by user")
@@ -558,11 +653,23 @@ class NeMoTranscriber(BaseTranscriber):
                 total_trans_time += trans_time
                 total_diar_time += diar_time
 
-                # Free GPU memory after each chunk to prevent CUDA OOM
-                if self.device == "cuda":
-                    import torch
-                    torch.cuda.empty_cache()
-                    logger.debug(f"Cleared GPU memory after chunk {chunk.chunk_index}")
+                # NOTE: don't call torch.cuda.empty_cache() between Parakeet transcribe()
+                # calls - it frees buffers the decoder still holds and aborts the process.
+
+            if self.enable_diarization and self.use_sortformer:
+                # Free Parakeet before loading the diarizer
+                if self._parakeet_model is not None:
+                    del self._parakeet_model
+                    self._parakeet_model = None
+                    if self.device == "cuda":
+                        import torch
+                        torch.cuda.empty_cache()
+                if progress_callback:
+                    if not progress_callback("diarizing", num_chunks, num_chunks, self.device):
+                        raise CancellationError("Cancelled by user")
+                rttm_content, total_diar_time = self._diarize_full(audio_path, temp_dir)
+                if rttm_content:
+                    all_rttm_lines.append(rttm_content)
 
             logger.info(f"Transcribed {len(all_words)} total words")
             logger.info(f"Total transcription time: {total_trans_time:.2f}s")
