@@ -6,6 +6,7 @@ import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatDate, formatTimestamp } from '@/lib/utils';
 import MarkdownContent from '@/components/MarkdownContent';
+import Transcript from '@/components/Transcript';
 import type { NoteDetail as NoteDetailType } from '@/lib/types';
 
 function formatDuration(seconds: number): string {
@@ -90,6 +91,14 @@ export default function NoteDetailPage() {
         }
     };
 
+    const seek = (seconds: number) => {
+        const audio = audioRef.current;
+        if (!audio) return;
+        audio.currentTime = seconds;
+        audio.play().catch(() => undefined);
+        audio.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    };
+
     if (loading) return <div className="loading">Loading note...</div>;
     if (error) return <div className="empty-state">{error}</div>;
     if (!note) return <div className="empty-state">Note not found</div>;
@@ -132,7 +141,24 @@ export default function NoteDetailPage() {
 
             <div className="note-detail">
                 <div className="note-content">
-                    <MarkdownContent content={note.full_text} />
+                    {(() => {
+                        // Podcast transcripts get their own view: speaker turns with play-from-here times
+                        const [body, transcript] = note.full_text.split(/\n## Transcript\n/);
+                        return (
+                            <>
+                                <MarkdownContent content={body} />
+                                {transcript !== undefined && (
+                                    <div className="markdown-content">
+                                        <h2>Transcript</h2>
+                                        <Transcript
+                                            text={transcript}
+                                            onSeek={note.source_type === 'audio' ? seek : undefined}
+                                        />
+                                    </div>
+                                )}
+                            </>
+                        );
+                    })()}
                 </div>
 
                 <div className="note-sidebar">

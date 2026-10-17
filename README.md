@@ -26,6 +26,8 @@ PDF / web page / markdown / image ─► text (pypdf, Marker, Trafilatura, Qwen3
   each hit shows the matching passage. Podcast hits include the timestamp and
   open the episode player at that moment.
 - **Graph** edges combine semantic similarity of whole notes with shared tags.
+  The graph has its own full-screen view (`/graph`): find a note, click to see
+  its links, double-click to open it.
   Rejecting a suggested link removes it and keeps it out of future rebuilds.
 
 ## Environment

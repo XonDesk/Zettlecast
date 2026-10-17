@@ -16,6 +16,7 @@ from .models import LinkSuggestion, SearchResult
 logger = logging.getLogger(__name__)
 
 _TIMESTAMP_RE = re.compile(r"^\[([\d.]+)s")
+MAX_CHUNKS_PER_NOTE = 5  # rerank candidates taken from any one note
 
 
 def _chunk_timestamp(text: str) -> Optional[float]:
@@ -35,7 +36,15 @@ def search(
     """
     top_k = top_k or settings.return_top_k
 
-    candidates = db.search_chunks(embed_query(query), top_k=settings.rerank_top_k)
+    # A long note (an hour-long episode is ~60 chunks) can fill every candidate slot,
+    # so cap chunks per note before reranking: other notes need a chance to be seen
+    per_note: dict = {}
+    candidates = []
+    for chunk in db.search_chunks(embed_query(query), top_k=settings.rerank_top_k * 8):
+        per_note[chunk["note_uuid"]] = per_note.get(chunk["note_uuid"], 0) + 1
+        if per_note[chunk["note_uuid"]] <= MAX_CHUNKS_PER_NOTE:
+            candidates.append(chunk)
+    candidates = candidates[:settings.rerank_top_k]
     if not candidates:
         return []
 

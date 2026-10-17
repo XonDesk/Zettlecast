@@ -9,7 +9,7 @@ the local machine.
 | Layer | Technology |
 |-------|-----------|
 | API / CLI | FastAPI, Click (Python 3.12) |
-| UI | Next.js 16, React 19, react-force-graph-2d |
+| UI | Next.js 16, React 19, Sigma.js + graphology (ForceAtlas2) for the graph |
 | Storage | Markdown files + LanceDB |
 | ASR | NVIDIA Parakeet-TDT 0.6B (NeMo, local attention) |
 | Diarization | NVIDIA Nemotron-3-Diarization (Sortformer) |

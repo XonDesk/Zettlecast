@@ -11,7 +11,7 @@ LanceDB for semantic search, and notes are linked into a knowledge graph.
 | Component | Technology |
 |-----------|-----------|
 | Backend | Python 3.12 + FastAPI, CLI with Click |
-| Frontend | Next.js 16 + React 19 + TypeScript |
+| Frontend | Next.js 16 + React 19 + TypeScript; graph: Sigma.js (WebGL) + graphology ForceAtlas2 |
 | Database | LanceDB (notes, chunks with 1024-dim vectors, graph edges) |
 | Embeddings | `Qwen/Qwen3-Embedding-0.6B` (sentence-transformers, CUDA) |
 | Reranker | `Qwen/Qwen3-Reranker-0.6B` (CrossEncoder, CUDA) |
@@ -30,7 +30,7 @@ src/zettlecast/
   db.py              LanceDB tables: notes, chunks, graph_edges, rejected_edges
   embeddings.py      Embedding + reranker models
   llm.py             Ollama client (chat with optional JSON schema, images; unload)
-  search.py          Chunk search -> rerank -> best chunk per note; related notes
+  search.py          Chunk search (max 5 chunks per note) -> rerank -> best chunk per note; related notes
   linker.py          Graph edges: alpha*cosine(note vectors) + beta*jaccard(tags)
   chunker.py         Prose + transcript-aware chunking (keeps "[t] speaker:" headers)
   parser.py          PDF (pypdf -> Marker), web (Trafilatura), markdown (frontmatter-aware)
@@ -52,7 +52,8 @@ src/zettlecast/
     vision_backend.py    One structured vision call (description, OCR text, concepts)
     image_parser.py      Image -> note
     queue.py             Image queue
-frontend/            Next.js UI (notes, podcasts, images, search, graph, settings)
+frontend/            Next.js UI: app/(main)/ pages share the sidebar (notes, podcasts, images, search,
+                     settings); app/graph is a full-screen view; components/Transcript renders speaker turns
 tests/               pytest suite (LLM and models mocked)
 start.ps1            Start Ollama + API + web UI
 zc.ps1               CLI shortcut
@@ -86,6 +87,10 @@ zc.ps1               CLI shortcut
 - The LLM (~22 GB) and NeMo (~14 GB) can't share the GPU; `pipeline.run_podcast_queue`
   unloads Ollama before each transcription and NeMo frees its models before enhancement.
   A second, small Parakeet (fp16, ~1.3 GB) stays loaded as the acoustic judge next to the LLM.
+- The API server unloads the search models (~3 GB) after `MODEL_IDLE_MINUTES` (5) without a search
+  (`embeddings.start_idle_unloader`), so a CLI transcription run isn't starved of GPU memory
+  (an episode took 23 min instead of 3.5 with them loaded). `run_podcast_queue` holds
+  `embeddings.hold()` so the cache is never emptied mid-run.
 - NeMo's TDT loss kernel needs NVVM (CUDA toolkit, not installed), so `acoustic.py`
   computes the TDT likelihood itself; it matches `TDTLossPytorch` exactly and is ~600x faster.
 - Queue runs hold a Windows power request (`pipeline.keep_awake`) so Modern Standby doesn't pause them.
@@ -131,7 +136,7 @@ Parakeet (60-min pieces) → Nemotron diarization (whole episode) → align →
 speaker names from the publisher's transcript (if it names speakers) → LLM analysis →
 suspects pass (LLM lists likely misheard names/terms with sound-alike candidates; publisher
 differences, the show glossary and a Wikipedia lookup for unconfirmed names add candidates) → each candidate scored against the audio
-(rejected above 10 nats per changed word; best-supported plausible candidate wins) →
+(rejected above 10 nats per changed word, 30 for a confirmed name respelled; best-supported plausible candidate wins) →
 LLM cleanup, every content edit also checked against the audio → `transcripts/<title>_<id8>.md` → chunk + embed → graph edges.
 
 ---
