@@ -239,11 +239,16 @@ def podcast_run(limit: int, no_enhance: bool, no_verify: bool, no_sync: bool):
     total = min(limit, pending) if limit else pending
     click.echo(f"Processing {total} of {pending} pending episode(s)\n")
 
-    count = {"n": 0}
+    count = {"n": 0, "of": total}
+
+    def on_pass(name, n):
+        count.update(n=0, of=n)
+        heading = {"transcribe": "Pass 1: transcription", "enhance": "Pass 2: analysis and corrections"}[name]
+        click.echo(f"== {heading} ({n} episode(s)) ==")
 
     def start(_id, title):
         count["n"] += 1
-        click.echo(f"[{count['n']}/{total}] {title}")
+        click.echo(f"[{count['n']}/{count['of']}] {title}")
 
     def progress_for(_id):
         last = {"stage": None}
@@ -273,6 +278,7 @@ def podcast_run(limit: int, no_enhance: bool, no_verify: bool, no_sync: bool):
         on_episode_start=start,
         on_episode_done=done,
         progress_for=progress_for,
+        on_pass=on_pass,
     )
     click.echo(f"Completed {summary.completed}, failed {summary.failed}")
 
@@ -353,13 +359,23 @@ def podcast_verify(match: str, spans: int):
 @podcast.command("reprocess")
 @click.argument("match", required=False)
 @click.option("--all", "all_", is_flag=True, help="Reprocess every completed episode")
-def podcast_reprocess(match: str, all_: bool):
-    """Queue completed episodes (title containing MATCH, or --all) to be processed again."""
+@click.option("--retranscribe", is_flag=True, help="Also redo speech recognition (default: reuse the saved transcription)")
+def podcast_reprocess(match: str, all_: bool, retranscribe: bool):
+    """
+    Queue completed episodes (title containing MATCH, or --all) to be processed again.
+    The saved transcription is reused, so only the analysis/corrections pass runs.
+    """
+    from .podcast.asr_cache import delete_asr
     from .podcast.queue import TranscriptionQueue
 
     if not match and not all_:
         raise click.UsageError("Give a title to match or --all")
-    count = TranscriptionQueue().reprocess(None if all_ else match)
+    queue = TranscriptionQueue()
+    count = queue.reprocess(None if all_ else match)
+    if retranscribe:
+        for item in queue.items.values():
+            if item.status == "pending":
+                delete_asr(Path(item.episode.audio_path))
     click.echo(f"Queued {count} episode(s) again. Run: zettlecast podcast run")
 
 

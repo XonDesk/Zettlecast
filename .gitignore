@@ -52,3 +52,4 @@ _BRAIN_STORAGE/
 # Frontend build output
 frontend/.next/
 frontend/node_modules/
+_BENCH_STORAGE/

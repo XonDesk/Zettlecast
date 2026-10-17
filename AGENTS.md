@@ -39,6 +39,7 @@ src/zettlecast/
   models.py          Pydantic models
   podcast/
     nemo_transcriber.py  Parakeet + Nemotron diarization on CUDA
+    asr_cache.py         Saved raw transcription (<audio>.asr.json) between the two passes
     aligner.py           Word -> speaker alignment, micro-segment merge
     enhancer.py          LLM analysis (keywords, summary, key points, chapters, speaker names) + cleanup
     formatter.py         Transcript markdown note (uuid = episode id)
@@ -85,7 +86,7 @@ zc.ps1               CLI shortcut
 - Parakeet must use local attention for audio longer than ~10 minutes
   (full attention fails with "CUDA driver error: device not ready").
 - The LLM (~22 GB) and NeMo (~14 GB) can't share the GPU; `pipeline.run_podcast_queue`
-  unloads Ollama before each transcription and NeMo frees its models before enhancement.
+  unloads Ollama before the transcription pass and NeMo frees its models before the analysis pass.
   A second, small Parakeet (fp16, ~1.3 GB) stays loaded as the acoustic judge next to the LLM.
 - The API server unloads the search models (~3 GB) after `MODEL_IDLE_MINUTES` (5) without a search
   (`embeddings.start_idle_unloader`), so a CLI transcription run isn't starved of GPU memory
@@ -126,13 +127,17 @@ the same word count and a close spelling is proposed as a new name. Single words
 | `podcast add PATH [--name] [--recursive]` | Queue local audio |
 | `podcast import URL [--limit N]` | Download + queue feed episodes |
 | `podcast run [--limit N] [--no-enhance] [--no-sync]` | Process pending episodes end to end |
-| `podcast reprocess MATCH` / `--all` | Re-queue completed episodes (note is replaced in place) |
+| `podcast reprocess MATCH` / `--all` [`--retranscribe`] | Re-queue completed episodes (note is replaced in place); reuses the saved transcription unless `--retranscribe` |
 | `podcast verify [MATCH] [-s N]` | Compare notes with the feed's published transcripts (word/speaker agreement, passages to spot-check) |
 | `podcast status` / `podcast retry` | Queue status / reset failed |
 | `image add PATH` / `image run` / `image status` / `image retry` | Image pipeline |
 
-`podcast run` pipeline per episode: unload LLM → decode to 16 kHz mono →
-Parakeet (60-min pieces) → Nemotron diarization (whole episode) → align →
+`podcast run` works in two passes, so the 22 GB LLM is loaded once per run. Pass 1, for every
+pending episode (speech models reloaded per episode: a Parakeet kept across a diarization
+crashes with an illegal memory access): decode to 16 kHz mono → Parakeet (60-min pieces) → Nemotron diarization (whole
+episode) → align → save `<audio>.asr.json` (reused by later runs until the models change).
+Pass 2, with the LLM and acoustic judge loaded once: glossary seeded with every episode's
+publisher-confirmed speakers → per episode:
 speaker names from the publisher's transcript (if it names speakers) → LLM analysis →
 suspects pass (LLM lists likely misheard names/terms with sound-alike candidates; publisher
 differences, the show glossary and a Wikipedia lookup for unconfirmed names add candidates) → each candidate scored against the audio
@@ -217,4 +222,12 @@ podcast: {show: KoopCast, episode: ..., feed_url: ..., published: ...}
 ```powershell
 .\.venv\Scripts\python -m pytest tests
 cd frontend; npm run build
+```
+
+Fix-pass bench (real models, ~3 min per run instead of ~20): the first 10 minutes of each
+processed episode in `_BENCH_STORAGE` (real notes untouched), same glossary snapshot every run.
+
+```powershell
+.\.venv\Scripts\python scriptsench.py setup   # cut clips + transcribe once (~5 min)
+.\.venv\Scripts\python scriptsench.py run     # fix pass + score vs publisher, diff vs last run
 ```

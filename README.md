@@ -53,7 +53,7 @@ Or from the CLI:
 
 ```powershell
 .\zc.ps1 podcast import https://example.com/feed.xml --limit 5   # download + queue episodes (show notes help name speakers)
-.\zc.ps1 podcast reprocess "Scott Frey"                           # redo a processed episode (or --all)
+.\zc.ps1 podcast reprocess "Scott Frey"                           # redo analysis/corrections (or --all; --retranscribe redoes speech too)
 .\zc.ps1 podcast verify                                           # compare with transcripts published in the feed
 .\zc.ps1 podcast add D:\Podcasts\SomeShow                         # queue local audio
 .\zc.ps1 podcast run                                              # transcribe, enhance, index

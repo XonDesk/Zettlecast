@@ -17,13 +17,14 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Dict, List, Optional
 
 from .config import settings
 from .db import db
 from .linker import update_edges_for_note
 from .models import NoteModel, ProcessingResult
 from .parser import AUDIO_EXTENSIONS, parse_file
+from .podcast.models import PodcastEpisode, TranscriptionResult
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +226,32 @@ def name_lookup():
     return _lookup
 
 
+def _seed_glossaries(episodes: List[PodcastEpisode], results: Dict[str, TranscriptionResult]) -> None:
+    """
+    Before any episode is fixed, add the speakers named by the publisher's transcripts
+    of every episode in this run to their show's glossary as trusted names, so the
+    first episodes processed already know the guests of the later ones.
+    """
+    from .podcast.verifier import TRUSTED_COUNT, glossary_path, load_glossary, save_glossary
+
+    by_show: Dict[str, set] = {}
+    for episode in episodes:
+        result = results.get(episode.id)
+        ref = episode_reference(episode) if result else None
+        if ref:
+            names = {n.strip() for n in published_speaker_names(ref, result).values() if " " in n.strip()}
+            by_show.setdefault(episode.podcast_name or "", set()).update(names)
+    for show, names in by_show.items():
+        if not names:
+            continue
+        path = glossary_path(settings.storage_path, show)
+        glossary = load_glossary(path)
+        for name in names:
+            glossary[name] = max(glossary.get(name, 0), TRUSTED_COUNT)
+        save_glossary(path, glossary)
+        logger.info(f"{show}: {len(names)} publisher-confirmed speaker names added to the glossary")
+
+
 def _run_podcast_queue(
     limit: Optional[int] = None,
     enhance: bool = True,
@@ -233,21 +260,29 @@ def _run_podcast_queue(
     on_episode_start: Optional[Callable[[str, str], None]] = None,
     on_episode_done: Optional[Callable[[EpisodeOutcome], None]] = None,
     progress_for: Optional[Callable[[str], ProgressCallback]] = None,
+    on_pass: Optional[Callable[[str, int], None]] = None,
 ) -> QueueRunSummary:
     """
-    Process pending podcast episodes end to end.
+    Process pending podcast episodes in two passes:
+
+    1. transcribe + diarize every episode (results saved next to the audio as
+       <name>.asr.json, so a reprocess skips this pass)
+    2. LLM analysis, audio-checked corrections, note, index (LLM + acoustic judge
+       loaded once), with the glossary seeded from every episode's publisher transcript
 
     Args:
         limit: Max episodes to process (None = all pending)
         enhance: Run LLM analysis + cleanup
         verify: Check corrections against the audio (needs enhance)
         sync: First add any audio under storage/podcasts that isn't queued yet
-        on_episode_start: Called with (episode_id, title) before each episode
+        on_episode_start: Called with (episode_id, title) before each episode, in each pass
         on_episode_done: Called with the outcome of each episode
         progress_for: Returns a progress callback for an episode id; the
             callback returning False cancels that episode
+        on_pass: Called with ("transcribe" | "enhance", episode count) as each pass starts
     """
     from . import llm
+    from .podcast.asr_cache import load_asr, save_asr
     from .podcast.enhancer import TranscriptEnhancer
     from .podcast.formatter import save_result
     from .podcast.nemo_transcriber import CancellationError, NeMoTranscriber
@@ -257,16 +292,77 @@ def _run_podcast_queue(
     if sync:
         queue.sync_with_storage()
 
-    transcriber = NeMoTranscriber()
-    enhancer = TranscriptEnhancer() if enhance else None
+    items = [i for i in queue.items.values() if i.status == "pending"]
+    if limit is not None:
+        items = items[:limit]
     summary = QueueRunSummary()
+    results: Dict[str, TranscriptionResult] = {}
+    elapsed: Dict[str, float] = {}
 
-    while limit is None or len(summary.outcomes) < limit:
-        item = queue.get_next_pending()
-        if not item:
-            break
-        episode = item.episode
-        title = episode.episode_title or Path(episode.audio_path).stem
+    def title_of(episode: PodcastEpisode) -> str:
+        return episode.episode_title or Path(episode.audio_path).stem
+
+    def finish(outcome: EpisodeOutcome) -> None:
+        summary.outcomes.append(outcome)
+        if on_episode_done:
+            on_episode_done(outcome)
+
+    def fail(episode: PodcastEpisode, error: Exception) -> None:
+        outcome = EpisodeOutcome(episode_id=episode.id, title=title_of(episode), status="failed")
+        if isinstance(error, CancellationError):
+            queue.mark_cancelled(episode.id)
+            outcome.status = "cancelled"
+        else:
+            logger.exception(f"Episode failed: {outcome.title}")
+            queue.mark_failed(episode.id, str(error), max_retries=settings.podcast_max_retries)
+            outcome.error = str(error)
+        finish(outcome)
+
+    # --- Pass 1: transcription (saved results are reused) ---
+    for item in items:
+        cached = load_asr(Path(item.episode.audio_path))
+        if cached:
+            results[item.episode.id] = cached
+    to_transcribe = [i.episode for i in items if i.episode.id not in results]
+    if to_transcribe:
+        if on_pass:
+            on_pass("transcribe", len(to_transcribe))
+        llm.unload()  # make room on the GPU for ASR
+        # Parakeet and Sortformer are reloaded per episode (a few seconds): a Parakeet kept
+        # loaded across a diarization fails its next decode with an illegal memory access
+        transcriber = NeMoTranscriber()
+        try:
+            for episode in to_transcribe:
+                if on_episode_start:
+                    on_episode_start(episode.id, title_of(episode))
+                queue.mark_started(episode.id)
+                started = time.time()
+                try:
+                    progress = progress_for(episode.id) if progress_for else None
+                    result = transcriber.transcribe(
+                        Path(episode.audio_path), episode=episode, progress_callback=progress
+                    )
+                    save_asr(Path(episode.audio_path), result)
+                    results[episode.id] = result
+                    elapsed[episode.id] = time.time() - started
+                except Exception as e:  # one episode must not stop the batch
+                    fail(episode, e)
+        finally:
+            transcriber.cleanup_gpu()
+
+    # --- Pass 2: analysis, verified corrections, note, index ---
+    episodes = [i.episode for i in items if i.episode.id in results]
+    if not episodes:
+        return summary
+    if on_pass:
+        on_pass("enhance", len(episodes))
+    enhancer = TranscriptEnhancer() if enhance else None
+    if enhancer and verify:
+        _seed_glossaries(episodes, results)
+
+    for episode in episodes:
+        result = results[episode.id]
+        title = title_of(episode)
         if on_episode_start:
             on_episode_start(episode.id, title)
         progress = progress_for(episode.id) if progress_for else None
@@ -277,11 +373,7 @@ def _run_podcast_queue(
 
         queue.mark_started(episode.id)
         started = time.time()
-        outcome = EpisodeOutcome(episode_id=episode.id, title=title, status="failed")
         try:
-            llm.unload()  # make room on the GPU for ASR
-            result = transcriber.transcribe(Path(episode.audio_path), episode=episode, progress_callback=progress)
-
             enhanced = None
             verifier = None
             if enhancer:
@@ -327,26 +419,17 @@ def _run_podcast_queue(
                     verifier.lookup.save()
 
             queue.mark_completed(episode.id, result, note_path)
-            outcome = EpisodeOutcome(
+            finish(EpisodeOutcome(
                 episode_id=episode.id,
                 title=title,
                 status="completed",
                 note_path=note_path,
                 duration_seconds=result.duration_seconds,
-                processing_seconds=time.time() - started,
+                processing_seconds=elapsed.get(episode.id, 0.0) + time.time() - started,
                 speakers=result.speakers_detected,
-            )
-        except CancellationError:
-            queue.mark_cancelled(episode.id)
-            outcome.status = "cancelled"
+            ))
         except Exception as e:
-            logger.exception(f"Episode failed: {title}")
-            queue.mark_failed(episode.id, str(e), max_retries=settings.podcast_max_retries)
-            outcome.error = str(e)
-
-        summary.outcomes.append(outcome)
-        if on_episode_done:
-            on_episode_done(outcome)
+            fail(episode, e)
 
     return summary
 
