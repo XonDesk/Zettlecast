@@ -1,13 +1,21 @@
 """
-Embedding and reranking models (loaded lazily, kept on the GPU).
+Embedding and reranking models (loaded lazily on the GPU).
+
+The API server unloads them after MODEL_IDLE_MINUTES without use
+(start_idle_unloader), so a transcription run gets the GPU memory back; the
+next search loads them again (~10 s).
 
 - Qwen3-Embedding: documents are encoded as-is, queries with the model's
   built-in "query" instruction prompt.
 - Qwen3-Reranker: cross-encoder scoring of (query, passage) pairs, 0..1.
 """
 
+import contextlib
+import gc
 import logging
 import os
+import threading
+import time
 from typing import Optional
 
 import numpy as np
@@ -18,6 +26,9 @@ logger = logging.getLogger(__name__)
 
 _embedder = None
 _reranker = None
+_lock = threading.RLock()  # loading, using and unloading never overlap
+_last_used = 0.0
+_holds = 0  # GPU work in this process that must not see the cache emptied (Parakeet)
 
 
 def _device() -> str:
@@ -33,8 +44,14 @@ def _quiet_transformers() -> None:
     hf_logging.disable_progress_bar()
 
 
+def _touch() -> None:
+    global _last_used
+    _last_used = time.monotonic()
+
+
 def get_embedder():
     global _embedder
+    _touch()
     if _embedder is None:
         import torch
         from sentence_transformers import SentenceTransformer
@@ -54,6 +71,7 @@ def get_embedder():
 
 def get_reranker():
     global _reranker
+    _touch()
     if _reranker is None:
         import torch
         from sentence_transformers import CrossEncoder
@@ -72,19 +90,21 @@ def embed_documents(texts: list[str]) -> np.ndarray:
     """Embed passages. Returns L2-normalised float32 array (n, dim)."""
     if not texts:
         return np.zeros((0, settings.embedding_dimensions), dtype=np.float32)
-    vectors = get_embedder().encode(
-        texts, batch_size=32, normalize_embeddings=True, convert_to_numpy=True
-    )
+    with _lock:
+        vectors = get_embedder().encode(
+            texts, batch_size=32, normalize_embeddings=True, convert_to_numpy=True
+        )
     return vectors.astype(np.float32)
 
 
 def embed_query(text: str) -> np.ndarray:
     """Embed a search query (uses the model's query instruction prompt)."""
-    model = get_embedder()
-    prompt_name = "query" if "query" in (model.prompts or {}) else None
-    vector = model.encode(
-        [text], prompt_name=prompt_name, normalize_embeddings=True, convert_to_numpy=True
-    )[0]
+    with _lock:
+        model = get_embedder()
+        prompt_name = "query" if "query" in (model.prompts or {}) else None
+        vector = model.encode(
+            [text], prompt_name=prompt_name, normalize_embeddings=True, convert_to_numpy=True
+        )[0]
     return vector.astype(np.float32)
 
 
@@ -99,10 +119,64 @@ def rerank(query: str, passages: list[str], top_k: Optional[int] = None) -> list
         return []
     import torch
 
-    scores = get_reranker().predict(
-        [(query, p) for p in passages],
-        batch_size=16,
-        activation_fn=torch.nn.Sigmoid(),
-    )
+    with _lock:
+        scores = get_reranker().predict(
+            [(query, p) for p in passages],
+            batch_size=16,
+            activation_fn=torch.nn.Sigmoid(),
+        )
     ranked = sorted(enumerate(float(s) for s in scores), key=lambda x: x[1], reverse=True)
     return ranked[:top_k] if top_k else ranked
+
+
+# --- Freeing the GPU ---
+
+
+def release_models() -> bool:
+    """Unload both models and return their GPU memory. False if busy or nothing loaded."""
+    global _embedder, _reranker
+    with _lock:
+        if _holds or (_embedder is None and _reranker is None):
+            return False
+        _embedder = _reranker = None
+        gc.collect()
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    logger.info("Search models unloaded (idle)")
+    return True
+
+
+@contextlib.contextmanager
+def hold():
+    """
+    Mark GPU work in progress (a transcription run): the idle unloader waits.
+    Never empty the CUDA cache between Parakeet transcribe() calls; it aborts the process.
+    """
+    global _holds
+    with _lock:
+        _holds += 1
+    try:
+        yield
+    finally:
+        with _lock:
+            _holds -= 1
+
+
+def start_idle_unloader(
+    idle_minutes: float, check_seconds: float = 30.0, stop: Optional[threading.Event] = None
+) -> Optional[threading.Thread]:
+    """Background thread that unloads the models after idle_minutes without use (0 = never)."""
+    if idle_minutes <= 0:
+        return None
+    stop = stop or threading.Event()
+
+    def loop() -> None:
+        while not stop.wait(check_seconds):
+            if time.monotonic() - _last_used > idle_minutes * 60:
+                release_models()
+
+    thread = threading.Thread(target=loop, name="model-idle-unloader", daemon=True)
+    thread.start()
+    return thread

@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     rerank_top_k: int = 50  # Chunk candidates to rerank
     return_top_k: int = 5  # Final results to return
     search_min_score: float = 0.05  # Drop reranked results below this relevance (0..1)
+    model_idle_minutes: float = 5  # API server unloads the search models after this long unused (0 = keep)
     hf_token: str = Field(default="", validation_alias="HF_TOKEN")
 
     # --- Text Chunking (for embeddings) ---

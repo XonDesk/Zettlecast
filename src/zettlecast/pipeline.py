@@ -356,7 +356,9 @@ def run_podcast_queue(*args, **kwargs) -> QueueRunSummary:
     Process pending podcast episodes end to end, keeping the PC awake meanwhile.
     Arguments: see _run_podcast_queue.
     """
-    with keep_awake():
+    from . import embeddings
+
+    with keep_awake(), embeddings.hold():
         return _run_podcast_queue(*args, **kwargs)
 
 

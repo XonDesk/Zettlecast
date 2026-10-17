@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
-from . import llm
+from . import embeddings, llm
 from .config import ENV_FILE, settings
 from .db import db
 from .models import ProcessingResult
@@ -40,6 +40,8 @@ async def lifespan(_app: FastAPI):
     settings.ensure_directories()
     db.connect()
     logger.info(f"Storage path: {settings.storage_path}")
+    # free the GPU for transcription runs when nobody is searching
+    embeddings.start_idle_unloader(settings.model_idle_minutes)
     yield
     llm.unload()
 
