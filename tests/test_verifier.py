@@ -246,3 +246,47 @@ def test_unchanged_name_is_not_credited_to_the_lookup():
     corrections = v.resolve([Suspect(0, "through John", ["of John"], "high", "a person")])
     assert [(c.chosen, c.source) for c in corrections] == [("of John", "llm")]
     assert v.learn([]) == {}
+
+
+def test_known_name_respelling_gets_a_looser_audio_limit():
+    # "Ryne" is said "Ryan", but the recogniser prices the rare spelling ~16 higher
+    v = TranscriptVerifier([segment(0, "speaker_0", "one of our coaches, Ryan Anderson, who you know")],
+                           AUDIO, FakeScorer({"ryne": 16.0, "rhine": 16.0}))
+    corrections = v.resolve([], vocabulary="People: Ryne Anderson")
+    assert corrections == []  # not trusted yet: only the vocabulary, no glossary suspect
+    v = TranscriptVerifier([segment(0, "speaker_0", "one of our coaches, Ryan Anderson, who you know")],
+                           AUDIO, FakeScorer({"ryne": 16.0}), glossary={"Ryne Anderson": 3})
+    assert [c.chosen for c in v.resolve([], vocabulary="People: Ryne Anderson")] == ["Ryne Anderson,"]
+    # a different, unconfirmed word over the normal limit is still rejected
+    v = TranscriptVerifier([segment(0, "speaker_0", "one of our coaches, Ryan Anderson, who you know")],
+                           AUDIO, FakeScorer({"rhine": 16.0}))
+    assert v.resolve([Suspect(0, "Ryan Anderson", ["Rhine Anderson"], "high")]) == []
+
+
+def test_cleanup_never_respells_a_confirmed_name():
+    v = TranscriptVerifier([segment(0, "speaker_0", "thanks Ryne Anderson for coming")], AUDIO, FakeScorer({}),
+                           glossary={"Ryne Anderson": 3})
+    v.resolve([])
+    line = v.text()
+    out, rejected = v.check_cleanup(0, line, line.replace("Ryne", "Ryan"))
+    assert "Ryne Anderson" in out and rejected[0]["suggested"] == "Ryan"
+
+
+def test_every_occurrence_in_a_line_is_checked():
+    v = TranscriptVerifier([segment(0, "speaker_0", "with Benat and Ryan Anderson today. Ryan Anderson coaches")],
+                           AUDIO, FakeScorer({}), glossary={"Ryne Anderson": 3})
+    v.resolve([])
+    assert v.text().count("Ryne Anderson") == 2 and "Ryan" not in v.text()
+
+
+def test_known_name_respelling_beats_publisher_agreeing_with_the_sound():
+    ref = [RefWord(20 + i * 0.5, 20.4 + i * 0.5, "Speaker 1", w) for i, w in enumerate(["Ryan", "Anderson"])]
+    v = TranscriptVerifier([segment(20, "speaker_0", "Ryan Anderson is here today")], AUDIO,
+                           FakeScorer({"ryne": 16.0}), reference=ref, glossary={"Ryne Anderson": 3})
+    assert [c.chosen for c in v.resolve([])] == ["Ryne Anderson"]
+
+
+def test_candidate_is_also_tried_in_a_known_spelling():
+    v = TranscriptVerifier([segment(0, "speaker_0", "thanks Benette for that")], AUDIO, FakeScorer({}))
+    corrections = v.resolve([Suspect(0, "Benette", ["Bennett"], "high")], vocabulary="People: Benat Mencia")
+    assert [c.chosen for c in corrections] == ["Benat"]

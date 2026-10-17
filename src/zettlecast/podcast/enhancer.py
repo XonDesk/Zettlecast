@@ -496,8 +496,9 @@ class TranscriptEnhancer:
                  for s in found],
                 vocabulary=vocabulary,
             )
+            # without edge punctuation, so "Ryan Anderson," also fixes "Ryan Anderson's Role"
             name_fixes = {
-                c.original: c.chosen for c in corrections
+                c.original.strip(" ,.;:!?\"'"): c.chosen.strip(" ,.;:!?\"'") for c in corrections
                 if c.confidence != "low" and c.original != c.chosen and any(w[:1].isupper() for w in c.chosen.split())
             }
             if name_fixes:

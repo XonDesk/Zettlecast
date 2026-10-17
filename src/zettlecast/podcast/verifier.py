@@ -53,6 +53,16 @@ CONFIDENCE_SUPPORT = {"high": 2.0, "medium": 1.0, "low": 0.5}
 # so a real name found online must outweigh its top confidence
 LOOKUP_SUPPORT = 2.5
 MAX_LOOKUPS = 25  # per episode
+# Parakeet prices rare spellings as well as sounds: "Ryne" (said "Ryan") costs 12-25 more
+# than "Ryan". A confirmed multi-word name spelled almost like what was heard gets this
+# looser limit; different words still cost more ("Ingebrigtsen" for "Eden" ~25)
+KNOWN_NAME_ACCEPT = 30.0
+KNOWN_NAME_SPELLING = 0.85
+# The publisher's transcript can't tell "Ryan" from "Ryne" either, so a respelling of a
+# confirmed full name gets enough extra support to outweigh the publisher agreeing with the original
+RESPELLING_SUPPORT = 1.5
+# Candidate words this close to a known spelling are also tried in that spelling ("Bennett" -> "Benat")
+SNAP_CUTOFF = 0.65
 _PREFIX = re.compile(r"^(\[[\d.]+s - [\d.]+s\] [^:]+: )(.*)$")
 _EDGE_PUNCT = re.compile(r"^[^\w'\[]+|[^\w'\]?]+$")
 
@@ -93,6 +103,7 @@ class Suspect:
     candidates: List[str]
     confidence: str = "medium"
     about: str = ""  # who/what it is, for the online lookup ("Norwegian triathlete")
+    token: Optional[int] = None  # where in the line, when the text occurs more than once
 
 
 class Line:
@@ -247,6 +258,7 @@ class TranscriptVerifier:
         self.accept = accept_per_word
         self.lookup = lookup  # podcast.lookup.NameLookup or None (offline)
         self.lookups = 0
+        self.known: set = set()  # keys of trusted name spellings (set by resolve)
         self.rejected: List[dict] = []
         self.accepted_edits = 0
         self.corrections: List[Correction] = []
@@ -346,14 +358,16 @@ class TranscriptVerifier:
                         continue
                     match = difflib.get_close_matches(phrase.lower(), list(lowered), n=1, cutoff=0.75)
                     if match and len(match[0].split()) == n:
-                        out.append(Suspect(li, phrase, [lowered[match[0]]], "low"))
+                        out.append(Suspect(li, phrase, [lowered[match[0]]], "low", token=i))
         return out
 
-    def _find(self, line: Line, text: str) -> Optional[Tuple[int, int]]:
+    def _find(self, line: Line, text: str, token: Optional[int] = None) -> Optional[Tuple[int, int]]:
         target = [_key(t) for t in text.split() if _key(t)]
         keys = [_key(t) for t, _ in line.tokens()]
         if not target:
             return None
+        if token is not None:
+            return (token, token + len(target)) if keys[token:token + len(target)] == target else None
         for i in range(len(keys) - len(target) + 1):
             if keys[i:i + len(target)] == target:
                 return i, i + len(target)
@@ -382,6 +396,7 @@ class TranscriptVerifier:
         # Spellings of names we trust: capitalised words of the vocabulary + glossary terms
         known = {_key(w) for w in re.findall(r"[\w'’-]+", vocabulary) if w[:1].isupper()}
         known |= {k for term in self.trusted_terms() for k in _words(term)}
+        self.known = known
         # Known spellings with their case, for snapping "Ryan" -> "Ryne" when "Ryne Anderson" is known
         known_words = {
             _key(w): w for w in re.findall(r"[\w'’-]+", vocabulary + " " + " ".join(self.trusted_terms()))
@@ -393,7 +408,7 @@ class TranscriptVerifier:
             for w in text.split():
                 core = _EDGE_PUNCT.sub("", w)
                 if core[:1].isupper() and _key(core) not in known_words:
-                    match = difflib.get_close_matches(_key(core), list(known_words), n=1, cutoff=0.75)
+                    match = difflib.get_close_matches(_key(core), list(known_words), n=1, cutoff=SNAP_CUTOFF)
                     if match:
                         w = w.replace(core, known_words[match[0]])
                 out.append(w)
@@ -408,7 +423,7 @@ class TranscriptVerifier:
         for s in suspects + self.glossary_suspects():
             if not (0 <= s.line < len(self.lines)):
                 continue
-            found = self._find(self.lines[s.line], s.text)
+            found = self._find(self.lines[s.line], s.text, s.token)
             if not found or found[1] - found[0] > MAX_SPAN_TOKENS:
                 continue
             slot = spans.setdefault((s.line, *found), {})
@@ -462,10 +477,19 @@ class TranscriptVerifier:
 
             original_support = support(original, 1.0)  # what was recognised starts at 1
             # (support, tie-break on fit to the audio, ...)
+            def respelling(text: str) -> bool:
+                """A known multi-word name spelled almost like the original ("Ryan Anderson" -> "Ryne")."""
+                capitalised = caps(text)
+                return (
+                    len(capitalised) >= 2 and all(k in known for k in capitalised)
+                    and difflib.SequenceMatcher(None, _key(original), _key(text)).ratio() >= KNOWN_NAME_SPELLING
+                )
+
             options = [
-                (support(name, cands[name][1]), -pen, name, cands[name][0], pen, clean)
+                (support(name, cands[name][1]) + (RESPELLING_SUPPORT if respelling(name) else 0.0),
+                 -pen, name, cands[name][0], pen, clean)
                 for name, pen, clean in zip(names, penalties, cleaned)
-                if pen <= self.accept
+                if pen <= self.accept or (pen <= KNOWN_NAME_ACCEPT and respelling(name))
             ]
             if not options:
                 continue
@@ -516,6 +540,17 @@ class TranscriptVerifier:
             to_score, accepted = [], []
             for op, i1, i2, j1, j2 in ops:
                 same_letters = "".join(map(_key, ours[i1:i2])) == "".join(map(_key, new[j1:j2]))
+                new_keys = {_key(t) for t in new[j1:j2]}
+                drops_known_name = any(
+                    t[:1].isupper() and _key(t) in self.known and _key(t) not in new_keys for t in ours[i1:i2]
+                )
+                if drops_known_name and op != "delete":
+                    # never respell a confirmed name ("Ryne" -> "Ryan" fits the audio better)
+                    rejected.append({
+                        "time": round(line.token_times(line.tokens(), i1, i2)[0], 1),
+                        "original": " ".join(ours[i1:i2]), "suggested": " ".join(new[j1:j2]), "penalty": 0.0,
+                    })
+                    continue
                 if op == "delete" or same_letters:
                     accepted.append((i1, i2, new[j1:j2]))
                 else:
