@@ -26,6 +26,14 @@ class PodcastEpisode(BaseModel):
     duration_seconds: Optional[int] = Field(None, description="Duration if known")
 
 
+class WordTiming(BaseModel):
+    """One recognised word with its time span."""
+
+    text: str
+    start: float
+    end: float
+
+
 class TranscriptSegment(BaseModel):
     """A timestamped segment of transcribed speech with optional speaker label."""
 
@@ -33,6 +41,7 @@ class TranscriptSegment(BaseModel):
     end: float = Field(description="End time in seconds")
     text: str = Field(description="Transcribed text")
     speaker: Optional[str] = Field(None, description="Speaker label (e.g., 'Speaker 1')")
+    words: List[WordTiming] = Field(default_factory=list, description="Words of text, in order, with times")
 
 
 class TranscriptionResult(BaseModel):

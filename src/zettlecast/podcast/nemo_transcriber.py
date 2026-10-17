@@ -28,7 +28,7 @@ if importlib.util.find_spec("triton") is None:
 
 from ..config import settings
 from .aligner import Word, align_transcription_with_diarization
-from .models import PodcastEpisode, TranscriptSegment, TranscriptionResult
+from .models import PodcastEpisode, TranscriptSegment, TranscriptionResult, WordTiming
 
 logger = logging.getLogger(__name__)
 
@@ -196,7 +196,10 @@ class NeMoTranscriber:
             report("aligning", len(starts), len(starts))
             if rttm:
                 segments = [
-                    TranscriptSegment(start=s.start, end=s.end, text=s.text, speaker=s.speaker)
+                    TranscriptSegment(
+                        start=s.start, end=s.end, text=s.text, speaker=s.speaker,
+                        words=[WordTiming(text=w.text, start=w.start, end=w.end) for w in s.words],
+                    )
                     for s in align_transcription_with_diarization(words, rttm)
                 ]
             else:
@@ -205,6 +208,7 @@ class NeMoTranscriber:
                     end=words[-1].end if words else 0.0,
                     text=" ".join(w.text for w in words),
                     speaker=None,
+                    words=[WordTiming(text=w.text, start=w.start, end=w.end) for w in words],
                 )]
 
             processing_time = time.time() - start_time

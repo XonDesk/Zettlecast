@@ -163,21 +163,28 @@ def known_speakers(show: str, exclude_uuid: str = "") -> list[str]:
     return (confirmed + others)[:20]
 
 
-def published_speaker_names(episode, result) -> dict:
-    """
-    Speaker label -> name from the transcript the publisher put in the feed,
-    when it names its speakers. Empty if there is none or it can't be read.
-    """
-    from .podcast.reference import cache_path_for, load_reference, speaker_names_from_reference
+def episode_reference(episode) -> list:
+    """Words of the transcript the publisher put in the feed ([] if none or unreadable)."""
+    from .podcast.reference import cache_path_for, load_reference
 
     if not episode.transcript_url:
-        return {}
+        return []
     try:
-        ref = load_reference(
+        return load_reference(
             episode.transcript_url, cache_path_for(Path(episode.audio_path), episode.transcript_url)
         )
     except Exception as e:
         logger.warning(f"Could not load published transcript: {e}")
+        return []
+
+
+def published_speaker_names(ref: list, result) -> dict:
+    """
+    Speaker label -> name from the publisher's transcript, when it names its speakers.
+    """
+    from .podcast.reference import speaker_names_from_reference
+
+    if not ref:
         return {}
     turns = [(s.start, s.end, s.speaker, s.text) for s in result.segments if s.speaker]
     names = speaker_names_from_reference(turns, ref)
@@ -186,9 +193,28 @@ def published_speaker_names(episode, result) -> dict:
     return names
 
 
+_scorer = None
+
+
+def acoustic_scorer():
+    """Parakeet as an acoustic judge (~1.3 GB, kept loaded; fits next to the LLM)."""
+    global _scorer
+    if _scorer is None:
+        import nemo.collections.asr as nemo_asr
+
+        from .podcast.acoustic import AcousticScorer
+        from .podcast.nemo_transcriber import NeMoTranscriber
+
+        NeMoTranscriber._quiet_nemo()
+        model = nemo_asr.models.ASRModel.from_pretrained(settings.nemo_parakeet_model)
+        _scorer = AcousticScorer(model.cuda().eval().half())
+    return _scorer
+
+
 def _run_podcast_queue(
     limit: Optional[int] = None,
     enhance: bool = True,
+    verify: bool = True,
     sync: bool = True,
     on_episode_start: Optional[Callable[[str, str], None]] = None,
     on_episode_done: Optional[Callable[[EpisodeOutcome], None]] = None,
@@ -200,6 +226,7 @@ def _run_podcast_queue(
     Args:
         limit: Max episodes to process (None = all pending)
         enhance: Run LLM analysis + cleanup
+        verify: Check corrections against the audio (needs enhance)
         sync: First add any audio under storage/podcasts that isn't queued yet
         on_episode_start: Called with (episode_id, title) before each episode
         on_episode_done: Called with the outcome of each episode
@@ -242,15 +269,27 @@ def _run_podcast_queue(
             result = transcriber.transcribe(Path(episode.audio_path), episode=episode, progress_callback=progress)
 
             enhanced = None
+            verifier = None
             if enhancer:
                 check_cancel("enhancing")
+                ref = episode_reference(episode)
+                speakers = known_speakers(episode.podcast_name or "", exclude_uuid=episode.id)
+                if verify:
+                    from .podcast.verifier import TranscriptVerifier, glossary_path, load_audio, load_glossary
+
+                    glossary_file = glossary_path(settings.storage_path, episode.podcast_name or "")
+                    verifier = TranscriptVerifier(
+                        result.segments, load_audio(Path(episode.audio_path)), acoustic_scorer(),
+                        reference=ref, glossary=load_glossary(glossary_file),
+                    )
                 enhanced = enhancer.enhance(
                     result.full_text,
                     podcast=episode.podcast_name or "",
                     episode=title,
                     show_notes=episode.description or "",
-                    known_speakers=known_speakers(episode.podcast_name or "", exclude_uuid=episode.id),
-                    published_speakers=published_speaker_names(episode, result),
+                    known_speakers=speakers,
+                    published_speakers=published_speaker_names(ref, result),
+                    verifier=verifier,
                 )
                 result.keywords = enhanced["keywords"]
                 result.sections = enhanced["sections"]
@@ -264,6 +303,12 @@ def _run_podcast_queue(
                 raise RuntimeError(f"Could not read back transcript note: {parsed.error_message}")
             check_cancel("indexing")
             ingest_note(parsed.note)
+            if verifier is not None:
+                from .podcast.verifier import save_glossary
+
+                save_glossary(glossary_file, verifier.learn(
+                    list(enhanced["speakers"].values()), verified=enhanced.get("verified_speakers", [])
+                ))
 
             queue.mark_completed(episode.id, result, note_path)
             outcome = EpisodeOutcome(

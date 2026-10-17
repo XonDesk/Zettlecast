@@ -11,7 +11,7 @@ LLM (Ollama) post-processing of a diarized transcript:
 import difflib
 import logging
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from ..llm import LLMError, chat
 
@@ -89,6 +89,44 @@ Return ONLY the cleaned transcript lines. No commentary.
 
 {vocabulary}Transcript chunk:
 {chunk}"""
+
+SUSPECTS_PROMPT = """You are checking an automatic podcast transcript for misrecognised words.
+Speech recognition often mishears names and uncommon terms as similar-sounding words.
+
+{context}{hints}
+List the words or phrases in the numbered lines below that were probably misheard, especially
+names of people, places, organisations, products, races and technical terms, and phrases that
+make no sense in context. For each give:
+- "line": the line number
+- "text": the words exactly as they appear in that line (1-6 words)
+- "candidates": 1-3 corrections that SOUND LIKE the original. Use real names you know when they
+  fit the context (e.g. a known athlete, scientist or company mentioned with matching details).
+- "confidence": "high" if you know the correct term, "medium" if likely, "low" if a guess
+
+Only list likely errors; most words are right. Return {{"suspects": []}} if there are none.
+
+Lines:
+{chunk}"""
+
+SUSPECTS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "suspects": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "line": {"type": "integer"},
+                    "text": {"type": "string"},
+                    "candidates": {"type": "array", "items": {"type": "string"}},
+                    "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                },
+                "required": ["line", "text", "candidates", "confidence"],
+            },
+        }
+    },
+    "required": ["suspects"],
+}
 
 # Regex for parsing uncertainty markers from LLM output
 _UNCERTAIN_MARKER_RE = re.compile(r"\[\[(.+?)\?\?\]\]")
@@ -224,6 +262,7 @@ class TranscriptEnhancer:
         chunk_size: int = 8000,
         speaker_names: Optional[Dict[str, str]] = None,
         vocabulary: str = "",
+        checker: Optional[Callable[[int, str, str], Tuple[str, List[Dict]]]] = None,
     ) -> Tuple[str, List[Dict]]:
         """
         Clean up the transcript chunk by chunk.
@@ -232,6 +271,8 @@ class TranscriptEnhancer:
 
         Args:
             vocabulary: Correct spellings to follow (podcast name, people, show notes)
+            checker: (line offset, original chunk, cleaned chunk) -> (accepted chunk, rejected
+                edits); defaults to guard_names. The verifier passes an audio-based check.
 
         Returns:
             (cleaned transcript, uncertain corrections)
@@ -255,19 +296,27 @@ class TranscriptEnhancer:
         cleaned_chunks: List[str] = []
         all_uncertain: List[Dict] = []
         running_offset = 0
+        line_offset = 0
+        review_reverted = checker is None  # without audio, reverted names go to review
+        if checker is None:
+            def checker(_offset: int, original: str, cleaned: str) -> Tuple[str, List[Dict]]:
+                return guard_names(original, cleaned, allowed)
 
         for i, chunk in enumerate(chunks):
             try:
                 result = chat(CLEANUP_PROMPT.format(chunk=chunk, names_hint=names_hint, vocabulary=vocab_block)).strip()
                 if self._is_valid_cleanup_response(chunk, result):
-                    result, reverted = guard_names(chunk, result, allowed)
+                    # take the [[x??]] markers off before checking, keep the ones that survive
+                    unmarked, marked = self.extract_uncertain_corrections(result)
+                    result, reverted = checker(line_offset, chunk, unmarked)
                     if reverted:
-                        logger.info(f"Kept {len(reverted)} original name(s) the cleanup tried to change")
-                    result, uncertain = self.extract_uncertain_corrections(result)
-                    for item in uncertain:
-                        item["position"] += running_offset
-                    all_uncertain.extend(uncertain)
-                    all_uncertain.extend({**r, "position": running_offset} for r in reverted)
+                        logger.info(f"Kept the original for {len(reverted)} cleanup edit(s)")
+                    for item in marked:
+                        pos = result.find(item["text"])
+                        if pos >= 0:
+                            all_uncertain.append({"text": item["text"], "position": running_offset + pos})
+                    if review_reverted:
+                        all_uncertain.extend({**r, "position": running_offset} for r in reverted)
                     cleaned_chunks.append(result)
                 else:
                     logger.warning(f"Cleanup chunk {i + 1} changed the line structure; keeping original")
@@ -276,8 +325,53 @@ class TranscriptEnhancer:
                 logger.warning(f"Cleanup failed for chunk {i + 1}: {e}")
                 cleaned_chunks.append(chunk)
             running_offset += len(cleaned_chunks[-1]) + 1
+            line_offset += chunk.count("\n") + 1
 
         return "\n".join(cleaned_chunks), all_uncertain
+
+    def find_suspects(
+        self,
+        transcript: str,
+        context: str = "",
+        hints: Optional[List[Tuple[int, str, str]]] = None,
+        chunk_size: int = 8000,
+    ) -> List[Dict]:
+        """
+        LLM pass listing probably-misheard words with sound-alike candidates.
+
+        Args:
+            transcript: Lines to check; suspects refer to them by 0-based line number
+            context: Podcast, people, show notes and known terms
+            hints: (line, ours, theirs) where another transcript heard something else
+        """
+        by_line: Dict[int, List[Tuple[str, str]]] = {}
+        for li, ours, theirs in hints or []:
+            by_line.setdefault(li, []).append((ours, theirs))
+
+        suspects: List[Dict] = []
+        start = 0
+        for chunk in self._split_lines(transcript, chunk_size):
+            chunk_lines = chunk.split("\n")
+            end = start + len(chunk_lines)
+            numbered = "\n".join(f"{start + k}| {line}" for k, line in enumerate(chunk_lines))
+            chunk_hints = [
+                f"{li}| ours: {o} | theirs: {t}" for li in range(start, end) for o, t in by_line.get(li, [])
+            ][:60]
+            hint_block = (
+                "A second, independent transcript heard these passages differently "
+                "(line| ours | theirs); either may be wrong:\n" + "\n".join(chunk_hints) + "\n"
+                if chunk_hints else ""
+            )
+            try:
+                result = chat(
+                    SUSPECTS_PROMPT.format(context=context, hints=hint_block, chunk=numbered),
+                    schema=SUSPECTS_SCHEMA,
+                )
+                suspects += [s for s in result.get("suspects", []) if start <= int(s.get("line", -1)) < end]
+            except (LLMError, ValueError, TypeError) as e:
+                logger.warning(f"Suspect search failed for lines {start}-{end}: {e}")
+            start = end
+        return suspects
 
     def analyze(
         self,
@@ -335,6 +429,7 @@ class TranscriptEnhancer:
         show_notes: str = "",
         known_speakers: Optional[List[str]] = None,
         published_speakers: Optional[Dict[str, str]] = None,
+        verifier=None,
     ) -> dict:
         """
         Run the full enhancement pipeline.
@@ -342,9 +437,13 @@ class TranscriptEnhancer:
         published_speakers (label -> name, from the publisher's transcript) take
         precedence over the names the LLM infers.
 
+        With a verifier (podcast.verifier.TranscriptVerifier, which holds the timed
+        words and the audio), likely misheard words are resolved against the audio
+        and every cleanup edit must fit the audio too.
+
         Returns:
-            Dict with cleaned_transcript, keywords, sections, summary,
-            key_points, speakers, uncertain_corrections
+            Dict with cleaned_transcript, keywords, sections, summary, key_points,
+            speakers, verified_speakers, uncertain_corrections, corrections, verification
         """
         analysis = self.analyze(
             transcript,
@@ -369,17 +468,41 @@ class TranscriptEnhancer:
             logger.info(f"Speaker names corrected: {renames}")
             analysis = self._rename(analysis, renames)
 
+        people = list(dict.fromkeys([*speakers.values(), *(known_speakers or [])]))
+        glossary_terms = list(getattr(verifier, "glossary", {}) or {})[:80]
+        vocabulary = "\n".join(filter(None, [
+            f"Podcast: {podcast}" if podcast else "",
+            f"Episode: {episode}" if episode else "",
+            f"People: {', '.join(people)}" if people else "",
+            f"Names and terms from earlier episodes: {', '.join(glossary_terms)}" if glossary_terms else "",
+            f"Show notes: {show_notes.strip()}" if show_notes.strip() else "",
+        ]))
+
+        corrections = []
+        if verifier is not None:
+            from .verifier import Suspect
+
+            found = self.find_suspects(
+                verifier.text(), context=vocabulary[:MAX_VOCABULARY_CHARS] + "\n", hints=verifier.publisher_hints()
+            )
+            corrections = verifier.resolve(
+                [Suspect(int(s["line"]), s["text"], list(s.get("candidates") or []), s.get("confidence", "medium"))
+                 for s in found],
+                vocabulary=vocabulary,
+            )
+            name_fixes = {
+                c.original: c.chosen for c in corrections
+                if c.confidence != "low" and c.original != c.chosen and any(w[:1].isupper() for w in c.chosen.split())
+            }
+            if name_fixes:
+                analysis = self._rename(analysis, name_fixes)
+            transcript = verifier.text()
+
         cleaned, uncertain = transcript, []
         if cleanup:
-            people = list(dict.fromkeys([*speakers.values(), *(known_speakers or [])]))
-            vocabulary = "\n".join(filter(None, [
-                f"Podcast: {podcast}" if podcast else "",
-                f"Episode: {episode}" if episode else "",
-                f"People: {', '.join(people)}" if people else "",
-                f"Show notes: {show_notes.strip()}" if show_notes.strip() else "",
-            ]))
             cleaned, uncertain = self.cleanup_transcript(
-                transcript, speaker_names=speakers, vocabulary=vocabulary
+                transcript, speaker_names=speakers, vocabulary=vocabulary,
+                checker=verifier.check_cleanup if verifier is not None else None,
             )
 
         return {
@@ -391,6 +514,13 @@ class TranscriptEnhancer:
             "speakers": speakers,
             "verified_speakers": sorted(set(published_speakers.values())),
             "uncertain_corrections": uncertain,
+            "corrections": [c.as_dict() for c in corrections],
+            "verification": {
+                "corrections": sum(c.confidence != "low" for c in corrections),
+                "review": sum(c.confidence == "low" for c in corrections),
+                "cleanup_edits_kept": verifier.accepted_edits,
+                "cleanup_edits_rejected": len(verifier.rejected),
+            } if verifier is not None else {},
         }
 
     @staticmethod

@@ -222,8 +222,9 @@ def podcast_import(url: str, limit: int):
 @podcast.command("run")
 @click.option("--limit", "-l", type=int, help="Max episodes to process")
 @click.option("--no-enhance", is_flag=True, help="Skip LLM summary/cleanup")
+@click.option("--no-verify", is_flag=True, help="Don't check corrections against the audio")
 @click.option("--no-sync", is_flag=True, help="Don't scan storage/podcasts for new audio first")
-def podcast_run(limit: int, no_enhance: bool, no_sync: bool):
+def podcast_run(limit: int, no_enhance: bool, no_verify: bool, no_sync: bool):
     """Transcribe, diarize, enhance and index pending episodes."""
     from .pipeline import run_podcast_queue
     from .podcast.queue import TranscriptionQueue
@@ -267,6 +268,7 @@ def podcast_run(limit: int, no_enhance: bool, no_sync: bool):
     summary = run_podcast_queue(
         limit=limit,
         enhance=not no_enhance,
+        verify=not no_verify,
         sync=False,
         on_episode_start=start,
         on_episode_done=done,

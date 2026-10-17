@@ -11,6 +11,7 @@ Nothing leaves your machine.
 Podcast audio ─► Parakeet-TDT (speech→text, word timestamps)
               ─► Nemotron-3-Diarization (who spoke when, up to 8 speakers)
               ─► Qwen3.6 via Ollama (summary, key points, chapters, speaker names, cleanup)
+              ─► every name fix / cleanup edit checked against the audio (Parakeet as judge)
               ─► Markdown note in _BRAIN_STORAGE/transcripts/
               ─► Chunked + embedded (Qwen3-Embedding) into LanceDB
               ─► Linked to related notes in the graph

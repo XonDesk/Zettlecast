@@ -30,6 +30,9 @@ def format_transcript_for_zettlecast(
     key_points: List[str] = enhanced.get("key_points", result.key_points)
     speakers: dict = enhanced.get("speakers", {})
     uncertain: List[dict] = enhanced.get("uncertain_corrections", [])
+    corrections: List[dict] = enhanced.get("corrections", [])
+    applied = [c for c in corrections if c.get("confidence") != "low"]
+    unsure = [c for c in corrections if c.get("confidence") == "low"]
 
     frontmatter = {
         "uuid": episode.id,
@@ -47,6 +50,8 @@ def format_transcript_for_zettlecast(
     if enhanced.get("verified_speakers"):
         # Named by the publisher's own transcript
         frontmatter["verified_speakers"] = enhanced["verified_speakers"]
+    if enhanced.get("verification"):
+        frontmatter["verification"] = enhanced["verification"]
     if keywords:
         frontmatter["tags"] = keywords[:10]
     if summary:
@@ -80,14 +85,29 @@ def format_transcript_for_zettlecast(
             parts.append(f"- **{sec.get('name', 'Section')}** ([{start:.0f}s]): {sec.get('description', '')}")
     if episode.description:
         parts += ["", "## Show Notes", "", episode.description]
-    if uncertain:
+    if applied:
+        parts += [
+            "",
+            "## Automatic Corrections",
+            "",
+            "Checked against the audio (penalty: extra acoustic cost per changed word; lower fits better):",
+            "",
+        ] + [
+            f"- [{c['time']:.0f}s] {c['original']} → **{c['chosen']}** "
+            f"({c['source']}, {c['confidence']}, penalty {c['penalty']})"
+            for c in applied
+        ]
+    if uncertain or unsure:
         parts += [
             "",
             "## Needs Review",
             "",
-            "The following corrections were made with low confidence and should be verified:",
+            "Low-confidence spots; the transcript keeps what was heard:",
             "",
-        ] + [f'- "{item.get("text", "")}"' for item in uncertain]
+        ] + [f'- "{item.get("text", "")}"' for item in uncertain] + [
+            f"- [{c['time']:.0f}s] \"{c['original']}\", possibly: {', '.join(c['alternatives'][:3])}"
+            for c in unsure
+        ]
     parts += ["", "## Transcript", "", transcript, ""]
     return "\n".join(parts)
 

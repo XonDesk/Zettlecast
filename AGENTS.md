@@ -45,6 +45,8 @@ src/zettlecast/
     queue.py             Persistent transcription queue
     rss.py               Feed parsing (show notes, podcast:transcript links) + episode download
     reference.py         Publisher's transcript: speaker names by time overlap, verification report
+    acoustic.py          Parakeet as acoustic judge: NLL of a text for an audio clip (vectorised TDT forward)
+    verifier.py          Audio-checked corrections: suspects/publisher/glossary proposals, cleanup edits, glossary learning
   image/
     vision_backend.py    One structured vision call (description, OCR text, concepts)
     image_parser.py      Image -> note
@@ -82,6 +84,19 @@ zc.ps1               CLI shortcut
   (full attention fails with "CUDA driver error: device not ready").
 - The LLM (~22 GB) and NeMo (~14 GB) can't share the GPU; `pipeline.run_podcast_queue`
   unloads Ollama before each transcription and NeMo frees its models before enhancement.
+  A second, small Parakeet (fp16, ~1.3 GB) stays loaded as the acoustic judge next to the LLM.
+- NeMo's TDT loss kernel needs NVVM (CUDA toolkit, not installed), so `acoustic.py`
+  computes the TDT likelihood itself; it matches `TDTLossPytorch` exactly and is ~600x faster.
+- Queue runs hold a Windows power request (`pipeline.keep_awake`) so Modern Standby doesn't pause them.
+
+### Transcript verification (no human needed)
+
+Per episode: `## Automatic Corrections` lists applied fixes (time, source, confidence,
+acoustic penalty); `## Needs Review` lists name-like spots where a plausible alternative
+had about as much support; frontmatter `verification` has the counts. The show glossary
+(`_BRAIN_STORAGE/glossaries/<show>.json`, term -> evidence) grows per episode; terms count
+as known at 2+ (confirmed speakers and publisher-agreed corrections add 2, LLM-only 1).
+`podcast verify` measures agreement with the publisher's transcript.
 
 ---
 
@@ -107,8 +122,11 @@ zc.ps1               CLI shortcut
 
 `podcast run` pipeline per episode: unload LLM → decode to 16 kHz mono →
 Parakeet (60-min pieces) → Nemotron diarization (whole episode) → align →
-speaker names from the publisher's transcript (if it names speakers) → LLM analysis + cleanup
-(given show notes, names from earlier episodes of the show and the podcast name as spellings) → `transcripts/<title>_<id8>.md` → chunk + embed → graph edges.
+speaker names from the publisher's transcript (if it names speakers) → LLM analysis →
+suspects pass (LLM lists likely misheard names/terms with sound-alike candidates; publisher
+differences and the show glossary add candidates) → each candidate scored against the audio
+(rejected above 10 nats per changed word; best-supported plausible candidate wins) →
+LLM cleanup, every content edit also checked against the audio → `transcripts/<title>_<id8>.md` → chunk + embed → graph edges.
 
 ---
 
