@@ -194,6 +194,7 @@ def published_speaker_names(ref: list, result) -> dict:
 
 
 _scorer = None
+_lookup = None
 
 
 def acoustic_scorer():
@@ -209,6 +210,19 @@ def acoustic_scorer():
         model = nemo_asr.models.ASRModel.from_pretrained(settings.nemo_parakeet_model)
         _scorer = AcousticScorer(model.cuda().eval().half())
     return _scorer
+
+
+def name_lookup():
+    """Online name lookup for the verifier (None when NAME_LOOKUP is off); queries are cached on disk."""
+    global _lookup
+    if not settings.name_lookup:
+        return None
+    if _lookup is None:
+        from .podcast.lookup import NameLookup
+
+        _lookup = NameLookup(settings.storage_path / "lookups" / "wikipedia.json")
+    _lookup.enabled = True  # retry after an earlier network error
+    return _lookup
 
 
 def _run_podcast_queue(
@@ -280,7 +294,7 @@ def _run_podcast_queue(
                     glossary_file = glossary_path(settings.storage_path, episode.podcast_name or "")
                     verifier = TranscriptVerifier(
                         result.segments, load_audio(Path(episode.audio_path)), acoustic_scorer(),
-                        reference=ref, glossary=load_glossary(glossary_file),
+                        reference=ref, glossary=load_glossary(glossary_file), lookup=name_lookup(),
                     )
                 enhanced = enhancer.enhance(
                     result.full_text,
@@ -309,6 +323,8 @@ def _run_podcast_queue(
                 save_glossary(glossary_file, verifier.learn(
                     list(enhanced["speakers"].values()), verified=enhanced.get("verified_speakers", [])
                 ))
+                if verifier.lookup is not None:
+                    verifier.lookup.save()
 
             queue.mark_completed(episode.id, result, note_path)
             outcome = EpisodeOutcome(

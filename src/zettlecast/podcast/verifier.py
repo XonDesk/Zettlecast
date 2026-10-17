@@ -9,14 +9,19 @@ Proposers:
 - the LLM "suspects" pass: likely misheard names/terms with sound-alike candidates
 - the publisher's transcript (podcast:transcript), where it heard something else
 - the show glossary: names and terms confirmed in earlier episodes
+- an online lookup (podcast/lookup.py) for names nothing else confirms: real
+  names found on Wikipedia through what the passage says about them confirm a
+  spelling, and a close result-page match is proposed
 - the LLM cleanup pass: every content edit it makes is checked the same way
 
 Rules (penalty = extra negative log-likelihood per changed word):
 - a candidate over ACCEPT_PER_WORD doesn't fit the audio and is never applied
 - among plausible candidates the best supported one wins if it has more support
   than what was recognised: LLM confidence (high 2, medium 1, low 0.5),
-  publisher agreement (+1), glossary/known spelling (+1.5); the recognised text
-  starts at 1 (+1 if the publisher heard it too)
+  publisher agreement (+1), glossary/known spelling (+1.5), a real name found
+  by the lookup (+2.5, enough to beat a confident LLM guess; the heard name gets
+  it too when it is real); the recognised
+  text starts at 1 (+1 if the publisher heard it too)
 - cleanup edits need only to fit the audio (deletions of fillers always pass)
 """
 
@@ -44,6 +49,10 @@ MAX_SPAN_TOKENS = 6
 # speaker or publisher-agreed correction adds 2, an LLM-only correction adds 1
 TRUSTED_COUNT = 2
 CONFIDENCE_SUPPORT = {"high": 2.0, "medium": 1.0, "low": 0.5}
+# The LLM is often confidently wrong about rare names ("Christian Blomfeldt", high),
+# so a real name found online must outweigh its top confidence
+LOOKUP_SUPPORT = 2.5
+MAX_LOOKUPS = 25  # per episode
 _PREFIX = re.compile(r"^(\[[\d.]+s - [\d.]+s\] [^:]+: )(.*)$")
 _EDGE_PUNCT = re.compile(r"^[^\w'\[]+|[^\w'\]?]+$")
 
@@ -67,6 +76,7 @@ class Correction:
     confidence: str
     alternatives: List[str] = field(default_factory=list)
     publisher: bool = False  # the publisher's transcript has the chosen text
+    looked_up: bool = False  # the chosen name was found online
 
     def as_dict(self) -> dict:
         return {
@@ -82,6 +92,7 @@ class Suspect:
     text: str
     candidates: List[str]
     confidence: str = "medium"
+    about: str = ""  # who/what it is, for the online lookup ("Norwegian triathlete")
 
 
 class Line:
@@ -225,6 +236,7 @@ class TranscriptVerifier:
         reference: Optional[list] = None,
         glossary: Optional[Dict[str, int]] = None,
         accept_per_word: float = ACCEPT_PER_WORD,
+        lookup=None,
     ):
         self.lines = build_lines(segments)
         self.audio = audio
@@ -233,6 +245,8 @@ class TranscriptVerifier:
         self._ref_starts = [w.start for w in self.reference]
         self.glossary = dict(glossary or {})
         self.accept = accept_per_word
+        self.lookup = lookup  # podcast.lookup.NameLookup or None (offline)
+        self.lookups = 0
         self.rejected: List[dict] = []
         self.accepted_edits = 0
         self.corrections: List[Correction] = []
@@ -345,6 +359,24 @@ class TranscriptVerifier:
                 return i, i + len(target)
         return None
 
+    def _look_up(self, suspect: Suspect, known: set) -> Tuple[List[str], List[str]]:
+        """
+        (full replacements proposed online, real names found) for a suspect's name when
+        nothing local confirms it: not a known spelling and no candidate is known either.
+        """
+        if self.lookup is None or self.lookups >= MAX_LOOKUPS or not suspect.about.strip():
+            return [], []
+        heard = _name_part(suspect.text)
+        if not heard or heard not in suspect.text:
+            return [], []
+        for text in [heard, *suspect.candidates]:
+            words = [_key(w) for w in text.split() if w[:1].isupper() and _key(w)]
+            if words and all(k in known for k in words):
+                return [], []
+        self.lookups += 1
+        proposals, real = self.lookup.find(heard, suspect.about)
+        return [suspect.text.replace(heard, name, 1) for name in proposals], [*real, *proposals]
+
     def resolve(self, suspects: List[Suspect], vocabulary: str = "") -> List[Correction]:
         """Score every suspect's candidates against the audio and apply the winners."""
         # Spellings of names we trust: capitalised words of the vocabulary + glossary terms
@@ -367,8 +399,12 @@ class TranscriptVerifier:
                 out.append(w)
             return " ".join(out)
 
+        def caps(text: str) -> Tuple[str, ...]:
+            return tuple(_key(w) for w in text.split() if w[:1].isupper() and _key(w))
+
         # group by (line, span); merge candidates from several proposers
         spans: Dict[Tuple[int, int, int], Dict[str, Tuple[str, float]]] = {}
+        found_online: Dict[Tuple[int, int, int], set] = {}  # span -> names (caps keys) the lookup found
         for s in suspects + self.glossary_suspects():
             if not (0 <= s.line < len(self.lines)):
                 continue
@@ -385,6 +421,11 @@ class TranscriptVerifier:
                 for variant in dict.fromkeys([cand, snapped(cand)]):
                     prev = slot.get(variant)
                     slot[variant] = (source, max(support, prev[1] if prev else 0.0))
+            proposals, real = self._look_up(s, known)
+            if real:
+                found_online.setdefault((s.line, *found), set()).update(caps(name) for name in real)
+            for full in proposals:
+                slot.setdefault(full, ("wikipedia", 0.0))
 
         # publisher's version of each span joins the candidates
         corrections: List[Correction] = []
@@ -406,14 +447,17 @@ class TranscriptVerifier:
             names = list(cands)
             cleaned = [_clean_candidate(c.split(), original_tokens) for c in names]
             penalties = self.penalties(line, t1, t2, cleaned)
+            online = found_online.get((li, t1, t2), set())
 
             def support(text: str, base: float) -> float:
                 s = base
                 if theirs_key and [_key(w) for w in text.split() if _key(w)] == theirs_key:
                     s += 1.0
-                capitalised = [_key(w) for w in text.split() if w[:1].isupper() and _key(w)]
+                capitalised = caps(text)
                 if capitalised and all(k in known for k in capitalised):
                     s += 1.5
+                if capitalised and capitalised in online:
+                    s += LOOKUP_SUPPORT
                 return s
 
             original_support = support(original, 1.0)  # what was recognised starts at 1
@@ -431,16 +475,21 @@ class TranscriptVerifier:
                 confidence = "high" if score - original_support >= 1.0 else "medium"
                 line.replace(t1, t2, clean)
                 agreed = bool(theirs_key) and [_key(w) for w in clean if _key(w)] == theirs_key
-                corrections.append(
-                    Correction(start, original, " ".join(clean), source, pen, confidence, alternatives, agreed)
-                )
+                # online evidence counts only when it is for a different name than was heard
+                looked_up = bool(caps(name)) and caps(name) in online and caps(name) != caps(original)
+                if looked_up and source != "wikipedia":
+                    source += "+wikipedia"
+                corrections.append(Correction(
+                    start, original, " ".join(clean), source, pen, confidence, alternatives, agreed, looked_up
+                ))
             elif score >= original_support - 0.25 and (_looks_like_name(original) or _looks_like_name(name)):
                 corrections.append(Correction(start, original, original, "kept", 0.0, "low", [name] + alternatives))
         corrections.sort(key=lambda c: c.time)
         self.corrections = corrections
         applied = [c for c in corrections if c.confidence != "low"]
         logger.info(f"Verification: {len(applied)} corrections applied, "
-                    f"{len(corrections) - len(applied)} left for review, {len(spans)} spans checked")
+                    f"{len(corrections) - len(applied)} left for review, {len(spans)} spans checked, "
+                    f"{self.lookups} names looked up")
         return corrections
 
     # --- Cleanup edits ---
@@ -498,7 +547,8 @@ class TranscriptVerifier:
     def learn(self, speaker_names: Sequence[str] = (), verified: Sequence[str] = ()) -> Dict[str, int]:
         """
         Add evidence for names to the glossary (returned; caller saves it). Publisher-confirmed
-        speakers and corrections the publisher agrees with count 2 (trusted at once); other
+        speakers and corrections the publisher agrees with or that the LLM proposed and the
+        lookup found count 2 (trusted at once); other
         speaker names and high-confidence corrections count 1, so they become trusted only
         when another episode confirms them.
         """
@@ -512,8 +562,9 @@ class TranscriptVerifier:
             self.glossary[term] = self.glossary.get(term, 0) + weight
 
         for c in self.corrections:
-            if c.confidence == "high":
-                add(_name_part(c.chosen), 2 if c.publisher else 1)
+            if c.confidence == "high" and _name_part(c.chosen) != _name_part(c.original):
+                # found online AND proposed by the LLM: two independent sources
+                add(_name_part(c.chosen), 2 if c.publisher or (c.looked_up and c.source != "wikipedia") else 1)
         for name in set(speaker_names):
             if name and " " in name.strip():
                 add(name.strip(), 2 if name in verified else 1)

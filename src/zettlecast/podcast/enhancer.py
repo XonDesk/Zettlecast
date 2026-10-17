@@ -102,6 +102,9 @@ make no sense in context. For each give:
 - "candidates": 1-3 corrections that SOUND LIKE the original. Use real names you know when they
   fit the context (e.g. a known athlete, scientist or company mentioned with matching details).
 - "confidence": "high" if you know the correct term, "medium" if likely, "low" if a guess
+- "about": for a name, 2-5 words saying who or what it is, taken from the conversation, to search
+  an encyclopedia with (e.g. "Norwegian triathlete", "ultramarathon in California",
+  "exercise physiologist"); "" for other words
 
 Only list likely errors; most words are right. Return {{"suspects": []}} if there are none.
 
@@ -120,8 +123,9 @@ SUSPECTS_SCHEMA = {
                     "text": {"type": "string"},
                     "candidates": {"type": "array", "items": {"type": "string"}},
                     "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                    "about": {"type": "string"},
                 },
-                "required": ["line", "text", "candidates", "confidence"],
+                "required": ["line", "text", "candidates", "confidence", "about"],
             },
         }
     },
@@ -469,7 +473,8 @@ class TranscriptEnhancer:
             analysis = self._rename(analysis, renames)
 
         people = list(dict.fromkeys([*speakers.values(), *(known_speakers or [])]))
-        glossary_terms = list(getattr(verifier, "glossary", {}) or {})[:80]
+        # only terms with independent evidence: the vocabulary also counts as known spellings
+        glossary_terms = verifier.trusted_terms()[:80] if verifier is not None else []
         vocabulary = "\n".join(filter(None, [
             f"Podcast: {podcast}" if podcast else "",
             f"Episode: {episode}" if episode else "",
@@ -486,7 +491,8 @@ class TranscriptEnhancer:
                 verifier.text(), context=vocabulary[:MAX_VOCABULARY_CHARS] + "\n", hints=verifier.publisher_hints()
             )
             corrections = verifier.resolve(
-                [Suspect(int(s["line"]), s["text"], list(s.get("candidates") or []), s.get("confidence", "medium"))
+                [Suspect(int(s["line"]), s["text"], list(s.get("candidates") or []),
+                         s.get("confidence", "medium"), s.get("about") or "")
                  for s in found],
                 vocabulary=vocabulary,
             )
@@ -520,6 +526,7 @@ class TranscriptEnhancer:
                 "review": sum(c.confidence == "low" for c in corrections),
                 "cleanup_edits_kept": verifier.accepted_edits,
                 "cleanup_edits_rejected": len(verifier.rejected),
+                "names_looked_up": verifier.lookups,
             } if verifier is not None else {},
         }
 

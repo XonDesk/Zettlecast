@@ -46,7 +46,8 @@ src/zettlecast/
     rss.py               Feed parsing (show notes, podcast:transcript links) + episode download
     reference.py         Publisher's transcript: speaker names by time overlap, verification report
     acoustic.py          Parakeet as acoustic judge: NLL of a text for an audio clip (vectorised TDT forward)
-    verifier.py          Audio-checked corrections: suspects/publisher/glossary proposals, cleanup edits, glossary learning
+    verifier.py          Audio-checked corrections: suspects/publisher/glossary/lookup proposals, cleanup edits, glossary learning
+    lookup.py            Online name lookup (Wikipedia): real names found via what the passage says about them
   image/
     vision_backend.py    One structured vision call (description, OCR text, concepts)
     image_parser.py      Image -> note
@@ -95,7 +96,12 @@ Per episode: `## Automatic Corrections` lists applied fixes (time, source, confi
 acoustic penalty); `## Needs Review` lists name-like spots where a plausible alternative
 had about as much support; frontmatter `verification` has the counts. The show glossary
 (`_BRAIN_STORAGE/glossaries/<show>.json`, term -> evidence) grows per episode; terms count
-as known at 2+ (confirmed speakers and publisher-agreed corrections add 2, LLM-only 1).
+as known at 2+ (confirmed speakers, publisher-agreed corrections and LLM names confirmed online
+add 2; LLM-only or lookup-only 1). Names nothing local confirms are looked up on Wikipedia
+(`NAME_LOOKUP`, the only online step; cached in `_BRAIN_STORAGE/lookups/wikipedia.json`): the
+suspects pass says who the person is ("Norwegian triathlete"); result pages and the pages they
+link to confirm exact spellings (+2.5, beats a confident LLM guess), and only a result page with
+the same word count and a close spelling is proposed as a new name. Single words never are.
 `podcast verify` measures agreement with the publisher's transcript.
 
 ---
@@ -124,7 +130,7 @@ as known at 2+ (confirmed speakers and publisher-agreed corrections add 2, LLM-o
 Parakeet (60-min pieces) → Nemotron diarization (whole episode) → align →
 speaker names from the publisher's transcript (if it names speakers) → LLM analysis →
 suspects pass (LLM lists likely misheard names/terms with sound-alike candidates; publisher
-differences and the show glossary add candidates) → each candidate scored against the audio
+differences, the show glossary and a Wikipedia lookup for unconfirmed names add candidates) → each candidate scored against the audio
 (rejected above 10 nats per changed word; best-supported plausible candidate wins) →
 LLM cleanup, every content edit also checked against the audio → `transcripts/<title>_<id8>.md` → chunk + embed → graph edges.
 

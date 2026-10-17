@@ -3,7 +3,8 @@
 A private, local-first Zettelkasten for Windows with an NVIDIA GPU. It turns
 podcasts into speaker-labelled, searchable transcripts and links everything you
 save (podcasts, PDFs, web pages, markdown notes and images) into a knowledge graph.
-Nothing leaves your machine.
+Nothing leaves your machine except name lookups on Wikipedia while checking
+transcripts (`NAME_LOOKUP=false` turns them off).
 
 ## What it does
 

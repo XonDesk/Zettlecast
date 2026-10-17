@@ -170,3 +170,79 @@ def test_learn_skips_sentence_starts_and_possessives():
 
     v.corrections = [Correction(0, "So", "Now", "llm", 0, "high"), Correction(1, "Coop's", "Koop's", "llm", 0, "high")]
     assert v.learn([]) == {"Koop": 1}
+
+
+
+class FakeLookup:
+    """Topic search results and linked pages, matched like the real lookup."""
+
+    def __init__(self, results=(), linked=()):
+        self.results, self.linked = set(results), set(linked)
+        self.calls = []
+
+    def find(self, heard, about):
+        from zettlecast.podcast.lookup import best_matches
+
+        self.calls.append((heard, about))
+        return best_matches(heard, self.results), self.results | self.linked
+
+
+def test_name_found_online_beats_a_confident_llm_guess():
+    lookup = FakeLookup(results={"Kristian Blummenfelt", "Gustav Iden", "Casper Stornes"})
+    v = verifier({"blummenfelt": 3.0, "blomfeldt": 2.0}, lookup=lookup)
+    corrections = v.resolve([Suspect(0, "Christian Blumfeld", ["Christian Blomfeldt"], "high", "Norwegian triathlete")])
+    assert [(c.chosen, c.source, c.confidence) for c in corrections] == [
+        ("Kristian Blummenfelt", "wikipedia", "high")
+    ]
+    assert lookup.calls == [("Christian Blumfeld", "Norwegian triathlete")]
+    assert v.learn([]) == {"Kristian Blummenfelt": 1}  # online only: needs another episode to be trusted
+
+
+def test_llm_name_confirmed_online_is_trusted():
+    v = verifier({"iden": 2.0}, lookup=FakeLookup(linked={"Gustav Iden"}))
+    corrections = v.resolve([Suspect(0, "Gustav Eden", ["Gustav Iden"], "medium", "Norwegian triathlete")])
+    assert [(c.chosen, c.source) for c in corrections] == [("Gustav Iden", "llm+wikipedia")]
+    assert v.learn([]) == {"Gustav Iden": 2}
+
+
+def test_real_heard_name_is_kept_and_linked_pages_never_propose():
+    # "Stephen Silver" sits in the linked pool; "Gustav Eden" itself is a real name there
+    v = TranscriptVerifier([segment(0, "speaker_0", "the work of Stephen Seiler on polarised training")],
+                           AUDIO, FakeScorer({}), lookup=FakeLookup(results={"Stephen Seiler"}, linked={"Stephen Silver"}))
+    assert all(c.chosen == c.original for c in v.resolve(
+        [Suspect(0, "Stephen Seiler", ["Steven Styler"], "high", "exercise physiologist")]))
+    assert "Stephen Seiler on" in v.text()
+
+
+def test_online_name_must_still_fit_the_audio():
+    v = verifier({"blummenfelt": 30.0}, lookup=FakeLookup(results={"Kristian Blummenfelt"}))
+    corrections = v.resolve([Suspect(0, "Christian Blumfeld", [], "high", "Norwegian triathlete")])
+    assert corrections == [] and "Christian Blumfeld" in v.text()
+
+
+def test_known_names_are_not_looked_up():
+    lookup = FakeLookup(results={"Gustav Iden"})
+    v = verifier({"iden": 2.0}, lookup=lookup, glossary={"Gustav Iden": 2})
+    v.resolve([Suspect(0, "Gustav Eden", ["Gustav Iden"], "high", "Norwegian triathlete")])
+    v.resolve([Suspect(1, "trail learning", ["trail running"], "high", "")])
+    assert lookup.calls == []
+
+
+def test_lookup_proposes_only_close_multiword_names():
+    from zettlecast.podcast.lookup import best_matches, name_titles
+
+    names = name_titles({"Jim Walmsley (runner)", "Western States Endurance Run", "VO2 max",
+                         "Kristian Blummenfelt", "Gustav (given name)", "Coca-Cola"})
+    assert "Jim Walmsley" in names and "VO2 max" not in names
+    assert best_matches("Christian Blunfeld", names) == ["Kristian Blummenfelt"]
+    assert best_matches("Gustav In", names) == []  # different word count
+    assert best_matches("Chimony", names) == []  # single words are never proposed
+    assert best_matches("Kenji Niener", names) == []
+
+
+def test_unchanged_name_is_not_credited_to_the_lookup():
+    v = TranscriptVerifier([segment(0, "speaker_0", "we went through John and then home")],
+                           AUDIO, FakeScorer({}), lookup=FakeLookup(linked={"John"}))
+    corrections = v.resolve([Suspect(0, "through John", ["of John"], "high", "a person")])
+    assert [(c.chosen, c.source) for c in corrections] == [("of John", "llm")]
+    assert v.learn([]) == {}

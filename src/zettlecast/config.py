@@ -70,6 +70,7 @@ class Settings(BaseSettings):
     auto_tag_count: int = 5
     max_file_size_mb: int = 50
     use_marker_fallback: bool = True  # Marker for scanned/complex PDFs
+    name_lookup: bool = True  # Look up unconfirmed names in podcast transcripts on Wikipedia (online)
 
     # --- Graph Construction ---
     graph_alpha: float = 0.7  # Weight for vector similarity
