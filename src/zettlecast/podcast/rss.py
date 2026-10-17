@@ -10,12 +10,19 @@ from typing import List, Optional
 from urllib.parse import urlparse
 import re
 
+import xml.etree.ElementTree as ET
+
 import feedparser
 import httpx
 from pydantic import BaseModel
 
 
 logger = logging.getLogger(__name__)
+
+USER_AGENT = "Zettlecast/0.1 (personal knowledge base; +https://github.com/XonDesk/Zettlecast)"
+PODCAST_NS = "{https://podcastindex.org/namespace/1.0}"
+# Preferred published-transcript formats: JSON carries per-word speakers and times
+TRANSCRIPT_TYPES = ("application/json", "text/vtt", "application/x-subrip", "application/srt")
 
 
 class FeedEpisode(BaseModel):
@@ -26,6 +33,7 @@ class FeedEpisode(BaseModel):
     duration: Optional[str] = None
     description: Optional[str] = None
     guid: Optional[str] = None
+    transcript_url: Optional[str] = None
 
 
 class PodcastFeed(BaseModel):
@@ -57,6 +65,26 @@ def html_to_text(html: str) -> str:
     return "\n".join(line for line in lines if line)
 
 
+def transcript_urls(feed_xml: bytes) -> dict:
+    """
+    guid -> best <podcast:transcript> URL per item. feedparser keeps only one
+    transcript tag per item, so read them from the XML directly.
+    """
+    try:
+        root = ET.fromstring(feed_xml)
+    except ET.ParseError as e:
+        logger.warning(f"Could not read transcript links from feed: {e}")
+        return {}
+    urls = {}
+    for item in root.iter("item"):
+        guid = (item.findtext("guid") or "").strip()
+        tags = {t.get("type"): t.get("url") for t in item.findall(f"{PODCAST_NS}transcript")}
+        best = next((tags[t] for t in TRANSCRIPT_TYPES if tags.get(t)), None)
+        if guid and best:
+            urls[guid] = best
+    return urls
+
+
 def parse_feed(feed_url: str, limit: int = 5) -> PodcastFeed:
     """
     Parse a podcast RSS feed.
@@ -70,8 +98,11 @@ def parse_feed(feed_url: str, limit: int = 5) -> PodcastFeed:
     """
     logger.info(f"Parsing podcast feed: {feed_url}")
     
-    feed = feedparser.parse(feed_url)
-    
+    response = httpx.get(feed_url, headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=60)
+    response.raise_for_status()
+    feed = feedparser.parse(response.content)
+    transcripts = transcript_urls(response.content)
+
     if feed.bozo:
         logger.warning(f"Feed parsing warning: {feed.bozo_exception}")
         # Continue if possible, as feedparser often works despite errors
@@ -109,7 +140,8 @@ def parse_feed(feed_url: str, limit: int = 5) -> PodcastFeed:
             published=entry.get("published", ""),
             duration=entry.get("itunes_duration", ""),
             description=html_to_text(notes_html),
-            guid=entry.get("id", audio_url)
+            guid=entry.get("id", audio_url),
+            transcript_url=transcripts.get(entry.get("id", "")),
         ))
         
     return PodcastFeed(
@@ -153,9 +185,7 @@ def download_episode(
     logger.info(f"Downloading: {episode.title}")
     
     # Use a proper User-Agent to avoid 403 errors from podcast hosts
-    headers = {
-        "User-Agent": "Zettlecast/1.0 (Podcast Transcription Tool; +https://github.com/zettlecast)"
-    }
+    headers = {"User-Agent": USER_AGENT}
     
     try:
         if client:

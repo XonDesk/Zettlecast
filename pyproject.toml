@@ -31,6 +31,7 @@ dependencies = [
     # NeMo Speech: Nemotron-3-Diarization needs rope attention, newer than the 3.0.0 PyPI release
     "nemo-toolkit[asr] @ git+https://github.com/NVIDIA-NeMo/Speech@218d0b443441b7d8aa1c832f47df310f186cf0a4",
     "pydub>=0.25.0",
+    "jiwer>=3.0",  # transcript verification against published transcripts
 
     # Document parsing
     "pypdf>=5.1.0",

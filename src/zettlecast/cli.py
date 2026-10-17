@@ -16,9 +16,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 def cli():
     """Zettlecast - Digital Zettelkasten with podcast transcription and semantic search."""
     import logging
+    import os
 
+    # NeMo's diarizer draws tqdm bars on every run; the CLI prints its own stages
+    os.environ.setdefault("TQDM_DISABLE", "1")
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
-    for name in ("nemo_logger", "nemo", "lightning", "pytorch_lightning", "sentence_transformers"):
+    for name in (
+        "nemo_logger", "nemo", "lightning", "pytorch_lightning", "sentence_transformers",
+        "nv_one_logger", "torch.utils.flop_counter",
+    ):
         logging.getLogger(name).setLevel(logging.ERROR)
 
 
@@ -278,6 +284,68 @@ def podcast_status():
     click.echo(f"Total: {status['total']}")
     for k, v in status["by_status"].items():
         click.echo(f"  {k}: {v}")
+
+
+@podcast.command("verify")
+@click.argument("match", required=False)
+@click.option("--spans", "-s", default=8, help="Passages to list for spot-checking")
+def podcast_verify(match: str, spans: int):
+    """Compare transcripts with the ones published in the feed (title containing MATCH, or all)."""
+    from .podcast.queue import TranscriptionQueue
+    from .podcast.reference import cache_path_for, compare, load_reference, note_turns
+
+    def mmss(t: float) -> str:
+        return f"{int(t // 3600)}:{int(t % 3600 // 60):02d}:{int(t % 60):02d}"
+
+    items = [
+        i for i in TranscriptionQueue().items.values()
+        if i.status == "completed" and i.result_path
+        and (not match or match.lower() in (i.episode.episode_title or "").lower())
+    ]
+    if not items:
+        click.echo("No matching processed episodes.")
+        return
+
+    totals = {"ref": 0, "diff": 0}
+    for item in items:
+        ep = item.episode
+        click.echo(f"== {ep.episode_title}")
+        if not ep.transcript_url:
+            click.echo("   no published transcript (import the feed to pick up its transcript link)\n")
+            continue
+        note = Path(item.result_path)
+        if not note.exists():
+            click.echo(f"   note missing: {note}\n")
+            continue
+        try:
+            ref = load_reference(ep.transcript_url, cache_path_for(Path(ep.audio_path), ep.transcript_url))
+        except Exception as e:
+            click.echo(f"   could not load published transcript: {e}\n")
+            continue
+
+        r = compare(note_turns(note.read_text(encoding="utf-8")), ref, max_spans=spans)
+        totals["ref"] += r.reference_words
+        totals["diff"] += r.substitutions + r.missing + r.extra
+        click.echo(
+            f"   words differ: {r.disagreement:.1%} of {r.reference_words} "
+            f"({r.substitutions} different, {r.missing} only in theirs, {r.extra} only in ours)"
+        )
+        if r.speaker_agreement is not None:
+            click.echo(f"   same speaker: {r.speaker_agreement:.1%} of words")
+        for theirs, ours in r.name_mismatches:
+            click.echo(f"   NAME: publisher says {theirs!r}, we say {ours!r}")
+        if r.top_differences:
+            click.echo("   most frequent differences (theirs -> ours): " + ", ".join(
+                f"{t!r}->{o!r} x{n}" for t, o, n in r.top_differences[:8]
+            ))
+        if r.spans:
+            click.echo("   passages to spot-check:")
+            for s in r.spans:
+                click.echo(f"     {mmss(s.time)}  theirs: {s.reference}")
+                click.echo(f"               ours:   {s.ours}")
+        click.echo()
+    if totals["ref"]:
+        click.echo(f"Overall: words differ on {totals['diff'] / totals['ref']:.1%}")
 
 
 @podcast.command("reprocess")

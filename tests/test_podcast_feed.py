@@ -108,3 +108,20 @@ def test_note_contains_show_notes_section(queue):
     assert f"## Show Notes\n\n{NOTES}" in md
     assert "published: Fri, 16 May 2025" in md
     assert md.index("## Show Notes") < md.index("## Transcript")
+
+
+def test_known_speakers_prefers_verified_names(tmp_path, monkeypatch):
+    from zettlecast import pipeline
+
+    def note(name, speaker, verified=False):
+        lines = ["---", f"uuid: {name}", "podcast:", "  show: KoopCast",
+                 "speaker_names:", f"  speaker_0: {speaker}"]
+        if verified:
+            lines.append(f"verified_speakers: [{speaker}]")
+        (tmp_path / f"{name}.md").write_text("\n".join(lines + ["---", ""]), encoding="utf-8")
+
+    note("a", "Ryan Anderson")
+    note("b", "Ryne Anderson", verified=True)
+    note("c", "Ryan Anderson")
+    monkeypatch.setattr(type(pipeline.settings), "transcripts_path", property(lambda self: tmp_path))
+    assert pipeline.known_speakers("KoopCast") == ["Ryne Anderson"]

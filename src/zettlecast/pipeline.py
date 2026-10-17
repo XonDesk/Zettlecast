@@ -12,7 +12,9 @@ its models before enhancement starts.
 """
 
 import logging
+import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -90,11 +92,52 @@ class QueueRunSummary:
         return sum(o.status == "failed" for o in self.outcomes)
 
 
+@contextmanager
+def keep_awake(reason: str = "Zettlecast is transcribing podcasts"):
+    """
+    Hold a Windows power request so idle sleep (including Modern Standby) doesn't
+    pause a long run. Released when the block exits; no-op elsewhere or on failure.
+    """
+    if sys.platform != "win32":
+        yield
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    class ReasonContext(ctypes.Structure):
+        _fields_ = [("Version", wintypes.ULONG), ("Flags", wintypes.DWORD), ("Reason", wintypes.LPWSTR)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.PowerCreateRequest.restype = wintypes.HANDLE
+    kernel32.PowerCreateRequest.argtypes = [ctypes.POINTER(ReasonContext)]
+    kernel32.PowerSetRequest.argtypes = [wintypes.HANDLE, ctypes.c_int]
+    kernel32.PowerClearRequest.argtypes = [wintypes.HANDLE, ctypes.c_int]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    SYSTEM_REQUIRED, EXECUTION_REQUIRED = 1, 3  # POWER_REQUEST_TYPE
+
+    context = ReasonContext(0, 1, reason)  # POWER_REQUEST_CONTEXT_SIMPLE_STRING
+    handle = kernel32.PowerCreateRequest(ctypes.byref(context))
+    if not handle or handle == wintypes.HANDLE(-1).value:
+        logger.warning("Could not create a power request; the PC may sleep during processing")
+        yield
+        return
+    held = [t for t in (SYSTEM_REQUIRED, EXECUTION_REQUIRED) if kernel32.PowerSetRequest(handle, t)]
+    try:
+        yield
+    finally:
+        for t in held:
+            kernel32.PowerClearRequest(handle, t)
+        kernel32.CloseHandle(handle)
+
+
 def known_speakers(show: str, exclude_uuid: str = "") -> list[str]:
     """
-    Full names identified in earlier transcripts of the same show, most frequent
-    first. Lets the LLM resolve "Coach Adam" to a name spelled out elsewhere.
+    Full names identified in earlier transcripts of the same show: names the
+    publisher confirmed (verified_speakers) first, then the rest by frequency,
+    leaving out near-duplicates of confirmed names ("Ryan" vs "Ryne Anderson").
+    Lets the LLM resolve "Coach Adam" to a name spelled out elsewhere.
     """
+    import difflib
     from collections import Counter
 
     from .identity import parse_frontmatter
@@ -102,6 +145,7 @@ def known_speakers(show: str, exclude_uuid: str = "") -> list[str]:
     if not show:
         return []
     counts: Counter = Counter()
+    verified: Counter = Counter()
     for path in settings.transcripts_path.glob("*.md"):
         try:
             meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
@@ -110,10 +154,39 @@ def known_speakers(show: str, exclude_uuid: str = "") -> list[str]:
         if (meta.get("podcast") or {}).get("show") != show or meta.get("uuid") == exclude_uuid:
             continue
         counts.update({n for n in (meta.get("speaker_names") or {}).values() if n and " " in n.strip()})
-    return [name for name, _ in counts.most_common(20)]
+        verified.update(set(meta.get("verified_speakers") or []))
+    confirmed = [name for name, _ in verified.most_common()]
+    others = [
+        name for name, _ in counts.most_common()
+        if name not in verified and not difflib.get_close_matches(name, confirmed, n=1, cutoff=0.85)
+    ]
+    return (confirmed + others)[:20]
 
 
-def run_podcast_queue(
+def published_speaker_names(episode, result) -> dict:
+    """
+    Speaker label -> name from the transcript the publisher put in the feed,
+    when it names its speakers. Empty if there is none or it can't be read.
+    """
+    from .podcast.reference import cache_path_for, load_reference, speaker_names_from_reference
+
+    if not episode.transcript_url:
+        return {}
+    try:
+        ref = load_reference(
+            episode.transcript_url, cache_path_for(Path(episode.audio_path), episode.transcript_url)
+        )
+    except Exception as e:
+        logger.warning(f"Could not load published transcript: {e}")
+        return {}
+    turns = [(s.start, s.end, s.speaker, s.text) for s in result.segments if s.speaker]
+    names = speaker_names_from_reference(turns, ref)
+    if names:
+        logger.info(f"Speaker names from the published transcript: {names}")
+    return names
+
+
+def _run_podcast_queue(
     limit: Optional[int] = None,
     enhance: bool = True,
     sync: bool = True,
@@ -177,6 +250,7 @@ def run_podcast_queue(
                     episode=title,
                     show_notes=episode.description or "",
                     known_speakers=known_speakers(episode.podcast_name or "", exclude_uuid=episode.id),
+                    published_speakers=published_speaker_names(episode, result),
                 )
                 result.keywords = enhanced["keywords"]
                 result.sections = enhanced["sections"]
@@ -214,6 +288,15 @@ def run_podcast_queue(
             on_episode_done(outcome)
 
     return summary
+
+
+def run_podcast_queue(*args, **kwargs) -> QueueRunSummary:
+    """
+    Process pending podcast episodes end to end, keeping the PC awake meanwhile.
+    Arguments: see _run_podcast_queue.
+    """
+    with keep_awake():
+        return _run_podcast_queue(*args, **kwargs)
 
 
 def reindex_all() -> int:

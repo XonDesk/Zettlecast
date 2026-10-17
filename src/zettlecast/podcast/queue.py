@@ -147,13 +147,14 @@ class TranscriptionQueue:
         feed_url: Optional[str] = None,
         description: Optional[str] = None,
         published: Optional[str] = None,
+        transcript_url: Optional[str] = None,
         skip_duplicate: bool = True,
     ) -> str:
         """
         Add an episode to the queue.
 
         If the audio is already queued or processed, any feed details it lacks
-        (feed URL, show notes, publish date) are filled in on the existing item.
+        (feed URL, show notes, publish date, transcript link) are filled in on the existing item.
 
         Args:
             audio_path: Path to audio file
@@ -162,6 +163,7 @@ class TranscriptionQueue:
             feed_url: RSS feed URL
             description: Show notes from the feed
             published: Publish date from the feed
+            transcript_url: Transcript published with the episode
             skip_duplicate: Whether to skip if already processed
 
         Returns:
@@ -179,7 +181,12 @@ class TranscriptionQueue:
 
         existing = next((i for i in self.items.values() if i.episode.audio_hash == audio_hash), None)
         if existing:
-            feed_info = {"feed_url": feed_url, "description": description, "published": published}
+            feed_info = {
+                "feed_url": feed_url,
+                "description": description,
+                "published": published,
+                "transcript_url": transcript_url,
+            }
             missing = {k: v for k, v in feed_info.items() if v and not getattr(existing.episode, k)}
             if missing:
                 for k, v in missing.items():
@@ -207,6 +214,7 @@ class TranscriptionQueue:
             feed_url=feed_url,
             description=description,
             published=published,
+            transcript_url=transcript_url,
         )
 
         # Create queue item
@@ -314,6 +322,7 @@ class TranscriptionQueue:
                     feed_url=feed_url,
                     description=episode.description,
                     published=episode.published,
+                    transcript_url=episode.transcript_url,
                 )
                 job_ids.append(job_id)
                 

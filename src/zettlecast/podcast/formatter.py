@@ -44,6 +44,9 @@ def format_transcript_for_zettlecast(
     }
     if speakers:
         frontmatter["speaker_names"] = speakers
+    if enhanced.get("verified_speakers"):
+        # Named by the publisher's own transcript
+        frontmatter["verified_speakers"] = enhanced["verified_speakers"]
     if keywords:
         frontmatter["tags"] = keywords[:10]
     if summary:

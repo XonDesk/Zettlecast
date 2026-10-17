@@ -43,7 +43,8 @@ src/zettlecast/
     enhancer.py          LLM analysis (keywords, summary, key points, chapters, speaker names) + cleanup
     formatter.py         Transcript markdown note (uuid = episode id)
     queue.py             Persistent transcription queue
-    rss.py               Feed parsing + episode download
+    rss.py               Feed parsing (show notes, podcast:transcript links) + episode download
+    reference.py         Publisher's transcript: speaker names by time overlap, verification report
   image/
     vision_backend.py    One structured vision call (description, OCR text, concepts)
     image_parser.py      Image -> note
@@ -100,12 +101,14 @@ zc.ps1               CLI shortcut
 | `podcast import URL [--limit N]` | Download + queue feed episodes |
 | `podcast run [--limit N] [--no-enhance] [--no-sync]` | Process pending episodes end to end |
 | `podcast reprocess MATCH` / `--all` | Re-queue completed episodes (note is replaced in place) |
+| `podcast verify [MATCH] [-s N]` | Compare notes with the feed's published transcripts (word/speaker agreement, passages to spot-check) |
 | `podcast status` / `podcast retry` | Queue status / reset failed |
 | `image add PATH` / `image run` / `image status` / `image retry` | Image pipeline |
 
 `podcast run` pipeline per episode: unload LLM → decode to 16 kHz mono →
 Parakeet (60-min pieces) → Nemotron diarization (whole episode) → align →
-LLM analysis + cleanup (with the feed's show notes, if any, for name spellings) → `transcripts/<title>_<id8>.md` → chunk + embed → graph edges.
+speaker names from the publisher's transcript (if it names speakers) → LLM analysis + cleanup
+(given show notes, names from earlier episodes of the show and the podcast name as spellings) → `transcripts/<title>_<id8>.md` → chunk + embed → graph edges.
 
 ---
 

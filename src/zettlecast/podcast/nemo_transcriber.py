@@ -70,10 +70,16 @@ class NeMoTranscriber:
 
     @staticmethod
     def _quiet_nemo() -> None:
-        """NeMo logs through its own handler at INFO; keep only errors."""
-        from nemo.utils import logging as nemo_logging
-
-        nemo_logging.setLevel(logging.ERROR)
+        """
+        NeMo logs through its own "nemo_logger" at INFO, and transcribe()/diarize()
+        reset the level to WARNING, so drop everything below ERROR with a filter.
+        """
+        nemo_logger = logging.getLogger("nemo_logger")
+        if not any(getattr(f, "_zettlecast", False) for f in nemo_logger.filters):
+            errors_only = logging.Filter()
+            errors_only.filter = lambda record: record.levelno >= logging.ERROR
+            errors_only._zettlecast = True
+            nemo_logger.addFilter(errors_only)
 
     def _load_parakeet(self):
         if self._parakeet is None:

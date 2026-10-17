@@ -22,6 +22,7 @@ class PodcastEpisode(BaseModel):
     feed_url: Optional[str] = Field(None, description="RSS feed URL if from podcast feed")
     description: Optional[str] = Field(None, description="Show notes from the feed (plain text)")
     published: Optional[str] = Field(None, description="Publish date from the feed")
+    transcript_url: Optional[str] = Field(None, description="Published transcript (podcast:transcript)")
     duration_seconds: Optional[int] = Field(None, description="Duration if known")
 
 
