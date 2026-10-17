@@ -9,7 +9,7 @@ authors = [
     {name = "Zettlecast Team"}
 ]
 
-# Install with setup.ps1, which pulls torch from the CUDA 13 wheel index:
+# Install with torch from the CUDA 13 wheel index:
 #   uv pip install -e ".[dev]" --extra-index-url https://download.pytorch.org/whl/cu130 --index-strategy unsafe-best-match
 dependencies = [
     # API / CLI

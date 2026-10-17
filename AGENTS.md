@@ -50,7 +50,6 @@ src/zettlecast/
     queue.py             Image queue
 frontend/            Next.js UI (notes, podcasts, images, search, graph, settings)
 tests/               pytest suite (LLM and models mocked)
-setup.ps1            One-shot Windows setup
 start.ps1            Start Ollama + API + web UI
 zc.ps1               CLI shortcut
 ```
@@ -60,12 +59,13 @@ zc.ps1               CLI shortcut
 ## Setup & Running
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File setup.ps1   # tools, .venv, models, .env, frontend/.env.local
 .\start.ps1                                          # API :8000 + web UI :3000
 .\zc.ps1 --help                                      # CLI
 ```
 
-- PyTorch comes from the CUDA 13 wheel index (RTX 50-series needs torch >= 2.7).
+- Single machine only; the environment (.venv, .env, models) is already installed. No setup script.
+- PyTorch comes from the CUDA 13 wheel index (RTX 50-series needs torch >= 2.7):
+  `uv pip install --python .venv\Scripts\python.exe -e ".[dev]" --extra-index-url https://download.pytorch.org/whl/cu130 --index-strategy unsafe-best-match`
 - NeMo is installed from GitHub at a pinned commit (`pyproject.toml`): the
   diarization model needs `rope` attention, which is newer than the 3.0.0 PyPI release.
 - API token lives in `.env` (`API_TOKEN`) and `frontend/.env.local` (`NEXT_PUBLIC_API_TOKEN`).

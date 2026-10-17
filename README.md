@@ -26,21 +26,18 @@ PDF / web page / markdown / image ─► text (pypdf, Marker, Trafilatura, Qwen3
 - **Graph** edges combine semantic similarity of whole notes with shared tags.
   Rejecting a suggested link removes it and keeps it out of future rebuilds.
 
-## Requirements
+## Environment
 
-- Windows 10/11, NVIDIA GPU with 24 GB+ VRAM (developed on an RTX 5090, 32 GB)
-- Recent NVIDIA driver (CUDA 13)
-- winget (built into Windows 11)
+Runs on one machine: Windows 11, RTX 5090 (32 GB), with uv, Python 3.12,
+FFmpeg, Node.js and Ollama already installed. The `.venv`, `.env`,
+`frontend/.env.local`, the Ollama model and the Hugging Face models are in place.
 
-Everything else (uv, Python 3.12, FFmpeg, Node.js, Ollama, models) is installed by `setup.ps1`.
-
-## Setup
+To update Python packages (PyTorch comes from the CUDA 13 wheel index):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File setup.ps1
+uv pip install --python .venv\Scripts\python.exe -e ".[dev]" `
+    --extra-index-url https://download.pytorch.org/whl/cu130 --index-strategy unsafe-best-match
 ```
-
-First run downloads ~40 GB (PyTorch, NeMo, the 22 GB LLM and the speech/search models).
 
 ## Use
 
@@ -82,7 +79,7 @@ rebuilds the database from them.
 
 ## Configuration
 
-`setup.ps1` writes `.env`. All options and their defaults are listed in
+Settings live in `.env`. All options and their defaults are listed in
 `.env.example` and `src/zettlecast/config.py`.
 
 ## Development
