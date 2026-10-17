@@ -43,6 +43,20 @@ def sanitize_filename(name: str) -> str:
     return name[:200]
 
 
+def html_to_text(html: str) -> str:
+    """Show notes HTML -> plain text with one paragraph/list item per line."""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html or "", "html.parser")
+    for br in soup.find_all("br"):
+        br.replace_with("\n")
+    for block in soup.find_all(["p", "li", "div", "h1", "h2", "h3", "h4", "h5", "h6", "tr"]):
+        block.append("\n")
+    text = soup.get_text()
+    lines = (re.sub(r"\s+", " ", line).strip() for line in text.splitlines())
+    return "\n".join(line for line in lines if line)
+
+
 def parse_feed(feed_url: str, limit: int = 5) -> PodcastFeed:
     """
     Parse a podcast RSS feed.
@@ -84,13 +98,17 @@ def parse_feed(feed_url: str, limit: int = 5) -> PodcastFeed:
         
         if not audio_url:
             continue
-            
+
+        # content:encoded holds the full show notes; description may be truncated
+        content = entry.get("content") or []
+        notes_html = content[0].get("value", "") if content else entry.get("description", "")
+
         episodes.append(FeedEpisode(
             title=entry.get("title", "Untitled Episode"),
             audio_url=audio_url,
             published=entry.get("published", ""),
             duration=entry.get("itunes_duration", ""),
-            description=entry.get("description", ""),
+            description=html_to_text(notes_html),
             guid=entry.get("id", audio_url)
         ))
         

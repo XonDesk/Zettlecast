@@ -68,6 +68,7 @@ zc.ps1               CLI shortcut
   `uv pip install --python .venv\Scripts\python.exe -e ".[dev]" --extra-index-url https://download.pytorch.org/whl/cu130 --index-strategy unsafe-best-match`
 - NeMo is installed from GitHub at a pinned commit (`pyproject.toml`): the
   diarization model needs `rope` attention, which is newer than the 3.0.0 PyPI release.
+  Switch the dependency to `nemo-toolkit>=3.1` once 3.1 is published (main is already 3.1.0).
 - API token lives in `.env` (`API_TOKEN`) and `frontend/.env.local` (`NEXT_PUBLIC_API_TOKEN`).
 
 ### Windows gotchas (already handled in code)
@@ -98,12 +99,13 @@ zc.ps1               CLI shortcut
 | `podcast add PATH [--name] [--recursive]` | Queue local audio |
 | `podcast import URL [--limit N]` | Download + queue feed episodes |
 | `podcast run [--limit N] [--no-enhance] [--no-sync]` | Process pending episodes end to end |
+| `podcast reprocess MATCH` / `--all` | Re-queue completed episodes (note is replaced in place) |
 | `podcast status` / `podcast retry` | Queue status / reset failed |
 | `image add PATH` / `image run` / `image status` / `image retry` | Image pipeline |
 
 `podcast run` pipeline per episode: unload LLM → decode to 16 kHz mono →
 Parakeet (60-min pieces) → Nemotron diarization (whole episode) → align →
-LLM analysis + cleanup → `transcripts/<title>_<id8>.md` → chunk + embed → graph edges.
+LLM analysis + cleanup (with the feed's show notes, if any, for name spellings) → `transcripts/<title>_<id8>.md` → chunk + embed → graph edges.
 
 ---
 
@@ -156,12 +158,13 @@ speakers: 2
 speaker_names: {speaker_0: Jason Koop, speaker_1: Scott Frey}
 tags: [brain endurance training, mental fatigue, ...]
 summary: 3-5 sentences
-podcast: {show: KoopCast, episode: ...}
+podcast: {show: KoopCast, episode: ..., feed_url: ..., published: ...}
 ---
 
 ## Summary
 ## Key Points
 ## Chapters
+## Show Notes           (from the RSS feed, if imported from one)
 ## Needs Review          (low-confidence LLM corrections, if any)
 ## Transcript
 [8.1s - 97.6s] Jason Koop: ...

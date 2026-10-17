@@ -21,7 +21,7 @@ Each line is "[start - end] speaker_N: text" with times in seconds.
 
 Podcast: {podcast}
 Episode: {episode}
-
+{show_notes}{known_speakers}
 Return JSON with:
 - "keywords": 5-10 lowercase topic keywords (main topics, concepts, notable people or organisations)
 - "summary": 3-5 sentences covering the topic, who the guests are and the key conclusions.
@@ -31,7 +31,10 @@ Return JSON with:
 - "chapters": the episode's sections in order, each {{"name", "start_time" (seconds, from the
   transcript), "description"}}; include intro, sponsor reads and outro when present
 - "speakers": for each speaker label, the person's name if the transcript makes it clear
-  (introductions, being addressed by name), otherwise null. Example: {{"speaker_0": "Jason Koop", "speaker_1": null}}
+  (introductions, being addressed by name), otherwise null. When the show notes name the
+  person, use the show notes' spelling (speech recognition often misspells names). When someone
+  is only called by a first name or title (e.g. "Coach Adam") and matches a person from
+  earlier episodes, use that full name. Example: {{"speaker_0": "Jason Koop", "speaker_1": null}}
 
 Transcript:
 {transcript}"""
@@ -89,6 +92,7 @@ _LINE_PREFIX_RE = re.compile(r"^\[[\d.]+s - [\d.]+s\] [^:]+:")
 
 # ~25k tokens; an hour-long episode is ~60k characters
 MAX_ANALYSIS_CHARS = 100_000
+MAX_SHOW_NOTES_CHARS = 4_000
 
 
 class TranscriptEnhancer:
@@ -197,16 +201,29 @@ class TranscriptEnhancer:
 
         return "\n".join(cleaned_chunks), all_uncertain
 
-    def analyze(self, transcript: str, podcast: str = "", episode: str = "") -> dict:
+    def analyze(
+        self,
+        transcript: str,
+        podcast: str = "",
+        episode: str = "",
+        show_notes: str = "",
+        known_speakers: Optional[List[str]] = None,
+    ) -> dict:
         """Keywords, summary, key points, chapters and speaker names in one call."""
         if len(transcript) > MAX_ANALYSIS_CHARS:
             half = MAX_ANALYSIS_CHARS // 2
             transcript = transcript[:half] + "\n[...]\n" + transcript[-half:]
+        notes = show_notes.strip()[:MAX_SHOW_NOTES_CHARS]
         try:
             result = chat(
                 ANALYSIS_PROMPT.format(
                     podcast=podcast or "unknown",
                     episode=episode or "unknown",
+                    show_notes=f"\nShow notes (from the podcast feed):\n{notes}\n" if notes else "",
+                    known_speakers=(
+                        f"\nPeople on earlier episodes of this show: {', '.join(known_speakers)}\n"
+                        if known_speakers else ""
+                    ),
                     transcript=transcript,
                 ),
                 schema=ANALYSIS_SCHEMA,
@@ -232,6 +249,8 @@ class TranscriptEnhancer:
         podcast: str = "",
         episode: str = "",
         cleanup: bool = True,
+        show_notes: str = "",
+        known_speakers: Optional[List[str]] = None,
     ) -> dict:
         """
         Run the full enhancement pipeline.
@@ -240,7 +259,9 @@ class TranscriptEnhancer:
             Dict with cleaned_transcript, keywords, sections, summary,
             key_points, speakers, uncertain_corrections
         """
-        analysis = self.analyze(transcript, podcast=podcast, episode=episode)
+        analysis = self.analyze(
+            transcript, podcast=podcast, episode=episode, show_notes=show_notes, known_speakers=known_speakers
+        )
         speakers = analysis.get("speakers", {})
 
         cleaned, uncertain = transcript, []

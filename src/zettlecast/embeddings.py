@@ -26,12 +26,20 @@ def _device() -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
+def _quiet_transformers() -> None:
+    """No "Loading weights" progress bars in CLI output."""
+    from transformers.utils import logging as hf_logging
+
+    hf_logging.disable_progress_bar()
+
+
 def get_embedder():
     global _embedder
     if _embedder is None:
         import torch
         from sentence_transformers import SentenceTransformer
 
+        _quiet_transformers()
         if settings.hf_token:
             os.environ.setdefault("HF_TOKEN", settings.hf_token)
         logger.info(f"Loading embedding model: {settings.embedding_model}")
@@ -50,6 +58,7 @@ def get_reranker():
         import torch
         from sentence_transformers import CrossEncoder
 
+        _quiet_transformers()
         logger.info(f"Loading reranker: {settings.reranker_model}")
         _reranker = CrossEncoder(
             settings.reranker_model,

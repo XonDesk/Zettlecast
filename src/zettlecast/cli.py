@@ -280,6 +280,19 @@ def podcast_status():
         click.echo(f"  {k}: {v}")
 
 
+@podcast.command("reprocess")
+@click.argument("match", required=False)
+@click.option("--all", "all_", is_flag=True, help="Reprocess every completed episode")
+def podcast_reprocess(match: str, all_: bool):
+    """Queue completed episodes (title containing MATCH, or --all) to be processed again."""
+    from .podcast.queue import TranscriptionQueue
+
+    if not match and not all_:
+        raise click.UsageError("Give a title to match or --all")
+    count = TranscriptionQueue().reprocess(None if all_ else match)
+    click.echo(f"Queued {count} episode(s) again. Run: zettlecast podcast run")
+
+
 @podcast.command("retry")
 def podcast_retry():
     """Reset failed episodes to pending."""

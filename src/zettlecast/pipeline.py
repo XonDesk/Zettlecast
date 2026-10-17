@@ -90,6 +90,29 @@ class QueueRunSummary:
         return sum(o.status == "failed" for o in self.outcomes)
 
 
+def known_speakers(show: str, exclude_uuid: str = "") -> list[str]:
+    """
+    Full names identified in earlier transcripts of the same show, most frequent
+    first. Lets the LLM resolve "Coach Adam" to a name spelled out elsewhere.
+    """
+    from collections import Counter
+
+    from .identity import parse_frontmatter
+
+    if not show:
+        return []
+    counts: Counter = Counter()
+    for path in settings.transcripts_path.glob("*.md"):
+        try:
+            meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        if (meta.get("podcast") or {}).get("show") != show or meta.get("uuid") == exclude_uuid:
+            continue
+        counts.update({n for n in (meta.get("speaker_names") or {}).values() if n and " " in n.strip()})
+    return [name for name, _ in counts.most_common(20)]
+
+
 def run_podcast_queue(
     limit: Optional[int] = None,
     enhance: bool = True,
@@ -152,6 +175,8 @@ def run_podcast_queue(
                     result.full_text,
                     podcast=episode.podcast_name or "",
                     episode=title,
+                    show_notes=episode.description or "",
+                    known_speakers=known_speakers(episode.podcast_name or "", exclude_uuid=episode.id),
                 )
                 result.keywords = enhanced["keywords"]
                 result.sections = enhanced["sections"]

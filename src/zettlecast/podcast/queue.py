@@ -145,16 +145,23 @@ class TranscriptionQueue:
         podcast_name: Optional[str] = None,
         episode_title: Optional[str] = None,
         feed_url: Optional[str] = None,
+        description: Optional[str] = None,
+        published: Optional[str] = None,
         skip_duplicate: bool = True,
     ) -> str:
         """
         Add an episode to the queue.
+
+        If the audio is already queued or processed, any feed details it lacks
+        (feed URL, show notes, publish date) are filled in on the existing item.
 
         Args:
             audio_path: Path to audio file
             podcast_name: Name of the podcast/show
             episode_title: Episode title
             feed_url: RSS feed URL
+            description: Show notes from the feed
+            published: Publish date from the feed
             skip_duplicate: Whether to skip if already processed
 
         Returns:
@@ -170,17 +177,26 @@ class TranscriptionQueue:
         # Compute hash for deduplication
         audio_hash = self.compute_audio_hash(audio_path)
 
-        # Check for duplicate
-        if skip_duplicate and audio_hash in self.completed_hashes:
+        existing = next((i for i in self.items.values() if i.episode.audio_hash == audio_hash), None)
+        if existing:
+            feed_info = {"feed_url": feed_url, "description": description, "published": published}
+            missing = {k: v for k, v in feed_info.items() if v and not getattr(existing.episode, k)}
+            if missing:
+                for k, v in missing.items():
+                    setattr(existing.episode, k, v)
+                self._save_state()
+                logger.info(f"Added feed details to {existing.episode.episode_title}: {', '.join(missing)}")
+
+        if skip_duplicate and (
+            audio_hash in self.completed_hashes or (existing and existing.status == "completed")
+        ):
             raise DuplicateEpisodeError(
                 f"Episode already processed: {audio_path.name} (hash: {audio_hash[:8]})"
             )
 
-        # Check if already in queue
-        for item in self.items.values():
-            if item.episode.audio_hash == audio_hash:
-                logger.info(f"Episode already in queue: {audio_path.name}")
-                return item.episode.id
+        if existing:
+            logger.info(f"Episode already in queue: {audio_path.name}")
+            return existing.episode.id
 
         # Create episode
         episode = PodcastEpisode(
@@ -189,6 +205,8 @@ class TranscriptionQueue:
             podcast_name=podcast_name,
             episode_title=episode_title or audio_path.stem,
             feed_url=feed_url,
+            description=description,
+            published=published,
         )
 
         # Create queue item
@@ -294,6 +312,8 @@ class TranscriptionQueue:
                     podcast_name=feed.title,
                     episode_title=episode.title,
                     feed_url=feed_url,
+                    description=episode.description,
+                    published=episode.published,
                 )
                 job_ids.append(job_id)
                 
@@ -357,7 +377,8 @@ class TranscriptionQueue:
 
             # Track processing time
             self.processing_times.append(result.processing_time_seconds)
-            self.completed_hashes.append(item.episode.audio_hash)
+            if item.episode.audio_hash not in self.completed_hashes:
+                self.completed_hashes.append(item.episode.audio_hash)
 
             self._save_state()
             logger.info(f"Completed: {item.episode.episode_title}")
@@ -387,6 +408,27 @@ class TranscriptionQueue:
                 )
 
             self._save_state()
+
+    def reprocess(self, match: Optional[str] = None) -> int:
+        """
+        Put completed episodes back to pending so they are transcribed again.
+        The note keeps its UUID (the episode id), so it is replaced in place.
+
+        Args:
+            match: Only episodes whose title contains this text (case-insensitive);
+                None means every completed episode
+        """
+        count = 0
+        for item in self.items.values():
+            title = (item.episode.episode_title or "").lower()
+            if item.status == "completed" and (not match or match.lower() in title):
+                item.status = "pending"
+                item.attempts = 0
+                item.error_message = None
+                count += 1
+        if count:
+            self._save_state()
+        return count
 
     def retry_failed(self):
         """Reset all 'review' items to 'pending' for retry."""

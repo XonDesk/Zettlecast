@@ -54,6 +54,7 @@ def format_transcript_for_zettlecast(
             "show": episode.podcast_name,
             "episode": episode.episode_title,
             "feed_url": episode.feed_url,
+            "published": episode.published,
         }.items()
         if v
     }
@@ -74,6 +75,8 @@ def format_transcript_for_zettlecast(
         for sec in sections:
             start = float(sec.get("start_time", 0) or 0)
             parts.append(f"- **{sec.get('name', 'Section')}** ([{start:.0f}s]): {sec.get('description', '')}")
+    if episode.description:
+        parts += ["", "## Show Notes", "", episode.description]
     if uncertain:
         parts += [
             "",

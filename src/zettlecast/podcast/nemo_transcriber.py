@@ -68,9 +68,18 @@ class NeMoTranscriber:
 
     # --- Models ---
 
+    @staticmethod
+    def _quiet_nemo() -> None:
+        """NeMo logs through its own handler at INFO; keep only errors."""
+        from nemo.utils import logging as nemo_logging
+
+        nemo_logging.setLevel(logging.ERROR)
+
     def _load_parakeet(self):
         if self._parakeet is None:
             import nemo.collections.asr as nemo_asr
+
+            self._quiet_nemo()
 
             logger.info(f"Loading {self.parakeet_model_id}")
             model = nemo_asr.models.ASRModel.from_pretrained(self.parakeet_model_id)
@@ -85,6 +94,8 @@ class NeMoTranscriber:
     def _load_sortformer(self):
         if self._sortformer is None:
             from nemo.collections.asr.models import SortformerEncLabelModel
+
+            self._quiet_nemo()
 
             logger.info(f"Loading {self.diarization_model_id}")
             self._sortformer = SortformerEncLabelModel.from_pretrained(self.diarization_model_id)
