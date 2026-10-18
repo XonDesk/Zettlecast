@@ -12,7 +12,8 @@ few minutes instead of re-running whole episodes. Real notes are never touched.
 Every run starts from the same glossary snapshot, so runs are comparable. Each applied
 correction is judged with the answer key (scripts/bench_key.json: right / damage), else
 against the publisher's transcript at that moment (better / same / worse than what was
-heard). Score = right - damage; wrong forms still in the transcripts are counted too.
+heard). Score = right - damage. The final transcripts are scored too: key spellings
+present, known-wrong forms left, and WER vs the publisher over each clip's span.
 Results go to runs/<time>.json; corrections that changed since the previous run are printed.
 """
 
@@ -37,12 +38,18 @@ os.environ["LANCEDB_PATH"] = str(BENCH / ".lancedb")
 os.environ.setdefault("TQDM_DISABLE", "1")
 sys.path.insert(0, str(ROOT / "src"))
 
+import jiwer  # noqa: E402
 import yaml  # noqa: E402
 
 import zettlecast  # noqa: E402,F401  (imports torch first; see AGENTS.md)
 from zettlecast.podcast.reference import normalize, parse_reference  # noqa: E402
 
 CORRECTION = re.compile(r"^- \[(\d+)s\] (.*?) → \*\*(.*?)\*\* \(([\w+]+), (\w+), penalty")
+LINE = re.compile(r"^\[([\d.]+)s - ([\d.]+)s\] (?:[^:]+: )?(.*)$")
+
+
+def _count(term: str, text: str) -> int:
+    return len(re.findall(rf"(?<![\w-]){re.escape(term)}(?![\w-])", text))
 
 
 def setup(minutes: int, tail: int) -> None:
@@ -146,17 +153,30 @@ def score() -> None:
     key = json.loads((ROOT / "scripts" / "bench_key.json").read_text(encoding="utf-8"))
     rows, totals = [], {"right": 0, "damage": 0, "better": 0, "same": 0, "worse": 0, "review": 0}
     wrong_left: dict = {}
+    quality = {"correct": 0, "wrong": 0, "err": 0.0, "words": 0, "notes": {}}
     for note in sorted((BENCH / "transcripts").glob("*.md")):
         text = note.read_text(encoding="utf-8")
         meta = yaml.safe_load(text.split("---")[1])
         audio = Path(meta["source"])
         refs = list(audio.parent.glob(f"{audio.stem}.transcript.*"))
         ref = parse_reference(refs[0].read_text(encoding="utf-8")) if refs else []
-        transcript = text.split("## Transcript", 1)[-1]
-        for form in key["wrong"]:
-            n = len(re.findall(rf"(?<![\w-]){re.escape(form)}(?![\w-])", transcript))
-            if n:
-                wrong_left[form] = wrong_left.get(form, 0) + n
+        lines = [m for m in map(LINE.match, text.split("## Transcript", 1)[-1].splitlines()) if m]
+        spoken = " ".join(m[3] for m in lines)
+        wrong = {form: n for form in key["wrong"] if (n := _count(form, spoken))}
+        for form, n in wrong.items():
+            wrong_left[form] = wrong_left.get(form, 0) + n
+        # final quality: what a reader gets, whichever corrections produced it
+        q = {"correct": sum(_count(t, spoken) for t in key["correct"]), "wrong": sum(wrong.values()), "wer": None}
+        end = max((float(m[2]) for m in lines), default=0.0)
+        heard = " ".join(normalize(" ".join(w.text for w in ref if 0 <= w.start <= end)))
+        if heard:
+            wer = 100 * jiwer.wer(heard, " ".join(normalize(spoken)))
+            q["wer"] = round(wer, 2)
+            quality["err"] += wer * len(heard.split())
+            quality["words"] += len(heard.split())
+        quality["correct"] += q["correct"]
+        quality["wrong"] += q["wrong"]
+        quality["notes"][note.stem] = q
         review = text.split("## Needs Review", 1)[1].split("\n## ")[0] if "## Needs Review" in text else ""
         totals["review"] += sum(1 for line in review.splitlines() if line.startswith("- "))
         section = text.split("## Automatic Corrections", 1)[-1].split("\n## ")[0]
@@ -183,9 +203,12 @@ def score() -> None:
     runs.mkdir(exist_ok=True)
     previous = sorted(runs.glob("*.json"))
     out = runs / f"{time.strftime('%Y%m%d-%H%M%S')}.json"
+    words = quality.pop("words")
+    quality["wer"] = round(quality.pop("err") / words, 3) if words else None
     result = {"score": totals["right"] - totals["damage"], "totals": totals, "wrong_left": wrong_left,
-              "corrections": rows}
+              "quality": quality, "corrections": rows}
     out.write_text(json.dumps(result, indent=1, ensure_ascii=False), encoding="utf-8")
+    last = json.loads(previous[-1].read_text(encoding="utf-8")) if previous else {}
 
     for r in rows:
         if r["verdict"] in ("damage", "worse"):
@@ -194,13 +217,28 @@ def score() -> None:
         def key_of(r):
             return (r["episode"], r["original"], r["chosen"])
 
-        before = {key_of(r) for r in json.loads(previous[-1].read_text(encoding="utf-8"))["corrections"]}
+        before = {key_of(r) for r in last["corrections"]}
         now = {key_of(r) for r in rows}
         for k in sorted(now - before):
             print(f"  + new      {k[0][:30]:30} {k[1]!r} -> {k[2]!r}")
         for k in sorted(before - now):
             print(f"  - dropped  {k[0][:30]:30} {k[1]!r} -> {k[2]!r}")
     print(f"Wrong forms left in transcripts: {wrong_left or 'none'}")
+    old = last.get("quality") or {}
+    for stem, q in quality["notes"].items():
+        if old and q != old["notes"].get(stem):
+            wer = "-" if q["wer"] is None else f"{q['wer']:.2f}%"
+            print(f"  changed  {stem[:45]:45} correct {q['correct']:3}  wrong {q['wrong']:2}  WER {wer}")
+
+    def delta(name: str) -> str:
+        if old.get(name) is None or quality[name] is None:
+            return ""
+        d = quality[name] - old[name]
+        return f" ({d:+.3g})"
+
+    wer = "-" if quality["wer"] is None else f"{quality['wer']:.2f}%"
+    print(f"Final: correct key spellings {quality['correct']}{delta('correct')}, "
+          f"wrong forms {quality['wrong']}{delta('wrong')}, WER vs publisher {wer}{delta('wer')}")
     print(f"Score (right - damage): {result['score']}  {totals}  (saved {out.relative_to(ROOT)})")
 
 

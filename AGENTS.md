@@ -229,5 +229,5 @@ processed episode in `_BENCH_STORAGE` (real notes untouched), same glossary snap
 
 ```powershell
 .\.venv\Scripts\python scriptsench.py setup   # cut clips + transcribe once (~5 min)
-.\.venv\Scripts\python scriptsench.py run     # fix pass + score vs publisher, diff vs last run
+.\.venv\Scripts\python scriptsench.py run     # fix pass + score corrections and final transcripts (key spellings, wrong forms, WER), diff vs last run
 ```
