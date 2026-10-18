@@ -59,6 +59,8 @@ def chat(
         "think": False,
         "options": {"num_ctx": settings.llm_num_ctx, "temperature": temperature},
     }
+    if settings.llm_seed is not None:
+        body["options"]["seed"] = settings.llm_seed
     if schema:
         body["format"] = schema
 

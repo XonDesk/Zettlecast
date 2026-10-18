@@ -1,0 +1,18 @@
+{
+  "_about": "Answer key for scripts/bench.py score (evaluation only; the pipeline never reads it). 'correct': how names and terms in the bench clips are spelled. 'wrong': forms that are known to be wrong, with the right spelling.",
+  "correct": [
+    "KoopCast", "Jason Koop", "Scott Frey", "Adam Ferdinandson", "Ryne Anderson", "Benat Mencia",
+    "Baptiste Morel-Prieur", "Kristian Blummenfelt", "Gustav Iden", "Kenji Nener",
+    "Olav Aleksander Bu", "Cocodona 250", "Koop AI", "Chamonix", "UTMB", "NTNU"
+  ],
+  "wrong": {
+    "Coconut 250": "Cocodona 250",
+    "Bennett": "Benat",
+    "Stephen Silver": "Stephen Seiler",
+    "Coop Cast": "KoopCast",
+    "Coupe AI": "Koop AI",
+    "Ryan Anderson": "Ryne Anderson",
+    "Christian Blunfeld": "Kristian Blummenfelt",
+    "Angie Niener": "Kenji Nener"
+  }
+}

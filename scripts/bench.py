@@ -9,13 +9,15 @@ few minutes instead of re-running whole episodes. Real notes are never touched.
     .venv\\Scripts\\python scripts\\bench.py run                    fix pass only, then score
     .venv\\Scripts\\python scripts\\bench.py score                  score the current bench notes
 
-Every run starts from the same glossary snapshot, so runs are comparable. The score
-checks each applied correction against the publisher's transcript at that moment
-(better / same / worse than what was heard) and writes runs/<time>.json; the
-corrections that changed since the previous run are printed.
+Every run starts from the same glossary snapshot, so runs are comparable. Each applied
+correction is judged with the answer key (scripts/bench_key.json: right / damage), else
+against the publisher's transcript at that moment (better / same / worse than what was
+heard). Score = right - damage; wrong forms still in the transcripts are counted too.
+Results go to runs/<time>.json; corrections that changed since the previous run are printed.
 """
 
 import argparse
+import difflib
 import json
 import os
 import re
@@ -94,31 +96,63 @@ def run() -> None:
     score()
 
 
+def _key_verdict(original: str, chosen: str, window: list, key: dict) -> str:
+    """
+    right / damage from the answer key, or "" when the key says nothing. The key says how
+    names are spelled, not where they occur, so a newly introduced key spelling only counts as
+    right when the publisher heard a similar word there ("Kube" -> "Koop" with "Coop" heard).
+    """
+    def has(term: str, s: str) -> bool:
+        return re.search(rf"(?<![\w-]){re.escape(term)}(?![\w-])", s) is not None
+
+    words = {w for term in key["correct"] for w in term.split() if w[:1].isupper()}
+    if any(has(t, original) and not has(t, chosen) for t in key["correct"]) \
+            or any(has(w, original) and not has(w, chosen) for w in words) \
+            or any(has(t, chosen) and not has(t, original) for t in key["wrong"]):
+        return "damage"
+    introduced = [w for w in words if has(w, chosen) and not has(w, original)]
+    heard_there = any(
+        difflib.SequenceMatcher(None, w.lower(), h).ratio() >= 0.5 for w in introduced for h in window
+    )
+    if heard_there or any(has(t, original) and not has(t, chosen) for t in key["wrong"]):
+        return "right"
+    return ""
+
+
 def score() -> None:
-    rows, totals = [], {"better": 0, "same": 0, "worse": 0}
+    key = json.loads((ROOT / "scripts" / "bench_key.json").read_text(encoding="utf-8"))
+    rows, totals = [], {"right": 0, "damage": 0, "better": 0, "same": 0, "worse": 0, "review": 0}
+    wrong_left: dict = {}
     for note in sorted((BENCH / "transcripts").glob("*.md")):
         text = note.read_text(encoding="utf-8")
         meta = yaml.safe_load(text.split("---")[1])
         audio = Path(meta["source"])
         refs = list(audio.parent.glob(f"{audio.stem}.transcript.*"))
         ref = parse_reference(refs[0].read_text(encoding="utf-8")) if refs else []
+        transcript = text.split("## Transcript", 1)[-1]
+        for form in key["wrong"]:
+            n = len(re.findall(rf"(?<![\w-]){re.escape(form)}(?![\w-])", transcript))
+            if n:
+                wrong_left[form] = wrong_left.get(form, 0) + n
+        review = text.split("## Needs Review", 1)[1].split("\n## ")[0] if "## Needs Review" in text else ""
+        totals["review"] += sum(1 for line in review.splitlines() if line.startswith("- "))
         section = text.split("## Automatic Corrections", 1)[-1].split("\n## ")[0]
         for line in section.splitlines():
             m = CORRECTION.match(line)
             if not m:
                 continue
             t, original, chosen, source = float(m[1]), m[2], m[3], m[4]
-            verdict = "no reference"
-            if ref:
-                window = [k for w in ref if t - 1.5 <= w.start <= t + 6 for k in normalize(w.text)]
-
+            window = [k for w in ref if t - 1.5 <= w.start <= t + 6 for k in normalize(w.text)]
+            verdict = _key_verdict(original, chosen, window, key)
+            if not verdict and ref:
                 def hits(s: str) -> float:
                     words = normalize(s)
                     return sum(w in window for w in words) / max(len(words), 1)
 
                 o, c = hits(original), hits(chosen)
                 verdict = "better" if c > o else "worse" if c < o else "same"
-                totals[verdict] += 1
+            verdict = verdict or "no reference"
+            totals[verdict] = totals.get(verdict, 0) + 1
             rows.append({"episode": note.stem[:40], "time": t, "original": original, "chosen": chosen,
                          "source": source, "verdict": verdict})
 
@@ -126,22 +160,25 @@ def score() -> None:
     runs.mkdir(exist_ok=True)
     previous = sorted(runs.glob("*.json"))
     out = runs / f"{time.strftime('%Y%m%d-%H%M%S')}.json"
-    out.write_text(json.dumps({"totals": totals, "corrections": rows}, indent=1, ensure_ascii=False), encoding="utf-8")
+    result = {"score": totals["right"] - totals["damage"], "totals": totals, "wrong_left": wrong_left,
+              "corrections": rows}
+    out.write_text(json.dumps(result, indent=1, ensure_ascii=False), encoding="utf-8")
 
     for r in rows:
-        if r["verdict"] == "worse":
-            print(f"  worse  {r['episode'][:30]:30} {r['time']:6.0f}s  {r['original']!r} -> {r['chosen']!r} ({r['source']})")
+        if r["verdict"] in ("damage", "worse"):
+            print(f"  {r['verdict']:7}{r['episode'][:30]:30} {r['time']:6.0f}s  {r['original']!r} -> {r['chosen']!r} ({r['source']})")
     if previous:
-        def key(r):
+        def key_of(r):
             return (r["episode"], r["original"], r["chosen"])
 
-        before = {key(r) for r in json.loads(previous[-1].read_text(encoding="utf-8"))["corrections"]}
-        now = {key(r) for r in rows}
+        before = {key_of(r) for r in json.loads(previous[-1].read_text(encoding="utf-8"))["corrections"]}
+        now = {key_of(r) for r in rows}
         for k in sorted(now - before):
             print(f"  + new      {k[0][:30]:30} {k[1]!r} -> {k[2]!r}")
         for k in sorted(before - now):
             print(f"  - dropped  {k[0][:30]:30} {k[1]!r} -> {k[2]!r}")
-    print(f"Corrections vs publisher: {totals}  (saved {out.relative_to(ROOT)})")
+    print(f"Wrong forms left in transcripts: {wrong_left or 'none'}")
+    print(f"Score (right - damage): {result['score']}  {totals}  (saved {out.relative_to(ROOT)})")
 
 
 def main() -> None:

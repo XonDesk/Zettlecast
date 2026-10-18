@@ -65,6 +65,7 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     llm_num_ctx: int = 32768  # Context window requested from Ollama
     llm_timeout_seconds: int = 600
+    llm_seed: int | None = 42  # Fixed sampling seed: reprocessing gives the same note (None = random)
 
     # --- Features ---
     enable_auto_tagging: bool = True  # LLM tags + summary for non-podcast notes
