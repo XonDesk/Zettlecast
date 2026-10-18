@@ -30,6 +30,22 @@ def queue(tmp_path):
     return TranscriptionQueue(state_file=tmp_path / "queue.json"), audio
 
 
+def test_item_of_an_exited_run_is_requeued_at_once(queue):
+    import subprocess
+    import sys
+
+    q, audio = queue
+    job_id = q.add(audio, podcast_name="KoopCast")
+    q.mark_started(job_id)  # by this (live) process: left alone
+    assert TranscriptionQueue(state_file=q.state_file).items[job_id].status == "processing"
+
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    q.items[job_id].worker_pid = gone.pid  # a run that was killed mid-episode
+    q._save_state()
+    assert TranscriptionQueue(state_file=q.state_file).items[job_id].status == "pending"
+
+
 def test_import_adds_show_notes_to_completed_episode(queue):
     q, audio = queue
     job_id = q.add(audio, podcast_name="KoopCast")

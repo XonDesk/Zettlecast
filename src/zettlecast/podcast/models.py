@@ -72,5 +72,6 @@ class QueueItem(BaseModel):
     error_message: Optional[str] = Field(None, description="Error message if failed")
     added_at: datetime = Field(default_factory=datetime.utcnow)
     started_at: Optional[datetime] = Field(None, description="When processing started")
+    worker_pid: Optional[int] = Field(None, description="Process working on it (stuck once it exits)")
     completed_at: Optional[datetime] = Field(None, description="When processing finished")
     result_path: Optional[str] = Field(None, description="Path to result JSON if completed")

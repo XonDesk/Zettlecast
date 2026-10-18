@@ -107,6 +107,7 @@ def run() -> None:
         shutil.rmtree(BENCH / "glossaries", ignore_errors=True)
         shutil.copytree(seed, BENCH / "glossaries")
     queue = TranscriptionQueue()
+    queue.reset_all_stuck()  # an interrupted bench run; runs never overlap
     queue.reprocess()
     queue.retry_failed()
     started = time.time()

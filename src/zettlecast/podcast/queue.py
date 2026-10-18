@@ -8,6 +8,7 @@ and time estimation.
 import hashlib
 import json
 import logging
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from statistics import mean
@@ -22,6 +23,29 @@ logger = logging.getLogger(__name__)
 class DuplicateEpisodeError(Exception):
     """Raised when attempting to add a duplicate episode."""
     pass
+
+
+def _worker_alive(pid: Optional[int], started_at: Optional[datetime]) -> Optional[bool]:
+    """
+    Whether the process that started an item still runs: True / False, or None when
+    unknown (no pid recorded, or psutil unavailable). A process started after the item
+    reuses the pid of one that exited.
+    """
+    if not pid:
+        return None
+    try:
+        import psutil
+    except ImportError:
+        return None
+    try:
+        proc = psutil.Process(pid)
+        if started_at and datetime.utcfromtimestamp(proc.create_time()) > started_at:
+            return False
+        return proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+    except psutil.Error:
+        return None
 
 
 class TranscriptionQueue:
@@ -75,16 +99,22 @@ class TranscriptionQueue:
         Reset items stuck in 'processing' state.
         
         This can happen when the process crashes or is killed during transcription.
-        Items that have been 'processing' for more than 1 hour are considered stuck.
+        An item is stuck once the process working on it has exited; for items without
+        a recorded process, after 1 hour of 'processing'.
         """
         now = datetime.utcnow()
         stuck_threshold = timedelta(hours=1)
         reset_count = 0
-        
+
         for item in self.items.values():
             if item.status == "processing":
-                # Check if it's been processing too long
-                if item.started_at:
+                alive = _worker_alive(item.worker_pid, item.started_at)
+                if alive is False:
+                    logger.warning(f"Resetting job whose process exited: {item.episode.episode_title}")
+                    item.status = "pending"
+                    item.started_at = item.worker_pid = None
+                    reset_count += 1
+                elif alive is None and item.started_at:
                     processing_time = now - item.started_at
                     if processing_time > stuck_threshold:
                         logger.warning(
@@ -94,7 +124,7 @@ class TranscriptionQueue:
                         item.status = "pending"
                         item.started_at = None
                         reset_count += 1
-                else:
+                elif alive is None:
                     # No start time but marked as processing - reset it
                     item.status = "pending"
                     reset_count += 1
@@ -373,6 +403,7 @@ class TranscriptionQueue:
         if job_id in self.items:
             self.items[job_id].status = "processing"
             self.items[job_id].started_at = datetime.utcnow()
+            self.items[job_id].worker_pid = os.getpid()
             self.items[job_id].attempts += 1
             self._save_state()
 
