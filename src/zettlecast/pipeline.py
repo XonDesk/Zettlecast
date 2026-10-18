@@ -246,7 +246,7 @@ def _seed_glossaries(episodes: List[PodcastEpisode], results: Dict[str, Transcri
     of every episode in this run to their show's glossary as trusted names, so the
     first episodes processed already know the guests of the later ones.
     """
-    from .podcast.verifier import TRUSTED_COUNT, glossary_path, load_glossary, save_glossary
+    from .podcast.verifier import glossary_path, load_glossary, save_glossary
 
     by_show: Dict[str, set] = {}
     for episode in episodes:
@@ -254,14 +254,14 @@ def _seed_glossaries(episodes: List[PodcastEpisode], results: Dict[str, Transcri
         ref = episode_reference(episode) if result else None
         if ref:
             names = {n.strip() for n in published_speaker_names(ref, result).values() if " " in n.strip()}
-            by_show.setdefault(episode.podcast_name or "", set()).update(names)
+            by_show.setdefault(episode.podcast_name or "", set()).update((n, episode.id) for n in names)
     for show, names in by_show.items():
         if not names:
             continue
         path = glossary_path(settings.storage_path, show)
         glossary = load_glossary(path)
-        for name in names:
-            glossary[name] = max(glossary.get(name, 0), TRUSTED_COUNT)
+        for name, episode_id in names:
+            glossary.setdefault(name, {})[episode_id] = "speaker"
         save_glossary(path, glossary)
         logger.info(f"{show}: {len(names)} publisher-confirmed speaker names added to the glossary")
 
@@ -431,7 +431,9 @@ def _run_podcast_queue(
                 from .podcast.verifier import save_glossary
 
                 save_glossary(glossary_file, verifier.learn(
-                    list(enhanced["speakers"].values()), verified=enhanced.get("verified_speakers", [])
+                    episode.id, list(enhanced["speakers"].values()),
+                    verified=enhanced.get("verified_speakers", []),
+                    written=f"{title}\n{episode.description or ''}",
                 ))
                 if verifier.lookup is not None:
                     verifier.lookup.save()

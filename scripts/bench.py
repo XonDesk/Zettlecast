@@ -5,7 +5,7 @@ Cuts the first few minutes of each processed episode into a separate storage
 folder (_BENCH_STORAGE), so changes to the LLM/verification pass can be tried in a
 few minutes instead of re-running whole episodes. Real notes are never touched.
 
-    .venv\\Scripts\\python scripts\\bench.py setup [--minutes 10]   cut clips, transcribe them once
+    .venv\\Scripts\\python scripts\\bench.py setup [--minutes 10] [--tail 5]   cut clips (start + end), transcribe once
     .venv\\Scripts\\python scripts\\bench.py run                    fix pass only, then score
     .venv\\Scripts\\python scripts\\bench.py score                  score the current bench notes
 
@@ -45,7 +45,7 @@ from zettlecast.podcast.reference import normalize, parse_reference  # noqa: E40
 CORRECTION = re.compile(r"^- \[(\d+)s\] (.*?) → \*\*(.*?)\*\* \(([\w+]+), (\w+), penalty")
 
 
-def setup(minutes: int) -> None:
+def setup(minutes: int, tail: int) -> None:
     from zettlecast.podcast.queue import TranscriptionQueue
 
     real = json.loads((REAL / "podcast_queue.json").read_text(encoding="utf-8"))
@@ -64,10 +64,31 @@ def setup(minutes: int) -> None:
         # the publisher's transcript keeps its times: the clip starts at 0
         for ref in src.parent.glob(f"{src.stem}.transcript.*"):
             shutil.copy2(ref, dest.with_name(ref.name))
-        queue.add(dest, podcast_name=ep.get("podcast_name"), episode_title=ep.get("episode_title"),
-                  feed_url=ep.get("feed_url"), description=ep.get("description"),
-                  published=ep.get("published"), transcript_url=ep.get("transcript_url"))
-        print(f"  {minutes} min of {src.stem}")
+        clips = [(dest, ep.get("episode_title"))]
+        if tail:
+            # the outro too (thanks, sign-offs, sponsor reads): the last minutes, times shifted to 0
+            end = dest.with_name(f"{src.stem} (end){src.suffix}")
+            duration = float(subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(src)],
+                capture_output=True, text=True, check=True,
+            ).stdout)
+            offset = max(0.0, duration - tail * 60)
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{offset:.3f}", "-i", str(src),
+                            "-c", "copy", str(end)], check=True)
+            ref = src.with_name(f"{src.stem}.transcript.json")
+            if ref.exists():
+                data = json.loads(ref.read_text(encoding="utf-8"))
+                data["segments"] = [
+                    {**s, "startTime": s["startTime"] - offset, "endTime": s["endTime"] - offset}
+                    for s in data.get("segments", []) if s.get("startTime", 0) >= offset
+                ]
+                end.with_name(f"{end.stem}.transcript.json").write_text(json.dumps(data), encoding="utf-8")
+            clips.append((end, f"{ep.get('episode_title') or src.stem} (end)"))
+        for clip, title in clips:
+            queue.add(clip, podcast_name=ep.get("podcast_name"), episode_title=title,
+                      feed_url=ep.get("feed_url"), description=ep.get("description"),
+                      published=ep.get("published"), transcript_url=ep.get("transcript_url"))
+        print(f"  {minutes} min of {src.stem}" + (f" + last {tail} min" if tail else ""))
     for sub in ("glossaries", "lookups"):
         if (REAL / sub).exists():
             shutil.copytree(REAL / sub, BENCH / sub)
@@ -112,7 +133,8 @@ def _key_verdict(original: str, chosen: str, window: list, key: dict) -> str:
         return "damage"
     introduced = [w for w in words if has(w, chosen) and not has(w, original)]
     heard_there = any(
-        difflib.SequenceMatcher(None, w.lower(), h).ratio() >= 0.5 for w in introduced for h in window
+        difflib.SequenceMatcher(None, w.lower(), h).ratio() >= 0.5 and min(len(w), len(h)) / max(len(w), len(h)) >= 0.6
+        for w in introduced for h in window
     )
     if heard_there or any(has(t, original) and not has(t, chosen) for t in key["wrong"]):
         return "right"
@@ -186,11 +208,12 @@ def main() -> None:
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("setup")
     p.add_argument("--minutes", type=int, default=10)
+    p.add_argument("--tail", type=int, default=5, help="also clip the last N minutes (0 = no)")
     sub.add_parser("run")
     sub.add_parser("score")
     args = parser.parse_args()
     if args.cmd == "setup":
-        setup(args.minutes)
+        setup(args.minutes, args.tail)
     elif args.cmd == "run":
         run()
     else:
