@@ -193,7 +193,9 @@ duration_seconds: 3813
 language: en
 speakers: 2
 speaker_names: {speaker_0: Jason Koop, speaker_1: Scott Frey}
-tags: [brain endurance training, mental fatigue, ...]
+tags: [brain endurance training, mental fatigue, ...]   # topics only, no names
+people: [Scott Frey, Jason Koop]                        # full names, snapped to known spellings
+organisations: [UESCA, CTS Coaching]                    # organisations, products, races, events
 summary: 3-5 sentences
 podcast: {show: KoopCast, episode: ..., feed_url: ..., published: ...}
 ---

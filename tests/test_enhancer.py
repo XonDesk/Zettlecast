@@ -106,6 +106,13 @@ class TestEnhance:
         assert "lactate threshold" in result["cleaned_transcript"]
         assert "] Jason Koop: Welcome" in result["cleaned_transcript"]
 
+    def test_people_and_organisations_use_known_spellings(self):
+        analysis = {**ANALYSIS, "people": ["Jason Koop", "Jasn Koop", "Fred", "  "], "organisations": ["UTMB", "UTMB"]}
+        with patch("zettlecast.podcast.enhancer.chat", return_value=analysis):
+            result = TranscriptEnhancer().enhance(TRANSCRIPT, cleanup=False)
+        assert result["people"] == ["Jason Koop"]
+        assert result["organisations"] == ["UTMB"]
+
     def test_without_cleanup_keeps_text(self):
         with patch("zettlecast.podcast.enhancer.chat", return_value=dict(ANALYSIS)):
             result = TranscriptEnhancer().enhance(TRANSCRIPT, cleanup=False)

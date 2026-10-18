@@ -330,7 +330,7 @@ def parse_markdown(file_path: Path) -> ProcessingResult:
         title = str(frontmatter.get("title") or file_path.stem)
 
         custom = {"note_path": str(file_path)}
-        for key in ("summary", "podcast", "speaker_names", "speakers"):
+        for key in ("summary", "podcast", "speaker_names", "speakers", "people", "organisations"):
             if frontmatter.get(key):
                 custom[key] = frontmatter[key]
 

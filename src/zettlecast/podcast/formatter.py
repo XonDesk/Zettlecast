@@ -54,6 +54,9 @@ def format_transcript_for_zettlecast(
         frontmatter["verification"] = enhanced["verification"]
     if keywords:
         frontmatter["tags"] = keywords[:10]
+    for field in ("people", "organisations"):
+        if enhanced.get(field):
+            frontmatter[field] = enhanced[field]
     if summary:
         frontmatter["summary"] = summary
     podcast_meta = {

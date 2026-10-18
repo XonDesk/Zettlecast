@@ -24,7 +24,12 @@ Podcast: {podcast}
 Episode: {episode}
 {show_notes}{known_speakers}
 Return JSON with:
-- "keywords": 5-10 lowercase topic keywords (main topics, concepts, notable people or organisations)
+- "keywords": 5-10 lowercase topic keywords: the subjects, concepts and methods discussed, in their
+  most common general form (e.g. "heat training", "ultrarunning"). No names of people or organisations.
+- "people": full names of the people who speak or are discussed in some depth (not passing mentions),
+  spelled as in the show notes when they name them
+- "organisations": named organisations, institutions, companies, products, races and events
+  discussed in some depth (e.g. "UTMB", "TrainingPeaks", "NTNU")
 - "summary": 3-5 sentences covering the topic, who the guests are and the key conclusions.
   Third person. Do not start with "In this episode" or "This podcast".
 - "key_points": 5-10 specific, concrete takeaways (e.g. "Training the gut with 60-90 g carbs/hour
@@ -44,6 +49,8 @@ ANALYSIS_SCHEMA = {
     "type": "object",
     "properties": {
         "keywords": {"type": "array", "items": {"type": "string"}},
+        "people": {"type": "array", "items": {"type": "string"}},
+        "organisations": {"type": "array", "items": {"type": "string"}},
         "summary": {"type": "string"},
         "key_points": {"type": "array", "items": {"type": "string"}},
         "chapters": {
@@ -63,7 +70,7 @@ ANALYSIS_SCHEMA = {
             "additionalProperties": {"type": ["string", "null"]},
         },
     },
-    "required": ["keywords", "summary", "key_points", "chapters", "speakers"],
+    "required": ["keywords", "people", "organisations", "summary", "key_points", "chapters", "speakers"],
 }
 
 CLEANUP_PROMPT = """You are cleaning up an automated podcast transcript.
@@ -411,9 +418,12 @@ class TranscriptEnhancer:
             )
         except LLMError as e:
             logger.error(f"Transcript analysis failed: {e}")
-            return {"keywords": [], "summary": "", "key_points": [], "chapters": [], "speakers": {}}
+            return {"keywords": [], "people": [], "organisations": [], "summary": "", "key_points": [],
+                    "chapters": [], "speakers": {}}
 
         result["keywords"] = [k.strip().lower() for k in result.get("keywords", []) if k.strip()]
+        for field in ("people", "organisations"):
+            result[field] = list(dict.fromkeys(v.strip() for v in result.get(field) or [] if v and v.strip()))
         result["speakers"] = {k: v.strip() for k, v in (result.get("speakers") or {}).items() if v and v.strip()}
         return result
 
@@ -512,9 +522,14 @@ class TranscriptEnhancer:
                 checker=verifier.check_cleanup if verifier is not None else None,
             )
 
+        # graph links need one spelling per person: snap to speakers and confirmed glossary names
+        spellings = [*people, *glossary_terms]
         return {
             "cleaned_transcript": self.apply_speaker_names(cleaned, speakers),
             "keywords": analysis.get("keywords", []),
+            # a first name alone ("Fred") can't tell people apart
+            "people": list(dict.fromkeys(snap_name(p, spellings) for p in analysis.get("people", []) if " " in p)),
+            "organisations": list(dict.fromkeys(snap_name(o, glossary_terms) for o in analysis.get("organisations", []))),
             "sections": analysis.get("chapters", []),
             "summary": analysis.get("summary", ""),
             "key_points": analysis.get("key_points", []),
@@ -544,6 +559,8 @@ class TranscriptEnhancer:
             "summary": fix(analysis.get("summary", "")),
             "key_points": [fix(p) for p in analysis.get("key_points", [])],
             "keywords": [fix(k) for k in analysis.get("keywords", [])],
+            "people": [fix(p) for p in analysis.get("people", [])],
+            "organisations": [fix(o) for o in analysis.get("organisations", [])],
             "chapters": [
                 {**c, "name": fix(c.get("name", "")), "description": fix(c.get("description", ""))}
                 for c in analysis.get("chapters", [])
