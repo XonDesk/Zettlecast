@@ -199,7 +199,7 @@ _lookup = None
 
 
 def acoustic_scorer():
-    """Parakeet as an acoustic judge (~1.3 GB, kept loaded; fits next to the LLM)."""
+    """Parakeet as an acoustic judge (~1.3 GB, kept loaded for a run; fits next to the LLM)."""
     global _scorer
     if _scorer is None:
         import nemo.collections.asr as nemo_asr
@@ -211,6 +211,20 @@ def acoustic_scorer():
         model = nemo_asr.models.ASRModel.from_pretrained(settings.nemo_parakeet_model)
         _scorer = AcousticScorer(model.cuda().eval().half())
     return _scorer
+
+
+def release_acoustic_scorer() -> None:
+    """Free the acoustic judge: before transcription, and when a run ends (the API server lives on)."""
+    global _scorer
+    if _scorer is None:
+        return
+    import gc
+
+    import torch
+
+    _scorer = None
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 def name_lookup():
@@ -281,7 +295,7 @@ def _run_podcast_queue(
             callback returning False cancels that episode
         on_pass: Called with ("transcribe" | "enhance", episode count) as each pass starts
     """
-    from . import llm
+    from . import embeddings, llm
     from .podcast.asr_cache import load_asr, save_asr
     from .podcast.enhancer import TranscriptEnhancer
     from .podcast.formatter import save_result
@@ -327,7 +341,11 @@ def _run_podcast_queue(
     if to_transcribe:
         if on_pass:
             on_pass("transcribe", len(to_transcribe))
-        llm.unload()  # make room on the GPU for ASR
+        # make room on the GPU for ASR: the LLM, the acoustic judge and, in the API
+        # server, search models from an earlier search (they reload on use)
+        llm.unload()
+        release_acoustic_scorer()
+        embeddings.release_models(force=True)
         # Parakeet and Sortformer are reloaded per episode (a few seconds): a Parakeet kept
         # loaded across a diarization fails its next decode with an illegal memory access
         transcriber = NeMoTranscriber()
@@ -442,7 +460,10 @@ def run_podcast_queue(*args, **kwargs) -> QueueRunSummary:
     from . import embeddings
 
     with keep_awake(), embeddings.hold():
-        return _run_podcast_queue(*args, **kwargs)
+        try:
+            return _run_podcast_queue(*args, **kwargs)
+        finally:
+            release_acoustic_scorer()
 
 
 def reindex_all() -> int:

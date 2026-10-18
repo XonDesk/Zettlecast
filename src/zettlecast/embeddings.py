@@ -132,11 +132,14 @@ def rerank(query: str, passages: list[str], top_k: Optional[int] = None) -> list
 # --- Freeing the GPU ---
 
 
-def release_models() -> bool:
-    """Unload both models and return their GPU memory. False if busy or nothing loaded."""
+def release_models(force: bool = False) -> bool:
+    """
+    Unload both models and return their GPU memory. False if nothing is loaded, or a run
+    holds them (force: the run itself frees them before transcribing; they reload on use).
+    """
     global _embedder, _reranker
     with _lock:
-        if _holds or (_embedder is None and _reranker is None):
+        if (_holds and not force) or (_embedder is None and _reranker is None):
             return False
         _embedder = _reranker = None
         gc.collect()
@@ -144,7 +147,7 @@ def release_models() -> bool:
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-    logger.info("Search models unloaded (idle)")
+    logger.info("Search models unloaded")
     return True
 
 

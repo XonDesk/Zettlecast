@@ -57,7 +57,11 @@ def serve(port: int, no_frontend: bool):
         pass
     finally:
         for p in procs:
-            p.terminate()
+            if sys.platform == "win32":
+                # npm runs under a shell: terminate() would stop only the shell, leaving node running
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True)
+            else:
+                p.terminate()
         from . import llm
         llm.unload()
 
