@@ -471,6 +471,11 @@ def image_retry():
 
 
 def main():
+    # Redirected output defaults to the ANSI code page on Windows, and episode titles
+    # can hold any character ("⎮" stopped a whole queue run)
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     cli()
 
 
