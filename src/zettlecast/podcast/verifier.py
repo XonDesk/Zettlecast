@@ -77,10 +77,11 @@ KNOWN_NAME_SPELLING = 0.85
 RESPELLING_SUPPORT = 1.5
 # Candidate words this close to a known spelling are also tried in that spelling ("Bennett" -> "Benat")
 SNAP_CUTOFF = 0.65
-# A respelling keeps the sounds: letters mostly agree (ratio) and the length barely changes,
-# so dropping or adding a word ("Coach Jason Koop" -> "Jason Koop") is not one
-RESPELL_SIMILARITY = 0.6
-RESPELL_LENGTH = 0.75
+# A respelling keeps the sounds: no word is dropped or added ("Coach Jason Koop" -> "Jason
+# Koop" is not one) and each replaced run sounds alike, compared by Metaphone codes ("Kube"
+# KB ~ "Koop" KP, "Benette" BNT = "Benat"), which letters can't see
+RESPELL_SIMILARITY = 0.5
+RESPELL_LENGTH = 0.6
 # The audio "prefers" a change when it fits at least as well as what was recognised
 AUDIO_PREFERS = 0.0
 _PREFIX = re.compile(r"^(\[[\d.]+s - [\d.]+s\] [^:]+: )(.*)$")
@@ -256,15 +257,27 @@ def _spoken_names(written: str, transcript: str) -> List[str]:
     return out
 
 
+def _sound(text: str) -> str:
+    """Metaphone code of a phrase ("Coop Cast" -> "KPKST")."""
+    import jellyfish
+
+    return "".join(jellyfish.metaphone(w) for w in (re.sub(r"[^A-Za-z]", "", t) for t in text.split()) if w)
+
+
 def _respells(old: str, new: str) -> bool:
     """Same sounds, other letters ("Coop Cast" -> "KoopCast", "Benette" -> "Bennett")."""
-    a, b = "".join(map(_key, old.split())), "".join(map(_key, new.split()))
-    if not a or not b or a == b:
+    a, b = old.split(), new.split()
+    matcher = difflib.SequenceMatcher(a=[_key(w) for w in a], b=[_key(w) for w in b], autojunk=False)
+    ops = [op for op in matcher.get_opcodes() if op[0] != "equal"]
+    if not ops or any(op[0] != "replace" for op in ops):
         return False
-    return (
-        min(len(a), len(b)) / max(len(a), len(b)) >= RESPELL_LENGTH
-        and difflib.SequenceMatcher(None, a, b).ratio() >= RESPELL_SIMILARITY
-    )
+    for _, i1, i2, j1, j2 in ops:
+        x, y = _sound(" ".join(a[i1:i2])), _sound(" ".join(b[j1:j2]))
+        if not x or not y or min(len(x), len(y)) / max(len(x), len(y)) < RESPELL_LENGTH:
+            return False
+        if difflib.SequenceMatcher(None, x, y).ratio() < RESPELL_SIMILARITY:
+            return False
+    return True
 
 
 def _contains(words: List[str], text: str) -> bool:
