@@ -90,10 +90,21 @@ def get_suggestions_for_note(note_uuid: str, limit: int = 5) -> List[LinkSuggest
             title=titles[other][0],
             score=round(float(edge["weight"]), 4),
             reason=link_reason(edge),
+            kind=edge.get("kind") or "similar",
+            passage=_passage_from(edge, note_uuid),
         )
         for edge, other in zip(edges, others)
         if other in titles
     ][:limit]
+
+
+def _passage_from(edge: dict, note_uuid: str) -> Optional[dict]:
+    """The edge's best passage pair as seen from note_uuid: {here, there}."""
+    pair = json.loads(edge.get("reason_json") or "{}").get("passage")
+    if not pair:
+        return None
+    here, there = ("source", "target") if edge["source_uuid"] == note_uuid else ("target", "source")
+    return {"here": pair[here], "there": pair[there], "similarity": pair.get("similarity")}
 
 
 def link_reason(edge: dict) -> str:

@@ -110,16 +110,29 @@ def _split_transcript(text: str, chunk_size: int) -> List[str]:
     return chunks
 
 
+# The pipeline's own reports in a transcript note: not content, so never searched or linked on
+# (their fixed wording made every episode "match" every other)
+UNINDEXED_SECTIONS = ("Automatic Corrections", "Needs Review")
+
+
+def _drop_sections(text: str, titles: tuple) -> str:
+    """Remove '## <title>' sections (heading to the next '## ') from markdown."""
+    parts = re.split(r"(?m)^(?=## )", text)
+    return "".join(p for p in parts if not any(p.startswith(f"## {t}") for t in titles))
+
+
 def create_chunks(text: str, base_chunk_id: str) -> List[ChunkModel]:
     """
     Create ChunkModel instances from text.
 
     Markdown sections before a "## Transcript" heading (summary, key points,
-    chapters) are chunked as prose; the transcript is chunked by speaker turn.
+    chapters, show notes) are chunked as prose, without the verification reports;
+    the transcript is chunked by speaker turn.
     """
     chunk_size = settings.chunk_size
     if "\n## Transcript\n" in text:
         head, transcript = text.split("\n## Transcript\n", 1)
+        head = _drop_sections(head, UNINDEXED_SECTIONS)
         raw_chunks = recursive_split(head.strip()) + _split_transcript(transcript, chunk_size)
     else:
         raw_chunks = recursive_split(text)

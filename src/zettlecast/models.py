@@ -81,3 +81,7 @@ class LinkSuggestion(BaseModel):
     title: str
     score: float
     reason: Optional[str] = Field(default=None, description="Why this note is related")
+    kind: str = "similar"  # similar | duplicate | link
+    passage: Optional[dict] = Field(
+        default=None, description="Most alike passages: {here: {text, time}, there: {text, time}}"
+    )

@@ -195,7 +195,7 @@ async def get_note(
     }
     
     if include_suggestions:
-        suggestions = get_suggestions_for_note(uuid)
+        suggestions = get_suggestions_for_note(uuid, limit=50)  # all of its links, strongest first
         response["suggestions"] = [s.model_dump() for s in suggestions]
     
     return response

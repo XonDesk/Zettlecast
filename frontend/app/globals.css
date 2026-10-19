@@ -455,6 +455,91 @@ a:hover > .search-result-title,
   color: var(--color-text-muted);
 }
 
+.legend-community {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 0.125rem 0.5rem 0.125rem 0.375rem;
+  color: var(--color-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.legend-community:hover,
+.legend-community[aria-pressed='true'] {
+  border-color: var(--color-border);
+  background: var(--color-bg-tertiary);
+}
+
+.legend-ring {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #475569;
+  box-sizing: border-box;
+}
+
+.legend-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.75rem;
+  max-width: 100%;
+}
+
+.legend-group-title {
+  color: var(--color-text-muted);
+  margin-right: 0.25rem;
+}
+
+.graph-community-labels {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.graph-community-label {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  max-width: 220px;
+  padding: 0.125rem 0.5rem;
+  border-radius: 0.25rem;
+  background: rgba(15, 23, 42, 0.8);
+  border: 1px solid var(--color-border);
+  color: var(--color-text);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.graph-panel-reason {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  padding: 0 0.5rem 0.25rem;
+}
+
+.graph-panel-passage {
+  margin: 0.25rem 0.5rem 0.5rem;
+  padding: 0.375rem 0.5rem;
+  border-left: 2px solid var(--color-border);
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  line-height: 1.45;
+}
+
+.graph-panel-passage time {
+  color: var(--color-text);
+  font-variant-numeric: tabular-nums;
+  margin-right: 0.375rem;
+}
+
 .graph-panel {
   position: absolute;
   top: 5rem;
@@ -503,9 +588,14 @@ a:hover > .search-result-title,
 
 .graph-panel-links li {
   display: flex;
+  flex-direction: column;
+  font-size: 0.875rem;
+}
+
+.graph-panel-link-row {
+  display: flex;
   align-items: center;
   gap: 0.5rem;
-  font-size: 0.875rem;
 }
 
 .graph-panel-links button {
@@ -560,6 +650,12 @@ a:hover > .search-result-title,
 
 .suggestion-title {
   font-weight: 500;
+  margin-bottom: 0.25rem;
+}
+
+.suggestion-reason {
+  font-size: 0.8125rem;
+  color: var(--color-text-secondary, var(--color-text));
   margin-bottom: 0.25rem;
 }
 

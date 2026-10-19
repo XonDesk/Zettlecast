@@ -234,14 +234,17 @@ export default function NoteDetailPage() {
                                         <Link href={`/notes/${s.uuid}`} className="suggestion-title" style={{ display: 'block' }}>
                                             {s.title}
                                         </Link>
-                                        <div className="suggestion-score" title={s.reason}>Score: {s.score.toFixed(3)}</div>
+                                        {s.reason && <div className="suggestion-reason">{s.reason}</div>}
+                                        <div className="suggestion-score">Score: {s.score.toFixed(3)}</div>
                                         <div className="suggestion-actions">
-                                            <button
-                                                className="btn btn-primary"
-                                                onClick={() => handleAcceptLink(s.uuid)}
-                                            >
-                                                Accept
-                                            </button>
+                                            {s.kind !== 'link' && (
+                                                <button
+                                                    className="btn btn-primary"
+                                                    onClick={() => handleAcceptLink(s.uuid)}
+                                                >
+                                                    Accept
+                                                </button>
+                                            )}
                                             <button
                                                 className="btn btn-secondary"
                                                 onClick={() => handleRejectLink(s.uuid)}

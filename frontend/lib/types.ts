@@ -28,11 +28,19 @@ export interface NoteMetadata {
     custom: Record<string, unknown>;
 }
 
+export interface PassageSide {
+    text: string;
+    time: number | null;
+}
+
 export interface LinkSuggestion {
     uuid: string;
     title: string;
     score: number;
     reason?: string;
+    kind?: 'similar' | 'duplicate' | 'link';
+    /** Most alike passages, from the viewed note ("here") and the linked one ("there") */
+    passage?: { here: PassageSide; there: PassageSide; similarity?: number } | null;
 }
 
 export interface SearchResult {
@@ -56,17 +64,26 @@ export interface GraphNode {
     name: string;
     source_type: string;
     val: number;
+    community: number | null;
 }
 
 export interface GraphLink {
     source: string;
     target: string;
     value: number;
+    kind: 'similar' | 'duplicate' | 'link';
+}
+
+export interface GraphCommunity {
+    id: number;
+    label: string;
+    size: number;
 }
 
 export interface GraphData {
     nodes: GraphNode[];
     links: GraphLink[];
+    communities: GraphCommunity[];
 }
 
 export interface Settings {

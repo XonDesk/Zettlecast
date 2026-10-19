@@ -7,9 +7,9 @@ Notes are the only nodes. An edge's weight combines three signals:
   each source group's mean: a podcast show, a website, the images). Embedding models make
   every text look somewhat alike (raw cosine 0.5-0.7 between any two episodes); centring
   removes that, and balancing keeps one big show from defining "average" for everything else
-- passage: the share of each note's passages that closely match a passage of the other.
-  Passages repeated across a source group (intros, sponsor reads) are skipped. The best
-  pair is kept as the link's reason
+- passage: the share of each note's passages that closely match a passage of the other
+  (passage vectors centred the same way). Passages repeated across a source group (intros,
+  sponsor reads) are skipped. The best pair is kept as the link's reason
 - entity: shared topics, people and organisations, weighted by rarity (IDF): the host who
   is in every episode adds nothing, a shared guest or a rare topic a lot
 
@@ -328,6 +328,10 @@ def build(notes: Optional[List[dict]] = None, chunks: Optional[List[dict]] = Non
     semantic = np.clip(centred @ centred.T, 0, 1)
     np.fill_diagonal(semantic, 0)
     passages = load_passages(notes, chunks)
+    # passages are centred too: what all passages share ("interview talk": the host's usual
+    # questions, greetings) would otherwise outscore two passages on the same subject
+    owner = np.repeat(np.arange(len(notes)), np.diff(passages.offsets))
+    passages.vectors = balanced_centre(passages.vectors, [groups[o] for o in owner])
     uuids = [n["uuid"] for n in notes]
     shares = passage_shares(passages, groups, uuids.index(focus) if focus in uuids else None)
     passage = (shares + shares.T) / 2

@@ -88,3 +88,20 @@ class TestTranscriptChunking:
         for c in transcript_chunks:
             assert "[100.0s] Jason Koop:" in c or "[100.0s - 400.0s] Jason Koop:" in c
         assert any(c.text.startswith("## Summary") for c in chunks)
+
+
+def test_verification_reports_are_not_indexed():
+    from zettlecast.chunker import create_chunks
+
+    filler = " It is discussed at length with examples from training camps and races." * 6
+    text = (
+        "## Summary\n\nHeat training raises plasma volume." + filler + "\n\n"
+        "## Automatic Corrections\n\nChecked against the audio (penalty: extra acoustic cost)\n"
+        "- [12s] Coop -> **Koop**" + filler + "\n\n"
+        "## Needs Review\n\n- [40s] Ryan or Ryne" + filler + "\n\n"
+        "## Show Notes\n\nGuest bio and links." + filler + "\n\n"
+        "## Transcript\n[0.0s - 5.0s] Jason Koop: Welcome to the show about heat training." + filler
+    )
+    joined = " ".join(c.text for c in create_chunks(text, "n"))
+    assert "plasma volume" in joined and "Guest bio" in joined
+    assert "Checked against the audio" not in joined and "Ryan or Ryne" not in joined

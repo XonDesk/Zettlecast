@@ -92,8 +92,9 @@ class Settings(BaseSettings):
     graph_weight_entity: float = 0.2
     graph_max_edges_per_note: int = 6  # Each note keeps its k best partners; edges = union of these
     graph_min_weight: float = 0.05  # Below this a "best partner" is no relation at all
-    graph_passage_similarity: float = 0.8  # Chunk pairs at least this alike count as matching passages
-    graph_boilerplate_similarity: float = 0.9  # Near-duplicate passages repeated across a source group...
+    # passage thresholds are on centred chunk vectors (0.6 ~ the top 7% of each passage's best match)
+    graph_passage_similarity: float = 0.6  # Chunk pairs at least this alike count as matching passages
+    graph_boilerplate_similarity: float = 0.55  # Passages this alike repeated across a source group...
     graph_boilerplate_share: float = 0.2  # ...in this share of its notes (intros, sponsor reads) are skipped
     graph_duplicate_share: float = 0.9  # Notes sharing this share of passages are the same content
     graph_resolution: float = 1.0  # Leiden resolution: higher = more, smaller communities
