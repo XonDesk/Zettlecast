@@ -407,6 +407,20 @@ class TranscriptionQueue:
             self.items[job_id].attempts += 1
             self._save_state()
 
+    def release(self, job_ids) -> int:
+        """Put unfinished jobs of a stopped run back to pending (the attempt isn't counted)."""
+        count = 0
+        for job_id in job_ids:
+            item = self.items.get(job_id)
+            if item and item.status == "processing":
+                item.status = "pending"
+                item.started_at = item.worker_pid = None
+                item.attempts = max(0, item.attempts - 1)
+                count += 1
+        if count:
+            self._save_state()
+        return count
+
     def mark_completed(self, job_id: str, result: TranscriptionResult, result_path: Path):
         """Mark a job as completed."""
         if job_id in self.items:

@@ -3,6 +3,7 @@ Zettlecast FastAPI Main Application
 API endpoints for ingestion, search, and note management.
 """
 
+import asyncio
 import logging
 import mimetypes
 import re
@@ -634,6 +635,7 @@ def _run_transcription_background(limit: int = None):
             on_episode_start=on_start,
             on_episode_done=on_done,
             progress_for=progress_for,
+            source="api",
         )
     except Exception as e:
         logger.exception(f"Background transcription error: {e}")
@@ -661,6 +663,16 @@ async def run_podcast_processing(
             "current_episode": _processing_state["current_episode"],
             "processed_count": _processing_state["processed_count"],
             "message": "Transcription is already running",
+        }
+    from . import runstate
+
+    other = runstate.active_run()
+    if other:
+        return {
+            "status": "already_running",
+            "current_episode": other.get("episode_title"),
+            "processed_count": other.get("completed", 0),
+            "message": f"A run is already going ({other.get('source')}, pid {other.get('pid')})",
         }
     
     try:
@@ -750,6 +762,66 @@ async def cancel_podcast_episode(episode_id: str, token: str = Query(...)):
     except Exception as e:
         logger.error(f"Failed to cancel episode: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- System (process page) ---
+
+
+@app.get("/system/status")
+async def system_status(token: str = Query(...)):
+    """Everything the process page shows: run, queues, GPU, LLM server, database, disk, alarms."""
+    from . import system
+
+    return await asyncio.to_thread(system.status)
+
+
+class StopRequest(BaseModel):
+    mode: str = "after_episode"  # after_episode | abort
+
+
+@app.post("/system/run/stop")
+async def system_run_stop(body: StopRequest, token: str = Query(...)):
+    """Stop the run (CLI or API): after the current episode, or now (abort)."""
+    from . import runstate, system
+
+    if body.mode == "abort":
+        if _processing_state["is_running"] and _processing_state["current_episode_id"]:
+            global _cancel_episode_id
+            with _cancel_lock:
+                _cancel_episode_id = _processing_state["current_episode_id"]
+            runstate.request_stop()
+            return {"status": "stopping", "message": "Cancelling the current episode, then stopping"}
+        return await asyncio.to_thread(system.abort_run)
+    if not runstate.active_run():
+        return {"status": "not_running"}
+    runstate.request_stop()
+    return {"status": "stopping", "message": "The run stops after the current episode"}
+
+
+@app.post("/system/run/resume")
+async def system_run_resume(token: str = Query(...)):
+    """Withdraw a stop request that hasn't taken effect yet."""
+    from . import runstate
+
+    runstate.clear_stop()
+    return {"status": "resumed"}
+
+
+@app.post("/system/unload")
+async def system_unload(token: str = Query(...)):
+    """Free the GPU: stop the LLM server, unload Ollama and this process's models (not during a run)."""
+    from . import system
+
+    return await asyncio.to_thread(system.free_gpu)
+
+
+@app.post("/system/reindex")
+async def system_reindex(token: str = Query(...)):
+    """Re-read every transcript note, re-embed it and rebuild the graph (background task)."""
+    from . import system
+    from .pipeline import reindex_all
+
+    return system.start_task("reindex", lambda: {"notes": reindex_all()})
 
 
 # --- Settings ---

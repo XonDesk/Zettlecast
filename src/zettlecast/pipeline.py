@@ -12,6 +12,7 @@ its models before enhancement starts.
 """
 
 import logging
+import os
 import sys
 import time
 from contextlib import contextmanager
@@ -277,6 +278,7 @@ def _run_podcast_queue(
     on_episode_done: Optional[Callable[[EpisodeOutcome], None]] = None,
     progress_for: Optional[Callable[[str], ProgressCallback]] = None,
     on_pass: Optional[Callable[[str, int], None]] = None,
+    run=None,
 ) -> QueueRunSummary:
     """
     Process pending podcast episodes in two passes:
@@ -296,7 +298,12 @@ def _run_podcast_queue(
         progress_for: Returns a progress callback for an episode id; the
             callback returning False cancels that episode
         on_pass: Called with ("transcribe" | "enhance", episode count) as each pass starts
+        run: runstate.RunState publishing progress for the process page. A stop request
+            (runstate.request_stop) ends the run after the current episode; the rest go
+            back to pending
     """
+    from . import runstate
+
     from . import embeddings, llm
     from .podcast.asr_cache import load_asr, save_asr
     from .podcast.enhancer import TranscriptEnhancer
@@ -318,10 +325,23 @@ def _run_podcast_queue(
     def title_of(episode: PodcastEpisode) -> str:
         return episode.episode_title or Path(episode.audio_path).stem
 
-    def finish(outcome: EpisodeOutcome) -> None:
+    def finish(outcome: EpisodeOutcome, audio_seconds: float = 0.0) -> None:
         summary.outcomes.append(outcome)
+        if run:
+            run.done(outcome.title, outcome.status, outcome.processing_seconds or 0.0, audio_seconds)
         if on_episode_done:
             on_episode_done(outcome)
+
+    def watched(episode_id: str) -> Optional[ProgressCallback]:
+        """The caller's progress callback (cancellation), also reporting stages to the run state."""
+        inner = progress_for(episode_id) if progress_for else None
+        names = {"chunking": "decode", "transcribing": "asr", "diarizing": "diarize", "aligning": "align"}
+
+        def callback(stage: str, chunk: int, total: int, device: str) -> bool:
+            if run and stage in names:
+                run.stage(names[stage], chunk, total)
+            return inner(stage, chunk, total, device) if inner else True
+        return callback
 
     def fail(episode: PodcastEpisode, error: Exception) -> None:
         outcome = EpisodeOutcome(episode_id=episode.id, title=title_of(episode), status="failed")
@@ -343,6 +363,8 @@ def _run_podcast_queue(
     if to_transcribe:
         if on_pass:
             on_pass("transcribe", len(to_transcribe))
+        if run:
+            run.phase("transcribe", len(to_transcribe))
         # make room on the GPU for ASR: the LLM, the acoustic judge and, in the API
         # server, search models from an earlier search (they reload on use)
         llm.unload()
@@ -353,18 +375,23 @@ def _run_podcast_queue(
         transcriber = NeMoTranscriber()
         try:
             for episode in to_transcribe:
+                if runstate.stop_requested():
+                    break
                 if on_episode_start:
                     on_episode_start(episode.id, title_of(episode))
+                if run:
+                    run.episode(episode.id, title_of(episode))
                 queue.mark_started(episode.id)
                 started = time.time()
                 try:
-                    progress = progress_for(episode.id) if progress_for else None
                     result = transcriber.transcribe(
-                        Path(episode.audio_path), episode=episode, progress_callback=progress
+                        Path(episode.audio_path), episode=episode, progress_callback=watched(episode.id)
                     )
                     save_asr(Path(episode.audio_path), result)
                     results[episode.id] = result
                     elapsed[episode.id] = time.time() - started
+                    if run:
+                        run.done(title_of(episode), "completed", elapsed[episode.id], count=False)
                 except Exception as e:  # one episode must not stop the batch
                     fail(episode, e)
         finally:
@@ -372,22 +399,35 @@ def _run_podcast_queue(
 
     # --- Pass 2: analysis, verified corrections, note, index ---
     episodes = [i.episode for i in items if i.episode.id in results]
+    if runstate.stop_requested():
+        queue.release([i.episode.id for i in items])
+        return summary
     if not episodes:
         return summary
     if on_pass:
         on_pass("enhance", len(episodes))
+    if run:
+        run.phase("enhance", len(episodes))
     enhancer = TranscriptEnhancer() if enhance else None
     if enhancer and verify:
         _seed_glossaries(episodes, results)
 
-    for episode in episodes:
+    for n, episode in enumerate(episodes):
+        if runstate.stop_requested():
+            released = queue.release([e.id for e in episodes[n:]])
+            logger.info(f"Stopped on request; {released} episode(s) back to pending")
+            break
         result = results[episode.id]
         title = title_of(episode)
         if on_episode_start:
             on_episode_start(episode.id, title)
+        if run:
+            run.episode(episode.id, title)
         progress = progress_for(episode.id) if progress_for else None
 
         def check_cancel(stage: str) -> None:
+            if run and stage in ("save", "index", "link"):
+                run.stage(stage)
             if progress and progress(stage, 0, 0, "cuda") is False:
                 raise CancellationError("Cancelled by user")
 
@@ -416,19 +456,22 @@ def _run_podcast_queue(
                     known_speakers=speakers,
                     published_speakers=published_speaker_names(ref, result),
                     verifier=verifier,
+                    on_stage=run.stage if run else None,
                 )
                 result.keywords = enhanced["keywords"]
                 result.sections = enhanced["sections"]
                 result.summary = enhanced["summary"]
                 result.key_points = enhanced["key_points"]
 
-            check_cancel("saving")
+            check_cancel("save")
             note_path = save_result(result, episode, enhanced)
             parsed = parse_file(note_path)
             if parsed.status != "success" or not parsed.note:
                 raise RuntimeError(f"Could not read back transcript note: {parsed.error_message}")
-            check_cancel("indexing")
-            ingest_note(parsed.note)
+            check_cancel("index")
+            db.upsert_note(parsed.note)
+            check_cancel("link")
+            update_edges_for_note(parsed.note.uuid)
             if verifier is not None:
                 from .podcast.verifier import save_glossary
 
@@ -449,7 +492,7 @@ def _run_podcast_queue(
                 duration_seconds=result.duration_seconds,
                 processing_seconds=elapsed.get(episode.id, 0.0) + time.time() - started,
                 speakers=result.speakers_detected,
-            ))
+            ), audio_seconds=result.duration_seconds)
         except Exception as e:
             fail(episode, e)
         finally:
@@ -467,27 +510,40 @@ def _empty_cuda_cache() -> None:
         torch.cuda.empty_cache()
 
 
-def run_podcast_queue(*args, **kwargs) -> QueueRunSummary:
-    """
-    Process pending podcast episodes end to end, keeping the PC awake meanwhile.
-    Arguments: see _run_podcast_queue.
-    """
-    from . import embeddings
+class RunActiveError(RuntimeError):
+    """Another process is already running the queue (only one run can use the GPU)."""
 
-    with keep_awake(), embeddings.hold():
-        try:
-            summary = _run_podcast_queue(*args, **kwargs)
-        finally:
-            release_acoustic_scorer()
-    if summary.completed:
-        # each episode was linked as it finished; communities and the k-best union need everything
-        from .linker import rebuild_graph
 
-        try:
-            rebuild_graph()
-        except Exception:
-            logger.exception("Graph rebuild after the run failed (run `zettlecast graph rebuild`)")
-    return summary
+def run_podcast_queue(*args, source: str = "cli", **kwargs) -> QueueRunSummary:
+    """
+    Process pending podcast episodes end to end, keeping the PC awake meanwhile and
+    publishing progress to the run state (source: "cli" | "api", shown on the process page).
+    Arguments: see _run_podcast_queue. Raises RunActiveError if a run is already going.
+    """
+    from . import embeddings, runstate
+
+    other = runstate.active_run()
+    if other and other.get("pid") != os.getpid():
+        raise RunActiveError(f"A run is already going ({other.get('source')}, pid {other.get('pid')})")
+    run = runstate.RunState(source)
+    try:
+        with keep_awake(), embeddings.hold():
+            try:
+                summary = _run_podcast_queue(*args, run=run, **kwargs)
+            finally:
+                release_acoustic_scorer()
+        if summary.completed:
+            # each episode was linked as it finished; communities and the k-best union need everything
+            from .linker import rebuild_graph
+
+            run.phase("graph")
+            try:
+                rebuild_graph()
+            except Exception:
+                logger.exception("Graph rebuild after the run failed (run `zettlecast graph rebuild`)")
+        return summary
+    finally:
+        run.finish()
 
 
 def reindex_all() -> int:

@@ -6,7 +6,7 @@ Pydantic Settings for all configurable options.
 import secrets
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -62,7 +62,7 @@ class Settings(BaseSettings):
 
     # --- LLM (Ollama) ---
     ollama_model: str = "qwen3.6:35b-a3b"  # Text + vision, 256K context
-    ollama_base_url: str = "http://localhost:11434"
+    ollama_base_url: str = "http://127.0.0.1:11434"
     llm_num_ctx: int = 32768  # Context window requested from Ollama
     llm_timeout_seconds: int = 600
     llm_seed: int | None = 42  # Fixed sampling seed: reprocessing gives the same note (None = random)
@@ -107,6 +107,13 @@ class Settings(BaseSettings):
     vision_model: str = "qwen3.6:35b-a3b"  # Same model as text: no model swapping
     max_image_size_mb: int = 25
     image_max_retries: int = 3
+
+    @field_validator("ollama_base_url")
+    @classmethod
+    def _ipv4_loopback(cls, url: str) -> str:
+        # On Windows "localhost" tries IPv6 ::1 first; Ollama listens on IPv4 only, so every
+        # request waited ~2 s for the fallback
+        return url.replace("//localhost:", "//127.0.0.1:")
 
     def ensure_directories(self) -> None:
         """Create storage directories if they don't exist."""

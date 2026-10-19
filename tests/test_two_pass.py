@@ -42,7 +42,8 @@ def run(tmp_path, queue, events):
                side_effect=lambda: FakeTranscriber(events)), \
          patch("zettlecast.podcast.formatter.save_result", side_effect=save_result), \
          patch.object(pipeline, "parse_file", return_value=parsed), \
-         patch.object(pipeline, "ingest_note"), \
+         patch.object(pipeline.db, "upsert_note"), \
+         patch.object(pipeline, "update_edges_for_note"), \
          patch("zettlecast.llm.unload"):
         return pipeline._run_podcast_queue(enhance=False, sync=False)
 

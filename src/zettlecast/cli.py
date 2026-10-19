@@ -325,16 +325,22 @@ def podcast_run(limit: int, no_enhance: bool, no_verify: bool, no_sync: bool):
         else:
             click.echo(f"    {o.status.upper()}: {o.error or ''}\n")
 
-    summary = run_podcast_queue(
-        limit=limit,
-        enhance=not no_enhance,
-        verify=not no_verify,
-        sync=False,
-        on_episode_start=start,
-        on_episode_done=done,
-        progress_for=progress_for,
-        on_pass=on_pass,
-    )
+    from .pipeline import RunActiveError
+
+    try:
+        summary = run_podcast_queue(
+            limit=limit,
+            enhance=not no_enhance,
+            verify=not no_verify,
+            sync=False,
+            on_episode_start=start,
+            on_episode_done=done,
+            progress_for=progress_for,
+            on_pass=on_pass,
+            source="cli",
+        )
+    except RunActiveError as e:
+        raise click.ClickException(str(e))
     click.echo(f"Completed {summary.completed}, failed {summary.failed}")
 
 

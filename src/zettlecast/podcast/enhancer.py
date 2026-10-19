@@ -455,6 +455,7 @@ class TranscriptEnhancer:
         known_speakers: Optional[List[str]] = None,
         published_speakers: Optional[Dict[str, str]] = None,
         verifier=None,
+        on_stage: Optional[Callable[[str], None]] = None,
     ) -> dict:
         """
         Run the full enhancement pipeline.
@@ -470,6 +471,8 @@ class TranscriptEnhancer:
             Dict with cleaned_transcript, keywords, sections, summary, key_points,
             speakers, verified_speakers, uncertain_corrections, corrections, verification
         """
+        stage = on_stage or (lambda _name: None)
+        stage("analyse")
         analysis = self.analyze(
             transcript,
             podcast=podcast,
@@ -508,9 +511,11 @@ class TranscriptEnhancer:
         if verifier is not None:
             from .verifier import Suspect
 
+            stage("suspects")
             found = self.find_suspects(
                 verifier.text(), context=vocabulary[:MAX_VOCABULARY_CHARS] + "\n", hints=verifier.publisher_hints()
             )
+            stage("verify")
             corrections = verifier.resolve(
                 [Suspect(int(s["line"]), s["text"], list(s.get("candidates") or []),
                          s.get("confidence", "medium"), s.get("about") or "")
@@ -528,6 +533,7 @@ class TranscriptEnhancer:
 
         cleaned, uncertain = transcript, []
         if cleanup:
+            stage("cleanup")
             cleaned, uncertain = self.cleanup_transcript(
                 transcript, speaker_names=speakers, vocabulary=vocabulary,
                 checker=verifier.check_cleanup if verifier is not None else None,
