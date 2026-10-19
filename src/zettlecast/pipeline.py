@@ -476,9 +476,18 @@ def run_podcast_queue(*args, **kwargs) -> QueueRunSummary:
 
     with keep_awake(), embeddings.hold():
         try:
-            return _run_podcast_queue(*args, **kwargs)
+            summary = _run_podcast_queue(*args, **kwargs)
         finally:
             release_acoustic_scorer()
+    if summary.completed:
+        # each episode was linked as it finished; communities and the k-best union need everything
+        from .linker import rebuild_graph
+
+        try:
+            rebuild_graph()
+        except Exception:
+            logger.exception("Graph rebuild after the run failed (run `zettlecast graph rebuild`)")
+    return summary
 
 
 def reindex_all() -> int:

@@ -34,6 +34,8 @@ class VisionExtraction(BaseModel):
     description: str  # Scene description (2-3 sentences)
     detected_text: str  # OCR content
     concepts: List[str] = Field(default_factory=list)  # Object/concept tags
+    people: List[str] = Field(default_factory=list)  # Full names shown or named
+    organisations: List[str] = Field(default_factory=list)
     confidence_scores: Optional[Dict[str, float]] = None  # Optional confidence metrics
 
 

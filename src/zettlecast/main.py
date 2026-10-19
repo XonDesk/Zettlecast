@@ -355,33 +355,54 @@ async def get_graph_data(
     limit: int = Query(2000, ge=1, le=10000),
 ):
     """
-    Get graph nodes and edges for visualization.
-    
-    Returns nodes (notes) and links (edges) in a format optimized
-    for react-force-graph-2d.
+    Graph nodes (notes), links (edges) and communities for the graph view.
+
+    A note added since the last rebuild has no community yet: it takes its neighbours' most
+    common one (weighted), or none.
     """
     notes = db.list_notes(limit=limit)
     ids = {n["uuid"] for n in notes}
+    edges = [e for e in db.get_all_edges() if e["source_uuid"] in ids and e["target_uuid"] in ids]
     links = [
-        {"source": e["source_uuid"], "target": e["target_uuid"], "value": round(float(e["weight"]), 3)}
-        for e in db.get_all_edges()
-        if e["source_uuid"] in ids and e["target_uuid"] in ids
+        {"source": e["source_uuid"], "target": e["target_uuid"], "value": round(float(e["weight"]), 3),
+         "kind": e.get("kind") or "similar"}
+        for e in edges
     ]
+    stored = db.get_communities()
+    community = {u: int(c["community"]) for c in stored for u in c["members"]}
+    votes: dict = {}
+    for e in edges:
+        for a, b in ((e["source_uuid"], e["target_uuid"]), (e["target_uuid"], e["source_uuid"])):
+            if a not in community and b in community:
+                votes.setdefault(a, {}).setdefault(community[b], 0.0)
+                votes[a][community[b]] += float(e["weight"])
+    for uuid, scores in votes.items():
+        community[uuid] = max(scores, key=scores.get)
+
     degree: dict = {}
     for link in links:
         for end in (link["source"], link["target"]):
             degree[end] = degree.get(end, 0) + 1
-
     nodes = [
         {
             "id": n["uuid"],
             "name": n["title"],
             "source_type": n["source_type"],
             "val": 1 + degree.get(n["uuid"], 0),  # node size: more links, bigger node
+            "community": community.get(n["uuid"]),
         }
         for n in notes
     ]
-    return {"nodes": nodes, "links": links}
+    sizes: dict = {}
+    for n in nodes:
+        if n["community"] is not None:
+            sizes[n["community"]] = sizes.get(n["community"], 0) + 1
+    communities = [
+        {"id": int(c["community"]), "label": c["label"], "size": sizes.get(int(c["community"]), 0)}
+        for c in stored if sizes.get(int(c["community"]))
+    ]
+    communities.sort(key=lambda c: -c["size"])
+    return {"nodes": nodes, "links": links, "communities": communities}
 
 
 @app.post("/graph/rebuild")

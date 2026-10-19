@@ -34,6 +34,10 @@ dependencies = [
     "jiwer>=3.0",  # transcript verification against published transcripts
     "jellyfish>=1.0",  # Metaphone: is a correction a respelling (same sounds) or other words
 
+    # Knowledge graph
+    "igraph>=1.0",
+    "leidenalg>=0.12",  # communities: Leiden keeps every community internally connected
+
     # Document parsing
     "pypdf>=5.1.0",
     "marker-pdf>=0.3.0",

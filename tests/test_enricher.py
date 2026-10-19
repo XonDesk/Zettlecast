@@ -64,3 +64,12 @@ def test_llm_failure_leaves_note_unchanged():
         note = enrich_note(make_note())
     assert note.metadata.tags == []
     assert "summary" not in note.metadata.custom
+
+
+def test_keeps_full_names_and_organisations_for_graph_links():
+    reply = {"tags": ["gut training"], "summary": "S", "people": ["Isabel Martinez", "Fred", " "],
+             "organisations": ["Monash University", "Monash University"]}
+    with patch("zettlecast.enricher.chat", return_value=reply):
+        note = enrich_note(make_note())
+    assert note.metadata.custom["people"] == ["Isabel Martinez"]
+    assert note.metadata.custom["organisations"] == ["Monash University"]

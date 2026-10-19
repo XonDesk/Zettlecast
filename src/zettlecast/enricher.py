@@ -1,8 +1,8 @@
 """
 Content Enricher Module
 
-LLM-generated tags and a one-sentence summary for notes that don't already
-have them (PDFs, web pages, markdown). Podcast transcripts get theirs from the
+LLM-generated topic tags, people, organisations and a one-sentence summary for notes
+that don't already have them (PDFs, web pages, markdown). Podcast transcripts get theirs from the
 podcast enhancer and images from the vision step.
 """
 
@@ -15,7 +15,11 @@ from .models import NoteModel
 logger = logging.getLogger(__name__)
 
 ENRICH_PROMPT = """Read this document and return:
-- "tags": exactly {count} short lowercase topic keywords that best describe it
+- "tags": exactly {count} short lowercase topic keywords that best describe it: subjects,
+  concepts and methods in their most common general form. No names of people or organisations.
+- "people": full names of the people it is about or quotes in some depth (not passing mentions)
+- "organisations": named organisations, institutions, companies, products, races and events
+  it discusses in some depth
 - "summary": one concise sentence (max 150 characters) stating its main point
 
 Title: {title}
@@ -27,10 +31,24 @@ ENRICH_SCHEMA = {
     "type": "object",
     "properties": {
         "tags": {"type": "array", "items": {"type": "string"}},
+        "people": {"type": "array", "items": {"type": "string"}},
+        "organisations": {"type": "array", "items": {"type": "string"}},
         "summary": {"type": "string"},
     },
-    "required": ["tags", "summary"],
+    "required": ["tags", "people", "organisations", "summary"],
 }
+
+
+def _add_names(note: NoteModel, result: dict) -> None:
+    """People (full names only) and organisations for the knowledge graph's entity links."""
+    for field in ("people", "organisations"):
+        if note.metadata.custom.get(field):
+            continue
+        names = [n.strip() for n in result.get(field) or [] if isinstance(n, str) and n.strip()]
+        if field == "people":
+            names = [n for n in names if " " in n]  # a first name alone can't tell people apart
+        if names:
+            note.metadata.custom[field] = list(dict.fromkeys(names))
 
 
 def enrich_note(note: NoteModel) -> NoteModel:
@@ -64,6 +82,7 @@ def enrich_note(note: NoteModel) -> NoteModel:
         note.metadata.tags = tags[: settings.auto_tag_count]
     if "summary" not in note.metadata.custom and result.get("summary"):
         note.metadata.custom["summary"] = result["summary"].strip()
+    _add_names(note, result)
 
     logger.info(f"Enriched '{note.title}': {note.metadata.tags}")
     return note

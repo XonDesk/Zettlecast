@@ -4,6 +4,7 @@ Zettlecast Search & Retrieval
 Query -> embed -> nearest chunks -> rerank chunks -> best chunk per note.
 """
 
+import json
 import logging
 import re
 from typing import List, Optional
@@ -88,11 +89,26 @@ def get_suggestions_for_note(note_uuid: str, limit: int = 5) -> List[LinkSuggest
             uuid=other,
             title=titles[other][0],
             score=round(float(edge["weight"]), 4),
-            reason=f"similarity {edge['vector_sim']:.2f}, shared tags {edge['tag_sim']:.2f}",
+            reason=link_reason(edge),
         )
         for edge, other in zip(edges, others)
         if other in titles
     ][:limit]
+
+
+def link_reason(edge: dict) -> str:
+    """'Linked by you' / 'Same content' / 'Shared: Sophie Herzog, gut training; similar passages'."""
+    if edge.get("kind") == "link":
+        return "Linked by you"
+    if edge.get("kind") == "duplicate":
+        return "Same content"
+    reason = json.loads(edge.get("reason_json") or "{}")
+    parts = []
+    if reason.get("shared"):
+        parts.append("Shared: " + ", ".join(s["name"] for s in reason["shared"][:4]))
+    if reason.get("passage"):
+        parts.append("similar passages")
+    return "; ".join(parts) or "Similar content"
 
 
 def accept_link(source_uuid: str, target_uuid: str) -> bool:

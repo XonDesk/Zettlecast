@@ -51,9 +51,18 @@ EDGES_SCHEMA = pa.schema([
     ("source_uuid", pa.string()),
     ("target_uuid", pa.string()),
     ("weight", pa.float32()),
-    ("vector_sim", pa.float32()),
-    ("tag_sim", pa.float32()),
+    ("kind", pa.string()),  # similar | duplicate | link (a [[wikilink]])
+    ("vector_sim", pa.float32()),  # centred cosine of the note vectors
+    ("passage_sim", pa.float32()),  # share of passages that closely match the other note's
+    ("entity_sim", pa.float32()),  # IDF-weighted overlap of topics, people, organisations
+    ("reason_json", pa.string()),  # best passage pair, shared entities
     ("created_at", pa.string()),
+])
+
+COMMUNITIES_SCHEMA = pa.schema([
+    ("community", pa.int32()),
+    ("label", pa.string()),
+    ("members", pa.list_(pa.string())),
 ])
 
 REJECTED_SCHEMA = pa.schema([
@@ -121,7 +130,16 @@ class Database:
 
     @property
     def graph_edges(self):
+        if "graph_edges" not in self._tables and "graph_edges" in self.db.table_names():
+            table = self.db.open_table("graph_edges")
+            if table.schema.names != EDGES_SCHEMA.names:
+                # edges are derived data: an older layout is dropped, the next rebuild refills it
+                self.db.drop_table("graph_edges")
         return self._table("graph_edges", EDGES_SCHEMA)
+
+    @property
+    def communities(self):
+        return self._table("communities", COMMUNITIES_SCHEMA)
 
     @property
     def rejected_edges(self):
@@ -217,20 +235,29 @@ class Database:
         ]
 
     def all_note_vectors(self) -> List[dict]:
-        """uuid, title, created_at, tags and vector for every note (graph building)."""
+        """Every note's graph inputs: uuid, title, type, source, created_at, metadata, text, vector."""
         rows = self.notes.search().select(
-            ["uuid", "title", "created_at", "metadata_json", "vector"]
+            ["uuid", "title", "source_type", "source_path", "created_at", "metadata_json", "full_text", "vector"]
         ).limit(100_000).to_list()
         return [
             {
                 "uuid": r["uuid"],
                 "title": r["title"],
+                "source_type": r["source_type"],
+                "source_path": r["source_path"],
                 "created_at": r["created_at"],
-                "tags": json.loads(r["metadata_json"]).get("tags", []),
+                "metadata": json.loads(r["metadata_json"]),
+                "full_text": r["full_text"],
                 "vector": np.asarray(r["vector"], dtype=np.float32),
             }
             for r in rows
         ]
+
+    def all_chunk_vectors(self) -> List[dict]:
+        """note_uuid, text and vector of every chunk (passage matching)."""
+        rows = self.chunks.search().select(["note_uuid", "text", "vector"]).limit(10_000_000).to_list()
+        return [{"note_uuid": r["note_uuid"], "text": r["text"],
+                 "vector": np.asarray(r["vector"], dtype=np.float32)} for r in rows]
 
     def delete_note(self, uuid: str, keep_edges: bool = False) -> None:
         self.notes.delete(f"uuid = {_q(uuid)}")
@@ -289,6 +316,16 @@ class Database:
 
     def clear_edges(self) -> None:
         self.graph_edges.delete("true")
+
+    # --- Communities ---
+
+    def replace_communities(self, communities: List[dict]) -> None:
+        self.communities.delete("true")
+        if communities:
+            self.communities.add(communities)
+
+    def get_communities(self) -> List[dict]:
+        return self.communities.search().limit(100_000).to_list()
 
     # --- Rejected edges ---
 

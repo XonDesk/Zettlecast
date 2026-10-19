@@ -110,6 +110,8 @@ def parse_image(file_path: Path) -> ProcessingResult:
                     "image_format": file_format,
                     "detected_text": vision_data.detected_text,
                     "description": vision_data.description,
+                    **({"people": vision_data.people} if vision_data.people else {}),
+                    **({"organisations": vision_data.organisations} if vision_data.organisations else {}),
                 },
             ),
         )

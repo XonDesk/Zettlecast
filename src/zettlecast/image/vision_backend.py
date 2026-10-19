@@ -23,7 +23,9 @@ VISION_PROMPT = """Analyse this image and return JSON with:
 - "description": 2-3 specific, factual sentences about the main subject, setting and notable details
 - "detected_text": ALL visible text (signs, documents, UI, captions), preserving line breaks;
   "No text detected." if there is none
-- "concepts": 5-7 lowercase key objects, concepts or themes"""
+- "concepts": 5-7 lowercase key objects, concepts or themes. No names of people or organisations.
+- "people": full names of people shown or named in the image (empty if none)
+- "organisations": organisations, companies, products, races or events shown or named (empty if none)"""
 
 VISION_SCHEMA = {
     "type": "object",
@@ -31,8 +33,10 @@ VISION_SCHEMA = {
         "description": {"type": "string"},
         "detected_text": {"type": "string"},
         "concepts": {"type": "array", "items": {"type": "string"}},
+        "people": {"type": "array", "items": {"type": "string"}},
+        "organisations": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["description", "detected_text", "concepts"],
+    "required": ["description", "detected_text", "concepts", "people", "organisations"],
 }
 
 
@@ -57,4 +61,6 @@ class VisionBackend:
             description=result.get("description", "").strip(),
             detected_text=result.get("detected_text", "").strip(),
             concepts=concepts[:7],
+            people=[p.strip() for p in result.get("people") or [] if isinstance(p, str) and " " in p.strip()],
+            organisations=[o.strip() for o in result.get("organisations") or [] if isinstance(o, str) and o.strip()],
         )

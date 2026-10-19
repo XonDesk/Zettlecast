@@ -173,10 +173,61 @@ def graph():
 
 @graph.command("rebuild")
 def graph_rebuild():
-    """Recompute all graph edges."""
+    """Recompute all graph edges and communities."""
     from .linker import rebuild_graph
 
     click.echo(f"Graph rebuilt: {rebuild_graph()} edges")
+
+
+@graph.command("stats")
+def graph_stats():
+    """Edges per note, link kinds and the communities with their notes."""
+    from collections import Counter
+
+    from .db import db
+
+    titles = {r["uuid"]: r["title"] for r in db.notes.search().select(["uuid", "title"]).limit(1_000_000).to_list()}
+    edges = db.get_all_edges()
+    degree = Counter(u for e in edges for u in (e["source_uuid"], e["target_uuid"]))
+    if degree:
+        values = sorted(degree.values())
+        click.echo(f"{len(titles)} notes, {len(edges)} edges; links per note min {values[0]}, "
+                   f"median {values[len(values) // 2]}, max {values[-1]}; unlinked {len(set(titles) - set(degree))}")
+    click.echo("Kinds: " + ", ".join(f"{k} {n}" for k, n in Counter(e["kind"] for e in edges).items()))
+    communities = db.get_communities()
+    clustered = {u for c in communities for u in c["members"]}
+    click.echo(f"{len(communities)} communities; unclustered notes {len(set(titles) - clustered)}")
+    for c in sorted(communities, key=lambda c: -len(c["members"])):
+        click.echo(f"\n[{c['community']}] {c['label']} ({len(c['members'])} notes)")
+        for u in c["members"][:8]:
+            click.echo(f"   {titles.get(u, u)[:90]}")
+        if len(c["members"]) > 8:
+            click.echo(f"   ... {len(c['members']) - 8} more")
+
+
+@graph.command("explain")
+@click.argument("first")
+@click.argument("second")
+def graph_explain(first: str, second: str):
+    """Why two notes are (or aren't) linked; FIRST/SECOND match titles."""
+    from .linker import build
+
+    graph = build()
+
+    def find(text: str) -> int:
+        hits = [i for i, n in enumerate(graph.notes) if text.lower() in n["title"].lower()]
+        if len(hits) != 1:
+            raise click.ClickException(f"'{text}' matches {len(hits)} notes; be more specific")
+        return hits[0]
+
+    i, j = find(first), find(second)
+    for name, row in (("weight", graph.weights), ("semantic (centred cosine)", graph.semantic),
+                      ("passages", graph.passage), ("entities", graph.entities.similarity)):
+        click.echo(f"{name:26} {row[i, j]:.3f}   (rank among {graph.notes[i]['title'][:30]}'s partners: "
+                   f"{int((row[i] > row[i, j]).sum()) + 1})")
+    shared = set(graph.entities.per_note[i]) & set(graph.entities.per_note[j])
+    click.echo("shared: " + ", ".join(f"{graph.entities.display[k]} ({graph.entities.per_note[i][k]:.2f})"
+                                      for k in sorted(shared, key=lambda k: -graph.entities.per_note[i][k])))
 
 
 # =============================================================================

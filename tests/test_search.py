@@ -29,3 +29,17 @@ def test_one_long_note_does_not_crowd_out_the_rest():
         results = search.search("q", top_k=5)
     assert [r.uuid for r in results] == ["a", "b"]
     assert seen["n"] == search.MAX_CHUNKS_PER_NOTE + 1
+
+
+def test_link_reason_names_what_links_two_notes():
+    import json
+
+    from zettlecast.search import link_reason
+
+    assert link_reason({"kind": "link"}) == "Linked by you"
+    assert link_reason({"kind": "duplicate"}) == "Same content"
+    reason = {"shared": [{"kind": "person", "name": "Sophie Herzog"}, {"kind": "topic", "name": "overtraining"}],
+              "passage": {"similarity": 0.9}}
+    assert link_reason({"kind": "similar", "reason_json": json.dumps(reason)}) == \
+        "Shared: Sophie Herzog, overtraining; similar passages"
+    assert link_reason({"kind": "similar", "reason_json": "{}"}) == "Similar content"

@@ -86,10 +86,17 @@ class Settings(BaseSettings):
     name_lookup: bool = True  # Look up unconfirmed names in podcast transcripts on Wikipedia (online)
 
     # --- Graph Construction ---
-    graph_alpha: float = 0.7  # Weight for vector similarity
-    graph_beta: float = 0.3  # Weight for tag overlap (Jaccard)
-    graph_edge_threshold: float = 0.30  # Min composite score; unrelated docs score < 0.2 with Qwen3-Embedding
-    graph_max_edges_per_note: int = 6
+    # weight = semantic * centred cosine + passage * matching passages + entity * shared entities
+    graph_weight_semantic: float = 0.5
+    graph_weight_passage: float = 0.3
+    graph_weight_entity: float = 0.2
+    graph_max_edges_per_note: int = 6  # Each note keeps its k best partners; edges = union of these
+    graph_min_weight: float = 0.05  # Below this a "best partner" is no relation at all
+    graph_passage_similarity: float = 0.8  # Chunk pairs at least this alike count as matching passages
+    graph_boilerplate_similarity: float = 0.9  # Near-duplicate passages repeated across a source group...
+    graph_boilerplate_share: float = 0.2  # ...in this share of its notes (intros, sponsor reads) are skipped
+    graph_duplicate_share: float = 0.9  # Notes sharing this share of passages are the same content
+    graph_resolution: float = 1.0  # Leiden resolution: higher = more, smaller communities
 
     # --- Server ---
     api_port: int = 8000
