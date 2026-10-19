@@ -27,11 +27,11 @@ src/zettlecast/
   cli.py             Click CLI (`zettlecast ...`)
   pipeline.py        Shared orchestration: ingest_note, ingest_path, run_podcast_queue, reindex_all
   config.py          Settings (from .env at the project root)
-  db.py              LanceDB tables: notes, chunks, graph_edges, rejected_edges
+  db.py              LanceDB tables: notes, chunks, graph_edges, rejected_edges, communities
   embeddings.py      Embedding + reranker models
   llm.py             LLM client: llama-server (started on demand) or Ollama; JSON schema, images, chat_each, unload
   search.py          Chunk search (max 5 chunks per note) -> rerank -> best chunk per note; related notes
-  linker.py          Graph edges: alpha*cosine(note vectors) + beta*jaccard(tags)
+  linker.py          Graph edges (centred similarity + matching passages + rare shared entities, k best per note) + Leiden communities
   chunker.py         Prose + transcript-aware chunking (keeps "[t] speaker:" headers)
   parser.py          PDF (pypdf -> Marker), web (Trafilatura), markdown (frontmatter-aware)
   enricher.py        LLM tags + summary for non-podcast notes
@@ -136,7 +136,8 @@ the same word count and a close spelling is proposed as a new name. Single words
 | `search QUERY [-k N]` | Semantic search (shows snippet + timestamp) |
 | `stats` | Notes / chunks / edges counts |
 | `reindex` | Re-read transcript notes from disk, re-embed, rebuild graph |
-| `graph rebuild` | Recompute all edges |
+| `graph rebuild` | Recompute all edges and communities |
+| `graph stats` / `graph explain A B` | Links per note, communities; why two notes are (not) linked |
 | `token` | Print API token + bookmarklet |
 | `podcast add PATH [--name] [--recursive]` | Queue local audio |
 | `podcast import URL [--limit N]` | Download + queue feed episodes |
@@ -176,8 +177,9 @@ GET  /notes/{uuid}/markdown             note as a markdown download
 DELETE /notes/{uuid}
 GET  /search?q=&top_k=5&rerank=true     -> {results: [{uuid,title,score,snippet,source_type,timestamp_seconds}]}
 POST /notes/{uuid}/link {target_uuid, action: accept|reject}
-GET  /graph?limit=2000                  -> {nodes: [{id,name,source_type,val}], links: [{source,target,value}]}
-POST /graph/rebuild                     -> {edges}
+GET  /graph?limit=2000                  -> {nodes: [{id,name,source_type,val,community}], links: [{source,target,value,kind}],
+                                            communities: [{id,label,size}]}
+POST /graph/rebuild                     -> {edges}   (edges + communities)
 
 GET  /podcast/status | POST /podcast/import {feed_url,limit} | POST /podcast/run {limit}
 GET  /podcast/running | POST /podcast/cancel/{episode_id}
@@ -224,11 +226,28 @@ podcast: {show: KoopCast, episode: ..., feed_url: ..., published: ...}
 [97.8s - 103.0s] Scott Frey: ...
 ```
 
+### Knowledge graph
+
+Notes are the only nodes. Edge weight = 0.5 x cosine of note vectors after subtracting a *balanced*
+mean (each source group - podcast show, website, images - counts once) + 0.3 x share of closely
+matching passages (passage vectors centred the same way; passages repeated across a group skipped)
++ 0.2 x IDF-weighted shared topics / people / organisations (the host, in every episode, adds ~0).
+Each note keeps its 6 best partners (`GRAPH_MAX_EDGES_PER_NOTE`), edges are the union; wikilinks are
+always edges; rejected pairs never. Communities: Leiden (`igraph` + `leidenalg`), `GRAPH_RESOLUTION`.
+Edges for a new note are computed at ingest; the full rebuild (communities) runs after each podcast
+run, on `reindex`, `graph rebuild` and the UI button. The verification sections of a transcript
+note (`chunker.UNINDEXED_SECTIONS`) are not chunked or embedded. Frontend: fill = community (only 4
+hues pass all-pairs colour checks on the dark surface; others neutral, all named on the map), ring =
+source type, LinLog ForceAtlas2 with links inside a community pulling 4x harder.
+
 ### LanceDB tables
 
 - **notes**: note fields + `metadata_json` + `vector` (normalised mean of chunk vectors)
 - **chunks**: `chunk_id`, `note_uuid`, `text`, `start_char`, `vector`
-- **graph_edges**: `source_uuid` (older) → `target_uuid` (newer), `weight`, `vector_sim`, `tag_sim`
+- **graph_edges**: `source_uuid` (older) → `target_uuid` (newer), `weight`, `kind` (similar | duplicate |
+  link = a [[wikilink]]), `vector_sim`, `passage_sim`, `entity_sim`, `reason_json` (best passage pair with
+  times, distinctive shared entities). Derived data: an older layout is dropped and refilled by a rebuild.
+- **communities**: `community` (id kept stable across rebuilds), `label` (top topics), `members`
 - **rejected_edges**: pairs never to link
 
 ---
