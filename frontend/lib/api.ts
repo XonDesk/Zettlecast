@@ -7,6 +7,7 @@ import type {
     IngestResponse,
     GraphData,
     Settings,
+    SystemStatus,
 } from './types';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -242,6 +243,23 @@ export const api = {
     // Health
     checkHealth: () =>
         fetchAPI<{ status: string; version: string }>('/health'),
+
+    // System (process page)
+    getSystemStatus: () => fetchAPI<SystemStatus>('/system/status'),
+
+    stopRun: (mode: 'after_episode' | 'abort' = 'after_episode') =>
+        fetchAPI<{ status: string; message?: string }>('/system/run/stop', {
+            method: 'POST',
+            body: JSON.stringify({ mode }),
+        }),
+
+    resumeRun: () => fetchAPI<{ status: string }>('/system/run/resume', { method: 'POST' }),
+
+    unloadModels: () => fetchAPI<{ status: string; message?: string }>('/system/unload', { method: 'POST' }),
+
+    reindex: () => fetchAPI<{ status: string; message?: string }>('/system/reindex', { method: 'POST' }),
+
+    rebuildGraph: () => fetchAPI<{ status: string; edges: number }>('/graph/rebuild', { method: 'POST' }),
 };
 
 export { APIError };

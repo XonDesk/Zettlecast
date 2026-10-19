@@ -141,3 +141,74 @@ export interface ImageQueueStatus {
     estimated_remaining: string;
     items: ImageItem[];
 }
+
+// --- Process page (GET /system/status) ---
+
+export interface RunRecent {
+    title: string;
+    status: string;
+    seconds: number;
+    audio_minutes: number;
+    finished_at: string;
+}
+
+export interface RunState {
+    phase: 'idle' | 'starting' | 'transcribe' | 'enhance' | 'graph' | 'running';
+    alive: boolean;
+    source?: 'cli' | 'api' | 'unknown';
+    pid?: number;
+    legacy?: boolean; // a run that doesn't publish stages or honour stop requests
+    started_at?: string;
+    phase_total?: number;
+    phase_done?: number;
+    episode_title?: string | null;
+    episode_started_at?: string | null;
+    stage?: string | null;
+    stage_started_at?: string | null;
+    chunk?: number;
+    chunks?: number;
+    completed?: number;
+    failed?: number;
+    recent?: RunRecent[];
+    stop_requested?: boolean;
+}
+
+export interface Alarm {
+    id: string;
+    priority: 'high' | 'medium' | 'low';
+    text: string;
+}
+
+export interface SystemStatus {
+    time: string;
+    run: RunState;
+    queues: {
+        podcast: {
+            by_status: Record<string, number>;
+            total: number;
+            failed: { id: string; title: string; error: string }[];
+            workers: { pid: number; title: string }[];
+        };
+        images: { total: number; by_status: Record<string, number> };
+    };
+    gpu: {
+        name: string;
+        memory_used_mib: number | null;
+        memory_total_mib: number | null;
+        utilization: number | null;
+        temperature: number | null;
+        power_w: number | null;
+    } | null;
+    llm: {
+        backend: string;
+        model: string;
+        server: { installed: boolean; pid: number | null; vision: boolean; state: 'ready' | 'loading' | 'stopped' };
+        ollama: { reachable: boolean; loaded: string[] };
+    };
+    models: { embedder: boolean; reranker: boolean; acoustic_judge: boolean };
+    database: { notes?: number; chunks?: number; edges?: number; communities?: number; by_source_type?: Record<string, number> };
+    disk: { free_gb: number; total_gb: number };
+    task: { name: string | null; running: boolean; started_at: string | null; finished_at: string | null; error: string | null };
+    alarms: Alarm[];
+    limits: { vram_warn: number; vram_alarm: number };
+}
