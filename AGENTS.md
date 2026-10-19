@@ -94,6 +94,9 @@ zc.ps1               CLI shortcut
   `embeddings.hold()` so the cache is never emptied mid-run.
 - NeMo's TDT loss kernel needs NVVM (CUDA toolkit, not installed), so `acoustic.py`
   computes the TDT likelihood itself; it matches `TDTLossPytorch` exactly and is ~600x faster.
+- LLM chunk passes (suspects, cleanup) send `LLM_PARALLEL` (4) chunks at once via `llm.chat_each`;
+  Ollama serves this model one request at a time (qwen35moe: no parallel slots as of 0.40.6),
+  so the gain is overlap: the next chunk generates while the acoustic judge checks this one.
 - Queue runs hold a Windows power request (`pipeline.keep_awake`) so Modern Standby doesn't pause them.
 
 ### Transcript verification (no human needed)

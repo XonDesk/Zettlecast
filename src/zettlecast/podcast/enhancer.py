@@ -13,7 +13,7 @@ import logging
 import re
 from typing import Callable, Dict, List, Optional, Tuple
 
-from ..llm import LLMError, chat
+from ..llm import LLMError, chat, chat_each
 
 logger = logging.getLogger(__name__)
 
@@ -313,9 +313,16 @@ class TranscriptEnhancer:
             def checker(_offset: int, original: str, cleaned: str) -> Tuple[str, List[Dict]]:
                 return guard_names(original, cleaned, allowed)
 
-        for i, chunk in enumerate(chunks):
+        # the LLM cleans several chunks at once; checking stays in order, one chunk at a time
+        responses = chat_each(
+            lambda chunk=chunk: chat(CLEANUP_PROMPT.format(chunk=chunk, names_hint=names_hint, vocabulary=vocab_block))
+            for chunk in chunks
+        )
+        for i, (chunk, result) in enumerate(zip(chunks, responses)):
             try:
-                result = chat(CLEANUP_PROMPT.format(chunk=chunk, names_hint=names_hint, vocabulary=vocab_block)).strip()
+                if isinstance(result, Exception):
+                    raise result
+                result = result.strip()
                 if self._is_valid_cleanup_response(chunk, result):
                     # take the [[x??]] markers off before checking, keep the ones that survive
                     unmarked, marked = self.extract_uncertain_corrections(result)
@@ -359,7 +366,7 @@ class TranscriptEnhancer:
         for li, ours, theirs in hints or []:
             by_line.setdefault(li, []).append((ours, theirs))
 
-        suspects: List[Dict] = []
+        spans, prompts = [], []
         start = 0
         for chunk in self._split_lines(transcript, chunk_size):
             chunk_lines = chunk.split("\n")
@@ -373,15 +380,19 @@ class TranscriptEnhancer:
                 "(line| ours | theirs); either may be wrong:\n" + "\n".join(chunk_hints) + "\n"
                 if chunk_hints else ""
             )
+            spans.append((start, end))
+            prompts.append(SUSPECTS_PROMPT.format(context=context, hints=hint_block, chunk=numbered))
+            start = end
+
+        suspects: List[Dict] = []
+        results = chat_each(lambda p=p: chat(p, schema=SUSPECTS_SCHEMA) for p in prompts)
+        for (start, end), result in zip(spans, results):
             try:
-                result = chat(
-                    SUSPECTS_PROMPT.format(context=context, hints=hint_block, chunk=numbered),
-                    schema=SUSPECTS_SCHEMA,
-                )
+                if isinstance(result, Exception):
+                    raise result
                 suspects += [s for s in result.get("suspects", []) if start <= int(s.get("line", -1)) < end]
             except (LLMError, ValueError, TypeError) as e:
                 logger.warning(f"Suspect search failed for lines {start}-{end}: {e}")
-            start = end
         return suspects
 
     def analyze(

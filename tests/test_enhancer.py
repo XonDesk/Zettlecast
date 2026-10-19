@@ -81,6 +81,39 @@ class TestCleanupTranscript:
         assert cleaned == long
 
 
+class TestParallelChunks:
+    def test_chat_each_keeps_order_and_returns_errors(self):
+        import time
+
+        from zettlecast.llm import chat_each
+
+        def call(i):
+            def run():
+                time.sleep(0.05 * (3 - i))  # later calls finish first
+                if i == 1:
+                    raise LLMError("down")
+                return i
+            return run
+
+        with patch("zettlecast.llm.settings.llm_parallel", 4):
+            out = list(chat_each(call(i) for i in range(4)))
+        assert out[0] == 0 and isinstance(out[1], LLMError) and out[2:] == [2, 3]
+
+    def test_cleanup_chunks_come_back_in_order(self):
+        import random
+        import time
+
+        def fake_chat(prompt, **_):
+            time.sleep(random.random() * 0.05)
+            return prompt.split("Transcript chunk:\n", 1)[1].replace("lactaid", "lactate")
+
+        long = "\n".join([TRANSCRIPT] * 20)
+        with patch("zettlecast.podcast.enhancer.chat", side_effect=fake_chat), \
+                patch("zettlecast.llm.settings.llm_parallel", 4):
+            cleaned, _ = TranscriptEnhancer().cleanup_transcript(long, chunk_size=500)
+        assert cleaned == long.replace("lactaid", "lactate")
+
+
 class TestApplySpeakerNames:
     def test_replaces_only_identified_labels(self):
         out = TranscriptEnhancer.apply_speaker_names(TRANSCRIPT, {"speaker_0": "Jason Koop"})

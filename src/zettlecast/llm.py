@@ -9,8 +9,9 @@ window. Pass a JSON schema to get structured output back as a dict.
 import base64
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional
 
 import httpx
 
@@ -84,6 +85,27 @@ def chat(
         return json.loads(content)
     except json.JSONDecodeError as e:
         raise LLMError(f"Model returned invalid JSON: {content[:200]}") from e
+
+
+def chat_each(calls: Iterable[Callable[[], Any]]) -> Iterator[Any]:
+    """
+    Run independent LLM calls settings.llm_parallel at a time and yield each result, or the
+    exception it raised, in order. Results are yielded as soon as they're ready, so the caller
+    can work on the first while the rest generate. (Ollama queues them for qwen35moe, which it
+    can't batch yet; a server with parallel slots would also generate them together.)
+    """
+    def guarded(call: Callable[[], Any]) -> Any:
+        try:
+            return call()
+        except Exception as e:  # handed to the caller with the others' results
+            return e
+
+    calls = list(calls)
+    if settings.llm_parallel <= 1 or len(calls) <= 1:
+        yield from (guarded(c) for c in calls)
+        return
+    with ThreadPoolExecutor(max_workers=settings.llm_parallel) as pool:
+        yield from pool.map(guarded, calls)
 
 
 def unload(model: Optional[str] = None) -> None:
