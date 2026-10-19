@@ -92,7 +92,9 @@ def embed_documents(texts: list[str]) -> np.ndarray:
         return np.zeros((0, settings.embedding_dimensions), dtype=np.float32)
     with _lock:
         vectors = get_embedder().encode(
-            texts, batch_size=32, normalize_embeddings=True, convert_to_numpy=True
+            # 8: half the activation peak of 32 (1.7 vs 3.4 GB) and no slower; during a run the
+            # cached peak sits next to the LLM, and VRAM past 32 GB spills to system RAM
+            texts, batch_size=8, normalize_embeddings=True, convert_to_numpy=True
         )
     return vectors.astype(np.float32)
 

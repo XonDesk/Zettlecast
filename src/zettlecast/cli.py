@@ -63,7 +63,7 @@ def serve(port: int, no_frontend: bool):
             else:
                 p.terminate()
         from . import llm
-        llm.unload()
+        llm.unload(only_own=True)
 
 
 @cli.command()

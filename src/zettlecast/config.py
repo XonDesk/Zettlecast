@@ -66,7 +66,17 @@ class Settings(BaseSettings):
     llm_num_ctx: int = 32768  # Context window requested from Ollama
     llm_timeout_seconds: int = 600
     llm_seed: int | None = 42  # Fixed sampling seed: reprocessing gives the same note (None = random)
-    llm_parallel: int = 4  # Transcript chunks in flight at once (overlaps generation with checking)
+    llm_parallel: int = 4  # Transcript chunks in flight at once (llama-server slots)
+    # "llama-server": llama.cpp serves the Ollama model's own GGUF with parallel slots and
+    # speculative decoding (~4x faster transcript cleanup); "ollama": Ollama only.
+    # Falls back to Ollama when no llama-server.exe is found.
+    llm_backend: str = "llama-server"
+    llama_server_exe: str = ""  # default: newest %LOCALAPPDATA%\llama.cpp\*\llama-server.exe
+    llama_server_port: int = 8081
+    llama_server_ctx: int = 65536  # Context tokens shared by all slots (analysis needs up to ~32K)
+    # n-gram drafts copy the transcript being cleaned; MTP drafts with the model's own extra layer
+    llama_server_args: str = "--spec-type ngram-simple,draft-mtp"
+    llm_idle_minutes: float = 5  # Stop llama-server after this long unused (frees ~27 GB VRAM)
 
     # --- Features ---
     enable_auto_tagging: bool = True  # LLM tags + summary for non-podcast notes

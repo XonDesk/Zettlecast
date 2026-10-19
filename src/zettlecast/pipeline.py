@@ -208,8 +208,10 @@ def acoustic_scorer():
         from .podcast.nemo_transcriber import NeMoTranscriber
 
         NeMoTranscriber._quiet_nemo()
-        model = nemo_asr.models.ASRModel.from_pretrained(settings.nemo_parakeet_model)
-        _scorer = AcousticScorer(model.cuda().eval().half())
+        # load on the CPU and halve there: NeMo would load float32 onto the GPU, and the
+        # freed float32 copy stays in PyTorch's cache (~2.4 GB) next to the LLM
+        model = nemo_asr.models.ASRModel.from_pretrained(settings.nemo_parakeet_model, map_location="cpu")
+        _scorer = AcousticScorer(model.eval().half().cuda())
     return _scorer
 
 
@@ -450,8 +452,19 @@ def _run_podcast_queue(
             ))
         except Exception as e:
             fail(episode, e)
+        finally:
+            # hand the episode's activation peaks (judge, embedder) back to the GPU: they'd sit
+            # in PyTorch's cache next to the LLM. Safe here: no Parakeet transcribe() in pass 2.
+            _empty_cuda_cache()
 
     return summary
+
+
+def _empty_cuda_cache() -> None:
+    import torch
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def run_podcast_queue(*args, **kwargs) -> QueueRunSummary:

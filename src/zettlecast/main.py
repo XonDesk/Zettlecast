@@ -43,7 +43,7 @@ async def lifespan(_app: FastAPI):
     # free the GPU for transcription runs when nobody is searching
     embeddings.start_idle_unloader(settings.model_idle_minutes)
     yield
-    llm.unload()
+    llm.unload(only_own=True)
 
 
 app = FastAPI(

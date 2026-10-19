@@ -21,6 +21,8 @@ import torch
 
 logger = logging.getLogger(__name__)
 
+LSE_FRAMES = 16  # frames per float64 log-softmax normaliser block
+
 
 def tdt_log_likelihood(
     joint: torch.Tensor,
@@ -45,16 +47,22 @@ def tdt_log_likelihood(
     n_dur = len(durations)
     if 0 not in durations:
         raise ValueError("durations must include 0")
-    token_lp = torch.log_softmax(joint[..., :-n_dur].double(), -1)
-    dur_lp = torch.log_softmax(joint[..., -n_dur:].double(), -1)
-    B, T, U1, _ = token_lp.shape
+    B, T, U1, _ = joint.shape
+    V = joint.shape[-1] - n_dur
+    # Only the blank and label entries of the token log-softmax are used: take its normaliser
+    # (float64, a few frames at a time) instead of a float64 copy of the whole (B, T, U1, V)
+    # tensor, which for many candidates over a long line ran to GBs next to the LLM.
+    lse = torch.empty((B, T, U1), dtype=torch.float64, device=joint.device)
+    for t0 in range(0, T, LSE_FRAMES):
+        lse[:, t0:t0 + LSE_FRAMES] = torch.logsumexp(joint[:, t0:t0 + LSE_FRAMES, :, :V].double(), -1)
+    dur_lp = torch.log_softmax(joint[..., V:].double(), -1)
     neg_inf = torch.tensor(float("-inf"), dtype=torch.float64, device=joint.device)
 
-    blank_lp = token_lp[..., blank]  # (B, T, U1)
+    blank_lp = joint[..., blank].double() - lse  # (B, T, U1)
     label_lp = torch.full((B, T, U1), float("-inf"), dtype=torch.float64, device=joint.device)
     if U1 > 1:
         idx = labels[:, None, : U1 - 1, None].expand(B, T, U1 - 1, 1)
-        label_lp[:, :, : U1 - 1] = token_lp[:, :, : U1 - 1].gather(-1, idx).squeeze(-1)
+        label_lp[:, :, : U1 - 1] = joint[:, :, : U1 - 1, :V].gather(-1, idx).squeeze(-1).double() - lse[:, :, : U1 - 1]
 
     zero = durations.index(0)
     alpha = torch.full((B, T, U1), float("-inf"), dtype=torch.float64, device=joint.device)

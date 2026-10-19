@@ -17,7 +17,7 @@ LanceDB for semantic search, and notes are linked into a knowledge graph.
 | Reranker | `Qwen/Qwen3-Reranker-0.6B` (CrossEncoder, CUDA) |
 | ASR | NeMo `nvidia/parakeet-tdt-0.6b-v2` (local attention, word timestamps) |
 | Diarization | NeMo `nvidia/Nemotron-3-Diarization` (Sortformer, up to 8 speakers) |
-| LLM + vision | Ollama `qwen3.6:35b-a3b` (structured JSON output, 32K context) |
+| LLM + vision | `qwen3.6:35b-a3b` served by llama.cpp `llama-server` (Ollama's GGUF; parallel slots, speculative decoding), Ollama as fallback |
 
 ### Directory Structure
 
@@ -29,7 +29,7 @@ src/zettlecast/
   config.py          Settings (from .env at the project root)
   db.py              LanceDB tables: notes, chunks, graph_edges, rejected_edges
   embeddings.py      Embedding + reranker models
-  llm.py             Ollama client (chat with optional JSON schema, images; unload)
+  llm.py             LLM client: llama-server (started on demand) or Ollama; JSON schema, images, chat_each, unload
   search.py          Chunk search (max 5 chunks per note) -> rerank -> best chunk per note; related notes
   linker.py          Graph edges: alpha*cosine(note vectors) + beta*jaccard(tags)
   chunker.py         Prose + transcript-aware chunking (keeps "[t] speaker:" headers)
@@ -85,8 +85,8 @@ zc.ps1               CLI shortcut
 - Never call `torch.cuda.empty_cache()` between Parakeet `transcribe()` calls; it aborts the process.
 - Parakeet must use local attention for audio longer than ~10 minutes
   (full attention fails with "CUDA driver error: device not ready").
-- The LLM (~22 GB) and NeMo (~14 GB) can't share the GPU; `pipeline.run_podcast_queue`
-  unloads Ollama before the transcription pass and NeMo frees its models before the analysis pass.
+- The LLM (~24 GB in llama-server) and NeMo (~14 GB) can't share the GPU; `pipeline.run_podcast_queue`
+  stops llama-server / unloads Ollama before the transcription pass and NeMo frees its models before the analysis pass.
   A second, small Parakeet (fp16, ~1.3 GB) stays loaded as the acoustic judge next to the LLM.
 - The API server unloads the search models (~3 GB) after `MODEL_IDLE_MINUTES` (5) without a search
   (`embeddings.start_idle_unloader`), so a CLI transcription run isn't starved of GPU memory
@@ -94,9 +94,20 @@ zc.ps1               CLI shortcut
   `embeddings.hold()` so the cache is never emptied mid-run.
 - NeMo's TDT loss kernel needs NVVM (CUDA toolkit, not installed), so `acoustic.py`
   computes the TDT likelihood itself; it matches `TDTLossPytorch` exactly and is ~600x faster.
-- LLM chunk passes (suspects, cleanup) send `LLM_PARALLEL` (4) chunks at once via `llm.chat_each`;
-  Ollama serves this model one request at a time (qwen35moe: no parallel slots as of 0.40.6),
-  so the gain is overlap: the next chunk generates while the acoustic judge checks this one.
+- **LLM backend** (`LLM_BACKEND=llama-server`, default): `llm.py` starts llama.cpp's `llama-server.exe`
+  (newest `%LOCALAPPDATA%\llama.cpp\<build>\`, currently b11399 CUDA 13.4) on the GGUF in Ollama's store
+  (`~/.ollama/models`, found via the manifest; no second copy), 4 slots sharing one 64K context
+  (`--kv-unified`), `--spec-type ngram-simple,draft-mtp`: n-gram drafts copy the transcript being
+  cleaned (~95% accepted), MTP uses the model's own draft layer. Cleanup chunks ~2.2 s vs 8.3 s on
+  Ollama; pass 2 ~1.0-1.3 s per audio minute vs 2.1-2.5. The vision projector is loaded only for image
+  calls (server restarted with `--mmproj`). Stopped by `unload()` (pass 1), after `LLM_IDLE_MINUTES`
+  unused, and at exit of the process that started it (pid in `<storage>/.llama-server.pid`, log in
+  `<storage>/llama-server.log`). No llama-server.exe -> Ollama. Ollama 0.40.6 can't batch qwen35moe.
+- **VRAM budget in pass 2** (32 GB card): llama-server ~24 GB + acoustic judge 1.2 GB + embedder 1.2 GB
+  + desktop 0.8 GB. Past 32 GB Windows silently spills to system RAM and the LLM drops from ~300 to
+  ~80 tokens/s, so: the judge loads on the CPU and is halved there (NeMo loads float32 onto the GPU),
+  `tdt_log_likelihood` takes the log-softmax normaliser blockwise (a float64 copy of the joint tensor
+  was GBs), embedding batch 8 (half the peak of 32), and pass 2 empties PyTorch's cache per episode.
 - Queue runs hold a Windows power request (`pipeline.keep_awake`) so Modern Standby doesn't pause them.
 
 ### Transcript verification (no human needed)
@@ -135,7 +146,7 @@ the same word count and a close spelling is proposed as a new name. Single words
 | `podcast status` / `podcast retry` | Queue status / reset failed |
 | `image add PATH` / `image run` / `image status` / `image retry` | Image pipeline |
 
-`podcast run` works in two passes, so the 22 GB LLM is loaded once per run. Pass 1, for every
+`podcast run` works in two passes, so the LLM is loaded once per run. Pass 1, for every
 pending episode (speech models reloaded per episode: a Parakeet kept across a diarization
 crashes with an illegal memory access): decode to 16 kHz mono → Parakeet (60-min pieces) → Nemotron diarization (whole
 episode) → align → save `<audio>.asr.json` (reused by later runs until the models change).
