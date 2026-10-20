@@ -26,6 +26,9 @@ class ImageItem(BaseModel):
     height: Optional[int] = None
     megapixels: Optional[float] = None
     keep_image: bool = True  # False: only the extracted information is kept (screenshot triage "keep")
+    # Part of the image the user circled in triage: {"box": [x, y, w, h], "points": [[x, y], ...]},
+    # fractions of the image size
+    focus_region: Optional[dict] = None
 
 
 class VisionExtraction(BaseModel):

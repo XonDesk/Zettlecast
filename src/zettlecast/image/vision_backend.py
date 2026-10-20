@@ -6,7 +6,11 @@ text (OCR) and concept tags.
 """
 
 import logging
+import tempfile
 from pathlib import Path
+from typing import Optional
+
+from PIL import Image, ImageDraw
 
 from ..config import settings
 from ..llm import LLMError, chat
@@ -57,21 +61,61 @@ VISION_SCHEMA = {
 }
 
 
+REGION_PROMPT = """The user circled part of this screenshot. Image 1 is the whole screenshot with
+their mark drawn on it in magenta; image 2 is a close-up of the circled part. The focus is the
+circled content: copy it word for word from image 2 (a rough circle can clip a few edge words:
+complete them from image 1). Use the rest of image 1 only for the context.
+
+"""
+
+REGION_PAD = 0.04  # of the image size, around the circled box: rough circles cut corners
+MIN_CROP_PX = 600  # small crops are enlarged so the model can read them
+
+
+def region_images(image_path: Path, region: dict, workdir: Path) -> list[Path]:
+    """The screenshot with the user's mark drawn on it, and a close-up of the circled part."""
+    with Image.open(image_path) as img:
+        img = img.convert("RGB")
+        w, h = img.size
+        marked = img.copy()
+        points = [(x * w, y * h) for x, y in region.get("points") or []]
+        if len(points) > 1:
+            ImageDraw.Draw(marked).line(points + points[:1], fill=(255, 0, 200), width=max(3, w // 200))
+        x, y, bw, bh = region["box"]
+        box = (int(max(0.0, x - REGION_PAD) * w), int(max(0.0, y - REGION_PAD) * h),
+               int(min(1.0, x + bw + REGION_PAD) * w), int(min(1.0, y + bh + REGION_PAD) * h))
+        crop = img.crop(box)
+        scale = MIN_CROP_PX / max(1, min(crop.size))
+        if scale > 1:
+            crop = crop.resize((int(crop.width * scale), int(crop.height * scale)), Image.LANCZOS)
+    paths = [workdir / "marked.png", workdir / "circled.png"]
+    marked.save(paths[0])
+    crop.save(paths[1])
+    return paths
+
+
 class VisionBackend:
     """Image understanding via the configured Ollama vision model."""
 
     def __init__(self, model: str = None):
         self.model = model or settings.vision_model
 
-    def analyze_image(self, image_path: Path) -> VisionExtraction:
+    def analyze_image(self, image_path: Path, focus_region: Optional[dict] = None) -> VisionExtraction:
+        """focus_region: the part the user circled (fractions of the image), read as the focus."""
         if not image_path.exists():
             raise FileNotFoundError(f"Image not found: {image_path}")
 
-        logger.info(f"Analyzing image with {self.model}: {image_path.name}")
-        try:
-            result = chat(VISION_PROMPT, schema=VISION_SCHEMA, images=[image_path], model=self.model)
-        except LLMError as e:
-            raise VisionModelNotFoundError(str(e)) from e
+        logger.info(f"Analyzing image with {self.model}: {image_path.name}"
+                    + (" (circled region)" if focus_region else ""))
+        with tempfile.TemporaryDirectory() as tmp:
+            if focus_region:
+                prompt, images = REGION_PROMPT + VISION_PROMPT, region_images(image_path, focus_region, Path(tmp))
+            else:
+                prompt, images = VISION_PROMPT, [image_path]
+            try:
+                result = chat(prompt, schema=VISION_SCHEMA, images=images, model=self.model)
+            except LLMError as e:
+                raise VisionModelNotFoundError(str(e)) from e
 
         concepts = [str(c).lower().strip() for c in result.get("concepts", []) if str(c).strip()]
         focus = (result.get("focus") or "").strip()

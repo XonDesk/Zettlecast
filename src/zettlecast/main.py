@@ -1157,7 +1157,8 @@ def _run_image_processing_background(limit: int = None):
 
             try:
                 # Parse image
-                result = parse_image(P(image.image_path), keep_image=image.keep_image)
+                result = parse_image(P(image.image_path), keep_image=image.keep_image,
+                                     focus_region=image.focus_region)
 
                 if result.status == "success" and result.note:
                     ingest_note(result.note)
@@ -1246,6 +1247,7 @@ class TriageFolderRequest(BaseModel):
 class TriageDecisionRequest(BaseModel):
     path: str
     decision: str  # keep | keep_image | skip
+    region: Optional[dict] = None  # circled part: {box: [x, y, w, h], points: [[x, y], ...]} (fractions)
 
 
 @app.get("/image/triage")
@@ -1295,7 +1297,7 @@ async def triage_decide(body: TriageDecisionRequest, token: str = Query(...)):
     from .image import triage
 
     try:
-        return await asyncio.to_thread(triage.decide, Path(body.path), body.decision)
+        return await asyncio.to_thread(triage.decide, Path(body.path), body.decision, body.region)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

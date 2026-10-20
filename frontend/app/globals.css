@@ -1453,6 +1453,19 @@ a.btn {
 .triage-card.zoomed { overflow: auto; touch-action: auto; cursor: zoom-out; display: block; }
 .triage-card.zoomed img { max-width: none; max-height: none; width: 100%; height: auto; }
 
+.triage-card.marking { cursor: crosshair; }
+.triage-mark { position: absolute; overflow: visible; pointer-events: none; }
+.triage-mark polyline {
+  fill: none;
+  stroke: #e879f9;
+  stroke-width: 4px;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+.triage-mark polyline.closed { fill: rgba(232, 121, 249, 0.12); }
+.triage-circle.active { border-color: #e879f9; color: #e879f9; }
+
 .triage-next {
   position: absolute;
   inset: 0;
@@ -1500,7 +1513,7 @@ a.btn {
 
 .triage-actions {
   display: grid;
-  grid-template-columns: auto 1fr 1fr 1fr;
+  grid-template-columns: auto auto 1fr 1fr 1fr;
   gap: 0.5rem;
   padding: 0.625rem 1rem calc(0.75rem + env(safe-area-inset-bottom));
 }

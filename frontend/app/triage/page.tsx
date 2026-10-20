@@ -2,13 +2,14 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { api, type TriageDecision, type TriageItem, type TriageState } from '@/lib/api';
+import { api, type TriageDecision, type TriageItem, type TriageRegion, type TriageState } from '@/lib/api';
 
 // Screenshot triage: one screenshot at a time; swipe (phone) or arrow keys
 //   ← / swipe left   discard: nothing is added
 //   → / swipe right  keep: the information goes into the knowledge base, not the image
 //   ↑ / swipe up     keep with the image (it matters visually)
 //   Backspace / Z    undo the last decision
+//   ✎ / M            circle what the screenshot is for, then keep it (Esc clears the circle)
 
 const SWIPE_PX = 90; // how far a card must travel to count
 const REFILL_AT = 5; // fetch more when this few are left
@@ -19,6 +20,18 @@ const ACTIONS: { decision: TriageDecision; key: string; label: string; hint: str
     { decision: 'keep_image', key: '↑', label: 'Keep + image', hint: 'Information and the image' },
     { decision: 'keep', key: '→', label: 'Keep', hint: 'Information only' },
 ];
+
+type Point = [number, number];
+
+/** The circled region: bounding box and the stroke, as fractions of the image */
+function regionOf(points: Point[]): TriageRegion | null {
+    if (points.length < 5) return null;
+    const xs = points.map((p) => p[0]);
+    const ys = points.map((p) => p[1]);
+    const [x, y] = [Math.min(...xs), Math.min(...ys)];
+    const [w, h] = [Math.max(...xs) - x, Math.max(...ys) - y];
+    return w > 0.02 && h > 0.01 ? { box: [x, y, w, h], points } : null;
+}
 
 function directionOf(dx: number, dy: number): TriageDecision | null {
     if (-dy > SWIPE_PX && Math.abs(dy) > Math.abs(dx)) return 'keep_image';
@@ -39,6 +52,11 @@ export default function TriagePage() {
     const [message, setMessage] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
     const start = useRef<{ x: number; y: number; id: number } | null>(null);
+    // circling: drawing mode, the stroke (fractions of the image), the image's box in the card
+    const [marking, setMarking] = useState(false);
+    const [stroke, setStroke] = useState<Point[]>([]);
+    const [frame, setFrame] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+    const imgRef = useRef<HTMLImageElement>(null);
     // decisions sent but maybe not in the next fetch yet: never show those again
     const inFlight = useRef(new Set<string>());
     const busy = useRef(false);
@@ -77,6 +95,12 @@ export default function TriagePage() {
 
     const current = items[0];
 
+    const startMarking = useCallback(() => {
+        setStroke([]);
+        setMarking(true);
+        setZoomed(false);
+    }, []);
+
     const decide = useCallback((decision: TriageDecision) => {
         const item = items[0];
         if (!item || busy.current) return;
@@ -84,11 +108,14 @@ export default function TriagePage() {
         inFlight.current.add(item.path);
         setLeaving(decision);
         if (items.length - 1 < REFILL_AT && state && state.remaining > items.length) load();
+        const region = decision === 'skip' ? null : regionOf(stroke);
         setTimeout(() => {
             setItems((list) => list.slice(1));
             setLeaving(null);
             setDrag(null);
             setZoomed(false);
+            setStroke([]);
+            setMarking(false);
             busy.current = false;
         }, LEAVE_MS);
         setHistory((h) => [...h.slice(-49), { item, decision }]);
@@ -98,12 +125,12 @@ export default function TriagePage() {
             decided: { ...s.decided, [decision]: (s.decided[decision] ?? 0) + 1 },
             queue: decision === 'skip' ? s.queue : { ...s.queue, pending: (s.queue.pending ?? 0) + 1 },
         });
-        api.decideTriage(item.path, decision).catch((e) => {
+        api.decideTriage(item.path, decision, region).catch((e) => {
             console.error(e);
             setError(`Couldn't save the decision on ${item.name}; it will come up again`);
             inFlight.current.delete(item.path);
         });
-    }, [items, state, load]);
+    }, [items, state, load, stroke]);
 
     const undo = useCallback(async () => {
         const last = history[history.length - 1];
@@ -137,12 +164,17 @@ export default function TriagePage() {
             else if (e.key === 'ArrowUp') decide('keep_image');
             else if (e.key === 'Backspace' || e.key.toLowerCase() === 'z') undo();
             else if (e.key === ' ') setZoomed((z) => !z);
+            else if (e.key.toLowerCase() === 'm') startMarking();
+            else if (e.key === 'Escape') {
+                setStroke([]);
+                setMarking(false);
+            }
             else return;
             e.preventDefault();
         };
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
-    }, [decide, undo]);
+    }, [decide, undo, startMarking]);
 
     useEffect(() => {
         if (!message) return;
@@ -150,20 +182,52 @@ export default function TriagePage() {
         return () => clearTimeout(timer);
     }, [message]);
 
-    // --- Swipe ---
+    // where the image sits in its card, for the circle overlay (it's letterboxed to fit)
+    useEffect(() => {
+        const img = imgRef.current;
+        if (!img) return;
+        const measure = () => setFrame({ left: img.offsetLeft, top: img.offsetTop, width: img.offsetWidth, height: img.offsetHeight });
+        const observer = new ResizeObserver(measure);
+        observer.observe(img);
+        return () => observer.disconnect();
+    }, [current?.path, zoomed]);
+
+    // --- Swipe, or draw while circling ---
+
+    const imagePoint = (e: React.PointerEvent): Point | null => {
+        const rect = imgRef.current?.getBoundingClientRect();
+        if (!rect || !rect.width || !rect.height) return null;
+        const clamp = (v: number) => Math.round(Math.min(1, Math.max(0, v)) * 1e4) / 1e4;
+        return [clamp((e.clientX - rect.left) / rect.width), clamp((e.clientY - rect.top) / rect.height)];
+    };
 
     const onPointerDown = (e: React.PointerEvent) => {
         if (zoomed || busy.current) return;
         start.current = { x: e.clientX, y: e.clientY, id: e.pointerId };
         (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+        if (marking) {
+            const p = imagePoint(e);
+            setStroke(p ? [p] : []);
+        }
     };
     const onPointerMove = (e: React.PointerEvent) => {
         if (!start.current || start.current.id !== e.pointerId) return;
+        if (marking) {
+            const p = imagePoint(e);
+            if (p) setStroke((s) => [...s, p]);
+            return;
+        }
         setDrag({ dx: e.clientX - start.current.x, dy: e.clientY - start.current.y });
     };
     const onPointerUp = (e: React.PointerEvent) => {
         if (!start.current || start.current.id !== e.pointerId) return;
         start.current = null;
+        if (marking) {
+            // one stroke, then back to swiping; too small a scribble counts as no circle
+            setMarking(false);
+            if (!regionOf(stroke)) setStroke([]);
+            return;
+        }
         const decision = drag ? directionOf(drag.dx, drag.dy) : null;
         if (decision) decide(decision);
         else setDrag(null);
@@ -198,6 +262,7 @@ export default function TriagePage() {
         load();
     };
 
+    const region = regionOf(stroke);
     const hint = drag ? directionOf(drag.dx, drag.dy) : leaving;
     const transform = leaving
         ? leaving === 'keep' ? 'translate(120vw, 0) rotate(18deg)'
@@ -257,7 +322,7 @@ export default function TriagePage() {
                 )}
                 {current ? (
                     <div
-                        className={`triage-card ${zoomed ? 'zoomed' : ''} ${leaving ? 'leaving' : ''} ${drag ? 'dragging' : ''}`}
+                        className={`triage-card ${zoomed ? 'zoomed' : ''} ${leaving ? 'leaving' : ''} ${drag ? 'dragging' : ''} ${marking ? 'marking' : ''}`}
                         style={{ transform }}
                         onPointerDown={onPointerDown}
                         onPointerMove={onPointerMove}
@@ -266,7 +331,18 @@ export default function TriagePage() {
                         onDoubleClick={() => setZoomed((z) => !z)}
                     >
                         {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img src={api.triageImageUrl(current.path)} alt={current.name} draggable={false} />
+                        <img ref={imgRef} src={api.triageImageUrl(current.path)} alt={current.name} draggable={false}
+                             onLoad={(e) => {
+                                 const img = e.currentTarget;
+                                 setFrame({ left: img.offsetLeft, top: img.offsetTop, width: img.offsetWidth, height: img.offsetHeight });
+                             }} />
+                        {frame && stroke.length > 1 && (
+                            <svg className="triage-mark" viewBox="0 0 1 1" preserveAspectRatio="none"
+                                 style={{ left: frame.left, top: frame.top, width: frame.width, height: frame.height }}>
+                                <polyline points={stroke.map((p) => p.join(',')).join(' ')}
+                                          className={region && !marking ? 'closed' : ''} />
+                            </svg>
+                        )}
                     </div>
                 ) : (
                     state && !noFolders && (
@@ -281,13 +357,20 @@ export default function TriagePage() {
 
             {current && (
                 <div className="triage-meta text-muted">
-                    {current.folder} · {current.name} · {new Date(current.modified).toLocaleDateString()}
+                    {marking ? 'Draw around the part that matters'
+                        : region ? 'Circled: keep it and only that part is read · Esc clears'
+                        : `${current.folder} · ${current.name} · ${new Date(current.modified).toLocaleDateString()}`}
                 </div>
             )}
 
             <footer className="triage-actions">
                 <button className="btn btn-secondary" onClick={undo} disabled={!history.length} title="Undo (Backspace)">
                     ↶
+                </button>
+                <button className={`btn btn-secondary triage-circle ${marking || region ? 'active' : ''}`}
+                        onClick={() => (marking ? setMarking(false) : startMarking())} disabled={!current || zoomed}
+                        title="Circle the part that matters (M)">
+                    ✎
                 </button>
                 {ACTIONS.map((a) => (
                     <button key={a.decision} className={`triage-btn btn-${a.decision}`} onClick={() => decide(a.decision)}

@@ -29,6 +29,9 @@ def storage(tmp_path, monkeypatch):
 def test_folder_must_exist(storage):
     with pytest.raises(ValueError):
         triage.add_folder(str(storage / "missing"))
+    for bad in ("", "  ", "shots"):  # would resolve against the server's working folder
+        with pytest.raises(ValueError):
+            triage.add_folder(bad)
     assert triage.add_folder(str(storage)) == [str(storage.resolve())]
     assert triage.add_folder(str(storage)) == [str(storage.resolve())]  # no duplicates
 

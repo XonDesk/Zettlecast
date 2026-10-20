@@ -9,6 +9,7 @@ import logging
 import shutil
 import time
 from pathlib import Path
+from typing import Optional
 from uuid import uuid4
 
 from PIL import Image, UnidentifiedImageError
@@ -36,7 +37,7 @@ def keep_copy(file_path: Path) -> Path:
     return target
 
 
-def parse_image(file_path: Path, keep_image: bool = True) -> ProcessingResult:
+def parse_image(file_path: Path, keep_image: bool = True, focus_region: Optional[dict] = None) -> ProcessingResult:
     """
     Parse image file using the configured vision model.
 
@@ -94,7 +95,7 @@ def parse_image(file_path: Path, keep_image: bool = True) -> ProcessingResult:
 
         # 4. Run vision analysis
         try:
-            vision_data = VisionBackend().analyze_image(file_path)
+            vision_data = VisionBackend().analyze_image(file_path, focus_region=focus_region)
         except VisionModelNotFoundError as e:
             return ProcessingResult(
                 status="failed",
@@ -129,6 +130,7 @@ def parse_image(file_path: Path, keep_image: bool = True) -> ProcessingResult:
                     "image_kept": keep_image,
                     "original_path": str(file_path.absolute()),
                     "kind": vision_data.kind,
+                    **({"focus_region": focus_region} if focus_region else {}),
                     **({"focus": vision_data.focus} if vision_data.focus else {}),
                     **({"context": vision_data.context} if vision_data.context else {}),
                     "detected_text": vision_data.detected_text,

@@ -83,7 +83,10 @@ def folders() -> List[str]:
 
 
 def add_folder(folder: str) -> List[str]:
-    path = Path(folder).expanduser()
+    path = Path(folder.strip()).expanduser()
+    # a full path only: an empty or relative one would resolve against the server's own folder
+    if not folder.strip() or not path.is_absolute():
+        raise ValueError(f"Give the folder's full path: {folder!r}")
     if not path.is_dir():
         raise ValueError(f"Not a folder: {folder}")
     with _lock:
@@ -159,10 +162,31 @@ def pending(limit: int = 20) -> dict:
         return {"items": out, "remaining": undecided, "decided": counts, "folders": state["folders"]}
 
 
-def decide(path: Path, decision: str) -> dict:
-    """Record a decision; keeps are queued for the vision pass (keep_image copies the image there)."""
+def clean_region(region: Optional[dict]) -> Optional[dict]:
+    """A circled region as fractions of the image: box [x, y, w, h] and up to 64 stroke points."""
+    if not region:
+        return None
+    try:
+        x, y, w, h = (min(max(float(v), 0.0), 1.0) for v in region["box"])
+        points = [[round(min(max(float(px), 0.0), 1.0), 4), round(min(max(float(py), 0.0), 1.0), 4)]
+                  for px, py in (region.get("points") or [])]
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("Bad region")
+    if w < 0.01 or h < 0.01:
+        return None  # a tap, not a circle
+    step = max(1, len(points) // 64)
+    return {"box": [round(x, 4), round(y, 4), round(min(w, 1 - x), 4), round(min(h, 1 - y), 4)],
+            "points": points[::step]}
+
+
+def decide(path: Path, decision: str, region: Optional[dict] = None) -> dict:
+    """
+    Record a decision; keeps are queued for the vision pass (keep_image copies the image there).
+    region: the part the user circled, read as the screenshot's focus.
+    """
     if decision not in DECISIONS:
         raise ValueError(f"Unknown decision: {decision}")
+    region = clean_region(region) if decision != "skip" else None
     if not path.is_file() or not in_folders(path):
         raise ValueError("Not a screenshot in a triage folder")
     with _lock:
@@ -175,11 +199,12 @@ def decide(path: Path, decision: str) -> dict:
             queue = ImageQueue()
             try:
                 job_id = queue.add(path, collection_name="Screenshots")
-                queue.set_options(job_id, keep_image=decision == "keep_image")
+                queue.set_options(job_id, keep_image=decision == "keep_image", focus_region=region)
             except DuplicateImageError:
                 logger.info(f"Already in the knowledge base: {path.name}")
         state["decisions"][digest] = {"decision": decision, "path": str(path), "key": _file_key(path),
-                                      "job_id": job_id, "at": datetime.now().isoformat(timespec="seconds")}
+                                      "job_id": job_id, "at": datetime.now().isoformat(timespec="seconds"),
+                                      **({"region": region} if region else {})}
         _save(state)
         return state["decisions"][digest]
 

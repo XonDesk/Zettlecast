@@ -255,7 +255,10 @@ are never changed. Decisions are keyed by content hash (`_BRAIN_STORAGE/image_tr
 moved or renamed screenshots aren't asked about again. The vision call finds the screenshot's
 **focus** (the post / comment it was taken for: highlighted, else fully in view near the middle)
 and its context (site, author, what it replies to); only those, the description and concepts
-are embedded. The rest of the screen goes in `## Screen Text` and file details in
+are embedded. **Circling** (✎ / M on the triage page) saves the stroke and its box (fractions of
+the image) with the decision; the vision call then gets the screenshot with the mark drawn on it
+plus a padded, enlarged crop of the circle, and reads the circled content as the focus (it
+overrides the model's own pick). The rest of the screen goes in `## Screen Text` and file details in
 `## Image Details` (both in `chunker.UNINDEXED_SECTIONS`). People / organisations must appear in
 the focus or context (ads and neighbouring comments are dropped).
 

@@ -270,10 +270,10 @@ export const api = {
     removeTriageFolder: (path: string) =>
         fetchAPI<{ folders: string[] }>('/image/triage/folders', { method: 'DELETE', body: JSON.stringify({ path }) }),
 
-    decideTriage: (path: string, decision: TriageDecision) =>
+    decideTriage: (path: string, decision: TriageDecision, region?: TriageRegion | null) =>
         fetchAPI<{ decision: TriageDecision; job_id: string | null }>('/image/triage/decide', {
             method: 'POST',
-            body: JSON.stringify({ path, decision }),
+            body: JSON.stringify({ path, decision, region: region ?? null }),
         }),
 
     undoTriage: (path: string) =>
@@ -290,6 +290,12 @@ export const api = {
 };
 
 export type TriageDecision = 'keep' | 'keep_image' | 'skip';
+
+/** The part of a screenshot the user circled, as fractions of the image */
+export interface TriageRegion {
+    box: [number, number, number, number];
+    points: [number, number][];
+}
 
 export interface TriageItem {
     path: string;

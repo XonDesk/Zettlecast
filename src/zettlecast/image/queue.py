@@ -257,10 +257,14 @@ class ImageQueue:
         logger.info(f"Added {len(job_ids)} images from {directory}")
         return job_ids
 
-    def set_options(self, job_id: str, keep_image: bool) -> None:
-        """keep_image: store a copy of the image with its note (otherwise only the information)."""
+    def set_options(self, job_id: str, keep_image: bool, focus_region: Optional[dict] = None) -> None:
+        """
+        keep_image: store a copy of the image with its note (otherwise only the information).
+        focus_region: the part the user circled (the vision pass reads that as the focus).
+        """
         if job_id in self.items:
             self.items[job_id].image.keep_image = keep_image
+            self.items[job_id].image.focus_region = focus_region
             self._save_state()
 
     def remove_pending(self, job_id: str) -> bool:
