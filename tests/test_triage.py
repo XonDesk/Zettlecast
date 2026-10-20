@@ -118,3 +118,48 @@ def test_names_outside_the_focus_are_dropped(monkeypatch):
     image = __import__("pathlib").Path(__file__)  # any existing file; chat is mocked
     v = vision_backend.VisionBackend().analyze_image(image)
     assert v.people == ["Julien Périard"] and v.organisations == ["Reddit"]
+
+
+def test_discards_go_to_the_recycle_bin_after_the_undo_window(storage, monkeypatch):
+    from datetime import datetime
+
+    recycled = []
+
+    def fake_recycle(path):
+        recycled.append(path.name)
+        path.unlink()
+        return True
+
+    monkeypatch.setattr(triage, "recycle", fake_recycle)
+    triage.add_folder(str(storage))
+    triage.decide(storage / "shot0.png", "skip")
+    triage.decide(storage / "shot1.png", "skip")
+    triage.decide(storage / "shot2.png", "keep")  # keeps are never recycled
+
+    triage.sweep()
+    assert recycled == []  # still inside the undo window
+    triage.undo(storage / "shot1.png")  # undone in time: stays
+
+    later = datetime.now() + triage.RECYCLE_DELAY
+    state = triage._load()
+    assert triage._sweep(state, now=later)
+    triage._save(state)
+    assert recycled == ["shot0.png"]
+    assert (storage / "shot1.png").exists() and (storage / "shot2.png").exists()
+
+    entry = triage.undo(storage / "shot0.png")  # too late: it's in the Recycle Bin
+    assert entry["recycled"]
+
+
+def test_a_different_file_at_a_discarded_path_is_not_recycled(storage, monkeypatch):
+    from datetime import datetime
+
+    monkeypatch.setattr(triage, "recycle", lambda path: pytest.fail("must not recycle"))
+    triage.add_folder(str(storage))
+    triage.decide(storage / "shot0.png", "skip")
+    Image.new("RGB", (40, 30), "white").save(storage / "shot0.png")  # replaced by a new screenshot
+    os.utime(storage / "shot0.png", (time.time() + 5, time.time() + 5))
+    state = triage._load()
+    triage._sweep(state, now=datetime.now() + triage.RECYCLE_DELAY)
+    assert next(iter(state["decisions"].values()))["recycled"] == "replaced"
+    assert (storage / "shot0.png").exists()

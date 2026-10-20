@@ -239,7 +239,7 @@ export default function ImagesPage() {
                 <div style={{ flex: 1, minWidth: 220 }}>
                     <strong>Sort screenshots</strong>
                     <p className="text-muted">
-                        One at a time: ← discard, → keep the information, ↑ keep it with the image. Swipe on a phone.
+                        One at a time: ← delete (Recycle Bin), → keep the information, ↑ keep it with the image, ✎ circle what matters. Swipe on a phone.
                     </p>
                 </div>
                 <Link href="/triage" className="btn btn-primary">Start sorting</Link>

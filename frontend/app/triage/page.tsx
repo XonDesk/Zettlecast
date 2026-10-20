@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { api, type TriageDecision, type TriageItem, type TriageRegion, type TriageState } from '@/lib/api';
 
 // Screenshot triage: one screenshot at a time; swipe (phone) or arrow keys
-//   ← / swipe left   discard: nothing is added
+//   ← / swipe left   delete: nothing is added; the file goes to the Recycle Bin 10 minutes later
 //   → / swipe right  keep: the information goes into the knowledge base, not the image
 //   ↑ / swipe up     keep with the image (it matters visually)
 //   Backspace / Z    undo the last decision
@@ -16,7 +16,7 @@ const REFILL_AT = 5; // fetch more when this few are left
 const LEAVE_MS = 180;
 
 const ACTIONS: { decision: TriageDecision; key: string; label: string; hint: string }[] = [
-    { decision: 'skip', key: '←', label: 'Discard', hint: 'Not added' },
+    { decision: 'skip', key: '←', label: 'Delete', hint: 'Not added; to the Recycle Bin in 10 minutes' },
     { decision: 'keep_image', key: '↑', label: 'Keep + image', hint: 'Information and the image' },
     { decision: 'keep', key: '→', label: 'Keep', hint: 'Information only' },
 ];
@@ -149,7 +149,9 @@ export default function TriagePage() {
             });
             setMessage(undone?.note_kept
                 ? 'Undone, but it was already read into a note: delete that note if you don\u2019t want it'
-                : `Undone: ${last.item.name}`);
+                : undone?.recycled
+                    ? `Already in the Recycle Bin: restore ${last.item.name} from there to see it again`
+                    : `Undone: ${last.item.name}`);
         } catch (e) {
             console.error(e);
             setError('Undo failed');
@@ -280,7 +282,7 @@ export default function TriagePage() {
                     <strong>{state ? state.remaining : '…'}</strong> to go
                     {state && (
                         <span className="text-muted">
-                            {' '}· kept {state.decided.keep + state.decided.keep_image} · discarded {state.decided.skip}
+                            {' '}· kept {state.decided.keep + state.decided.keep_image} · deleted {state.decided.skip}
                         </span>
                     )}
                 </div>
@@ -295,7 +297,10 @@ export default function TriagePage() {
 
             {(showFolders || noFolders) && (
                 <section className="triage-folders">
-                    {noFolders && <p>Add a folder of screenshots to start. The files themselves are never changed or deleted.</p>}
+                    {noFolders && (
+                        <p>Add a folder of screenshots to start. Kept screenshots are never changed; deleted ones go to
+                            the Recycle Bin 10 minutes later (Undo until then).</p>
+                    )}
                     <ul>
                         {state?.folders.map((f) => (
                             <li key={f}>

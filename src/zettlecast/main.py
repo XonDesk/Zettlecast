@@ -9,6 +9,7 @@ import logging
 import mimetypes
 import re
 import threading
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +37,21 @@ for _noisy in ("nemo_logger", "nemo", "lightning", "pytorch_lightning", "httpx",
 logger = logging.getLogger(__name__)
 
 
+def _start_recycle_sweeper() -> None:
+    """Discarded screenshots go to the Recycle Bin once their Undo window passes, page open or not."""
+    def loop() -> None:
+        from .image import triage
+
+        while True:
+            try:
+                triage.sweep()
+            except Exception as e:
+                logger.warning(f"Screenshot recycle sweep failed: {e}")
+            time.sleep(60)
+
+    threading.Thread(target=loop, name="screenshot-recycler", daemon=True).start()
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     logger.info("Starting Zettlecast API...")
@@ -44,6 +60,7 @@ async def lifespan(_app: FastAPI):
     logger.info(f"Storage path: {settings.storage_path}")
     # free the GPU for transcription runs when nobody is searching
     embeddings.start_idle_unloader(settings.model_idle_minutes)
+    _start_recycle_sweeper()
     yield
     llm.unload(only_own=True)
 

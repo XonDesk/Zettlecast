@@ -248,9 +248,11 @@ podcast: {show: KoopCast, episode: ..., feed_url: ..., published: ...}
 
 ### Screenshots
 
-Triage (`/triage` page): ← discard (nothing added), → keep (the information only: the note
+Triage (`/triage` page): ← delete (nothing added; the file goes to the Windows Recycle Bin
+`triage.RECYCLE_DELAY` = 10 min later, by a sweeper thread in the API server, so Undo until then
+just cancels it; only the very file decided on, checked by key or hash), → keep (the information only: the note
 records the original path, `image_kept: false`, and `/notes/{uuid}/source` won't serve it),
-↑ keep with the image (copied to `_BRAIN_STORAGE/images/`, shown on the note). Original files
+↑ keep with the image (copied to `_BRAIN_STORAGE/images/`, shown on the note). Kept files
 are never changed. Decisions are keyed by content hash (`_BRAIN_STORAGE/image_triage.json`), so
 moved or renamed screenshots aren't asked about again. The vision call finds the screenshot's
 **focus** (the post / comment it was taken for: highlighted, else fully in view near the middle)

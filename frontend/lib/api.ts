@@ -277,7 +277,7 @@ export const api = {
         }),
 
     undoTriage: (path: string) =>
-        fetchAPI<{ undone: { decision: TriageDecision; note_kept?: boolean } | null }>('/image/triage/undo', {
+        fetchAPI<{ undone: { decision: TriageDecision; note_kept?: boolean; recycled?: string } | null }>('/image/triage/undo', {
             method: 'POST',
             body: JSON.stringify({ path }),
         }),

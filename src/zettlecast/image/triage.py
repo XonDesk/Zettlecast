@@ -4,17 +4,19 @@ and each gets a decision:
 
 - keep: the information goes into the knowledge base (vision note); the image itself isn't kept
 - keep_image: the same, plus a copy of the image in storage, shown with the note
-- skip: nothing is added
+- skip: nothing is added, and the screenshot goes to the Recycle Bin RECYCLE_DELAY later (Undo
+  until then just cancels it; after that it can be restored from the Recycle Bin)
 
-Original files are never changed or deleted. Decisions are keyed by file content, so a screenshot
-that is moved or renamed isn't asked about again. State: <storage>/image_triage.json.
+Kept screenshots are never changed. Decisions are keyed by file content, so a screenshot that is
+moved or renamed isn't asked about again. State: <storage>/image_triage.json.
 """
 
 import hashlib
 import json
 import logging
+import os
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -24,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic"}
 DECISIONS = ("keep", "keep_image", "skip")
+RECYCLE_DELAY = timedelta(minutes=10)  # a discarded screenshot waits this long for an Undo
 
 _lock = threading.Lock()
 
@@ -73,6 +76,65 @@ def _hash_cached(state: dict, path: Path) -> str:
         digest = file_hash(path)
         state["hashes"][key] = digest
     return digest
+
+
+def recycle(path: Path) -> bool:
+    """Send a file to the Windows Recycle Bin (as Explorer's Delete does: it can be restored)."""
+    if os.name != "nt":
+        raise OSError("The Recycle Bin is only available on Windows")
+    import ctypes
+    from ctypes import wintypes
+
+    class SHFILEOPSTRUCTW(ctypes.Structure):
+        _fields_ = [("hwnd", wintypes.HWND), ("wFunc", wintypes.UINT), ("pFrom", wintypes.LPCWSTR),
+                    ("pTo", wintypes.LPCWSTR), ("fFlags", ctypes.c_ushort), ("fAnyOperationsAborted", wintypes.BOOL),
+                    ("hNameMappings", ctypes.c_void_p), ("lpszProgressTitle", wintypes.LPCWSTR)]
+
+    FO_DELETE, FOF_SILENT, FOF_NOCONFIRMATION, FOF_ALLOWUNDO, FOF_NOERRORUI = 3, 0x4, 0x10, 0x40, 0x400
+    op = SHFILEOPSTRUCTW(wFunc=FO_DELETE, pFrom=str(path.resolve()) + "\0",  # list ends with a double null
+                         fFlags=FOF_SILENT | FOF_NOCONFIRMATION | FOF_ALLOWUNDO | FOF_NOERRORUI)
+    result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+    return result == 0 and not op.fAnyOperationsAborted and not path.exists()
+
+
+def _sweep(state: dict, now: Optional[datetime] = None) -> bool:
+    """Recycle discarded screenshots whose Undo window has passed. True if anything changed."""
+    now = now or datetime.now()
+    changed = False
+    for digest, entry in state["decisions"].items():
+        if entry["decision"] != "skip" or entry.get("recycled") or entry.get("recycle_failed"):
+            continue
+        if now < datetime.fromisoformat(entry["at"]) + RECYCLE_DELAY:
+            continue
+        path = Path(entry["path"])
+        changed = True
+        if not path.is_file():
+            entry["recycled"] = "gone"  # moved or deleted meanwhile
+            continue
+        # only the very file that was discarded: a new file with the same name stays
+        if _file_key(path) != entry.get("key") and _hash_cached(state, path) != digest:
+            entry["recycled"] = "replaced"
+            continue
+        try:
+            if recycle(path):
+                entry["recycled"] = now.isoformat(timespec="seconds")
+                logger.info(f"Discarded screenshot sent to the Recycle Bin: {path.name}")
+            else:
+                entry["recycle_failed"] = True
+        except OSError as e:
+            logger.warning(f"Could not recycle {path.name}: {e}")
+            entry["recycle_failed"] = True
+    return changed
+
+
+def sweep() -> int:
+    """Recycle the discarded screenshots that are due (run periodically by the API server)."""
+    with _lock:
+        state = _load()
+        before = sum(1 for d in state["decisions"].values() if d.get("recycled"))
+        if _sweep(state):
+            _save(state)
+        return sum(1 for d in state["decisions"].values() if d.get("recycled")) - before
 
 
 # --- Folders ---
@@ -129,6 +191,7 @@ def pending(limit: int = 20) -> dict:
     """
     with _lock:
         state = _load()
+        changed = _sweep(state)
         files = []
         for folder in state["folders"]:
             files.extend(_images_in(folder))
@@ -136,7 +199,6 @@ def pending(limit: int = 20) -> dict:
         decided_keys = {d["key"] for d in state["decisions"].values() if d.get("key")}
         out = []
         undecided = 0
-        changed = False
         for path in files:
             key = _file_key(path)
             if key in decided_keys:
@@ -210,7 +272,10 @@ def decide(path: Path, decision: str, region: Optional[dict] = None) -> dict:
 
 
 def undo(path: Path) -> Optional[dict]:
-    """Forget the decision on a screenshot; a keep still waiting in the queue is taken out again."""
+    """
+    Forget the decision on a screenshot: a keep still waiting in the queue is taken out again, a
+    discard not yet recycled stays where it is (an already recycled one is in the Recycle Bin).
+    """
     with _lock:
         state = _load()
         digest = _hash_cached(state, path) if path.is_file() else next(
