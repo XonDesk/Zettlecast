@@ -11,7 +11,7 @@ Tables:
 """
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
 
@@ -102,7 +102,9 @@ class Database:
 
     def connect(self) -> "Database":
         self.db_path.mkdir(parents=True, exist_ok=True)
-        self._db = lancedb.connect(str(self.db_path))
+        # Every read checks for a newer table version: the API server must see what CLI runs
+        # write (by default an open table stays at the version it was opened at)
+        self._db = lancedb.connect(str(self.db_path), read_consistency_interval=timedelta(0))
         self._tables = {}
         return self
 
