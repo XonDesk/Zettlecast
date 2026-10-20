@@ -1,0 +1,208 @@
+/*
+ * Process page in the ISA-101 "high-performance HMI" style: greys for everything normal,
+ * equipment as outlines (filled light grey while running), colour reserved for abnormal
+ * states, which always carry a shape and text as well (alarm priority: high = red diamond,
+ * medium = amber triangle, low = yellow-grey circle).
+ */
+.hmi {
+  --hmi-bg: #1c1d20;
+  --hmi-panel: #25272b;
+  --hmi-panel-2: #2d3035;
+  --hmi-line: #5a5e66;
+  --hmi-line-soft: #3d4046;
+  --hmi-text: #d6d8dc;
+  --hmi-muted: #8c9198;
+  --hmi-run: #c8cbd0;
+  --hmi-run-text: #1c1d20;
+  --hmi-band: #34373c;
+  --hmi-high: #e5484d;
+  --hmi-medium: #f5a524;
+  --hmi-low: #c9c27a;
+
+  margin: -2rem;
+  padding: 1rem 1.25rem 2rem;
+  min-height: 100vh;
+  background: var(--hmi-bg);
+  color: var(--hmi-text);
+  font-family: 'Segoe UI', Inter, system-ui, sans-serif;
+  font-size: 0.8125rem;
+}
+
+.hmi * { box-sizing: border-box; }
+
+.hmi-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 0.5rem 0.75rem;
+  background: var(--hmi-panel);
+  border: 1px solid var(--hmi-line-soft);
+  margin-bottom: 0.75rem;
+}
+
+.hmi-title { font-size: 1rem; font-weight: 600; letter-spacing: 0.08em; }
+
+.hmi-state {
+  padding: 0.125rem 0.625rem;
+  border: 1px solid var(--hmi-line);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.hmi-state[data-state='running'] { background: var(--hmi-run); color: var(--hmi-run-text); border-color: var(--hmi-run); }
+.hmi-state[data-state='fault'] { border-color: var(--hmi-high); color: var(--hmi-high); }
+.hmi-state[data-state='stopping'] { border-color: var(--hmi-medium); color: var(--hmi-medium); }
+
+.hmi-header-right { margin-left: auto; display: flex; gap: 1rem; align-items: center; color: var(--hmi-muted); }
+
+.hmi-comm-fail { color: var(--hmi-medium); font-weight: 700; }
+
+.hmi-alarm-counts { display: flex; gap: 0.75rem; }
+.hmi-alarm-count { display: inline-flex; align-items: center; gap: 0.25rem; }
+
+/* priority shapes */
+.hmi-pri { display: inline-block; width: 11px; height: 11px; flex: none; }
+.hmi-pri[data-p='high'] { background: var(--hmi-high); transform: rotate(45deg) scale(0.85); }
+.hmi-pri[data-p='medium'] { width: 0; height: 0; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 11px solid var(--hmi-medium); }
+.hmi-pri[data-p='low'] { background: var(--hmi-low); border-radius: 50%; }
+
+.hmi-mimic {
+  background: var(--hmi-panel);
+  border: 1px solid var(--hmi-line-soft);
+  margin-bottom: 0.75rem;
+}
+
+.hmi-mimic svg { display: block; width: 100%; height: auto; }
+
+/* SVG equipment */
+.hmi-mimic .pipe { stroke: var(--hmi-line); stroke-width: 2; fill: none; }
+.hmi-mimic .pipe.flow { stroke: var(--hmi-run); stroke-dasharray: 6 6; animation: hmi-flow 1.2s linear infinite; }
+@keyframes hmi-flow { to { stroke-dashoffset: -12; } }
+@media (prefers-reduced-motion: reduce) { .hmi-mimic .pipe.flow { animation: none; } }
+
+.hmi-mimic .frame { fill: none; stroke: var(--hmi-line-soft); stroke-width: 1; stroke-dasharray: 4 3; }
+.hmi-mimic .frame-label { fill: var(--hmi-muted); font-size: 11px; letter-spacing: 0.08em; }
+.hmi-mimic .unit rect.body { fill: var(--hmi-panel-2); stroke: var(--hmi-line); stroke-width: 1.5; }
+.hmi-mimic .unit text { fill: var(--hmi-muted); font-size: 11px; }
+.hmi-mimic .unit .name { font-weight: 600; fill: var(--hmi-text); font-size: 11px; letter-spacing: 0.04em; }
+.hmi-mimic .unit.running rect.body { fill: var(--hmi-run); stroke: var(--hmi-run); }
+.hmi-mimic .unit.running text { fill: var(--hmi-run-text); }
+.hmi-mimic .unit.fault rect.body { stroke: var(--hmi-high); stroke-width: 2.5; }
+.hmi-mimic .unit .bar-bg { fill: var(--hmi-band); }
+.hmi-mimic .unit .bar { fill: var(--hmi-text); }
+.hmi-mimic .unit.running .bar-bg { fill: #9da1a7; }
+.hmi-mimic .unit.running .bar { fill: var(--hmi-run-text); }
+.hmi-mimic .tank { fill: var(--hmi-panel-2); stroke: var(--hmi-line); stroke-width: 1.5; }
+.hmi-mimic .tank-level { fill: #6b7078; }
+.hmi-mimic .value { fill: var(--hmi-text); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.hmi-mimic .label { fill: var(--hmi-muted); font-size: 11px; }
+.hmi-mimic .alarm-marker { fill: var(--hmi-high); }
+
+.hmi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.hmi-panel {
+  background: var(--hmi-panel);
+  border: 1px solid var(--hmi-line-soft);
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.hmi-panel h2 {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--hmi-muted);
+  border-bottom: 1px solid var(--hmi-line-soft);
+  padding-bottom: 0.375rem;
+}
+
+.hmi-row { display: flex; justify-content: space-between; gap: 0.75rem; align-items: baseline; }
+.hmi-row > span:first-child { color: var(--hmi-muted); flex: none; }
+.hmi-row > span:last-child { text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* analog bar with normal range (ISA-101 style): dark normal band, grey caution band, pointer */
+.hmi-analog { display: flex; flex-direction: column; gap: 0.25rem; }
+.hmi-analog-track { position: relative; height: 12px; background: var(--hmi-band); border: 1px solid var(--hmi-line-soft); }
+.hmi-analog-zone { position: absolute; top: 0; bottom: 0; }
+.hmi-analog-zone.warn { background: #44474d; }
+.hmi-analog-zone.alarm { background: #55585e; }
+.hmi-analog-fill { position: absolute; top: 2px; bottom: 2px; left: 0; background: var(--hmi-run); }
+.hmi-analog-fill[data-level='medium'] { background: var(--hmi-medium); }
+.hmi-analog-fill[data-level='high'] { background: var(--hmi-high); }
+.hmi-analog-scale { display: flex; justify-content: space-between; color: var(--hmi-muted); font-size: 0.6875rem; }
+
+.hmi-buttons { display: flex; flex-wrap: wrap; gap: 0.375rem; }
+
+.hmi-btn {
+  min-height: 32px;
+  padding: 0.25rem 0.75rem;
+  background: var(--hmi-panel-2);
+  color: var(--hmi-text);
+  border: 1px solid var(--hmi-line);
+  font: inherit;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.hmi-btn:hover:not(:disabled) { border-color: var(--hmi-run); }
+.hmi-btn:disabled { color: #5d6168; border-color: var(--hmi-line-soft); cursor: not-allowed; }
+.hmi-btn[data-armed='true'] { border-color: var(--hmi-medium); color: var(--hmi-medium); }
+
+.hmi-input {
+  min-height: 32px;
+  padding: 0.25rem 0.5rem;
+  background: var(--hmi-bg);
+  color: var(--hmi-text);
+  border: 1px solid var(--hmi-line);
+  font: inherit;
+  min-width: 0;
+}
+
+.hmi-input.num { width: 4.5rem; }
+.hmi-field { display: flex; gap: 0.375rem; align-items: center; flex-wrap: wrap; }
+
+.hmi-message { color: var(--hmi-muted); min-height: 1.1em; }
+
+.hmi-progress { height: 6px; background: var(--hmi-band); }
+.hmi-progress > div { height: 100%; background: var(--hmi-run); }
+
+.hmi-alarms { list-style: none; display: flex; flex-direction: column; gap: 0.25rem; }
+.hmi-alarm {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem 0.5rem;
+  background: var(--hmi-panel-2);
+  border-left: 3px solid var(--hmi-line);
+}
+.hmi-alarm[data-p='high'] { border-left-color: var(--hmi-high); }
+.hmi-alarm[data-p='medium'] { border-left-color: var(--hmi-medium); }
+.hmi-alarm[data-p='low'] { border-left-color: var(--hmi-low); }
+.hmi-alarm[data-acked='false'] { animation: hmi-unacked 1.6s ease-in-out infinite; }
+@keyframes hmi-unacked { 50% { background: #383b41; } }
+@media (prefers-reduced-motion: reduce) { .hmi-alarm[data-acked='false'] { animation: none; } }
+.hmi-alarm .text { flex: 1; }
+.hmi-alarm .hmi-btn { min-height: 26px; padding: 0 0.5rem; }
+
+.hmi-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.hmi-table th { text-align: left; color: var(--hmi-muted); font-weight: 500; padding: 0.25rem 0.375rem; border-bottom: 1px solid var(--hmi-line-soft); }
+.hmi-table td { padding: 0.25rem 0.375rem; border-bottom: 1px solid #2f3237; }
+.hmi-table td.title { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hmi-table .num { text-align: right; white-space: nowrap; }
+
+.hmi-muted { color: var(--hmi-muted); }
+
+@media (max-width: 700px) {
+  .hmi { margin: -1rem; padding: 0.75rem; }
+}

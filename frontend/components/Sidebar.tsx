@@ -12,6 +12,7 @@ const navItems = [
     { href: '/images', label: '🖼️ Images', icon: '🖼️' },
     { href: '/search', label: '🔍 Search', icon: '🔍' },
     { href: '/graph', label: '📊 Graph', icon: '📊' },
+    { href: '/process', label: '🏭 Process', icon: '🏭' },
     { href: '/settings', label: '⚙️ Settings', icon: '⚙️' },
 ];
 

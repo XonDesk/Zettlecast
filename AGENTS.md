@@ -37,6 +37,8 @@ src/zettlecast/
   enricher.py        LLM tags + summary for non-podcast notes
   identity.py        UUID frontmatter, wikilinks
   models.py          Pydantic models
+  runstate.py        Run state shared across processes (<storage>/run_state.json) + stop requests; one run at a time
+  system.py          Process page status (run, queues, GPU, LLM server, DB, disk, alarms) and controls
   podcast/
     nemo_transcriber.py  Parakeet + Nemotron diarization on CUDA
     asr_cache.py         Saved raw transcription (<audio>.asr.json) between the two passes
@@ -54,7 +56,7 @@ src/zettlecast/
     image_parser.py      Image -> note
     queue.py             Image queue
 frontend/            Next.js UI: app/(main)/ pages share the sidebar (notes, podcasts, images, search,
-                     settings); app/graph is a full-screen view; components/Transcript renders speaker turns
+                     process, settings); app/(main)/process is the HMI-style control page (ISA-101 look); app/graph is a full-screen view; components/Transcript renders speaker turns
 tests/               pytest suite (LLM and models mocked)
 start.ps1            Start Ollama + API + web UI
 zc.ps1               CLI shortcut
@@ -187,6 +189,10 @@ POST /podcast/retry | POST /podcast/sync | POST /podcast/reset-stuck
 
 GET  /image/status | POST /image/scan | POST /image/add | POST /image/run {limit}
 GET  /image/running | POST /image/retry
+
+GET  /system/status                     run state (any process), queues, GPU, LLM server, Ollama, DB, disk, alarms
+POST /system/run/stop {mode: after_episode|abort} | POST /system/run/resume
+POST /system/unload (free the GPU; not during a run) | POST /system/reindex (background task)
 
 GET  /settings | POST /settings {key: value}   (written to .env; restart to apply)
 ```
