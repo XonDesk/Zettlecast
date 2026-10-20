@@ -11,7 +11,7 @@ LanceDB for semantic search, and notes are linked into a knowledge graph.
 | Component | Technology |
 |-----------|-----------|
 | Backend | Python 3.12 + FastAPI, CLI with Click |
-| Frontend | Next.js 16 + React 19 + TypeScript; graph: Sigma.js (WebGL) + graphology ForceAtlas2 |
+| Frontend | Next.js 16 + React 19 + TypeScript; graph: Sigma.js (WebGL) + d3-force |
 | Database | LanceDB (notes, chunks with 1024-dim vectors, graph edges) |
 | Embeddings | `Qwen/Qwen3-Embedding-0.6B` (sentence-transformers, CUDA) |
 | Reranker | `Qwen/Qwen3-Reranker-0.6B` (CrossEncoder, CUDA) |
@@ -179,7 +179,8 @@ GET  /notes/{uuid}/markdown             note as a markdown download
 DELETE /notes/{uuid}
 GET  /search?q=&top_k=5&rerank=true     -> {results: [{uuid,title,score,snippet,source_type,timestamp_seconds}]}
 POST /notes/{uuid}/link {target_uuid, action: accept|reject}
-GET  /graph?limit=2000                  -> {nodes: [{id,name,source_type,val,community}], links: [{source,target,value,kind}],
+GET  /graph?limit=2000                  -> {nodes: [{id,name,source_type,val,community,tags,people,organisations,source,date,duration}],
+                                            links: [{source,target,value,kind}],
                                             communities: [{id,label,size}]}
 POST /graph/rebuild                     -> {edges}   (edges + communities)
 
@@ -242,9 +243,19 @@ Each note keeps its 6 best partners (`GRAPH_MAX_EDGES_PER_NOTE`), edges are the 
 always edges; rejected pairs never. Communities: Leiden (`igraph` + `leidenalg`), `GRAPH_RESOLUTION`.
 Edges for a new note are computed at ingest; the full rebuild (communities) runs after each podcast
 run, on `reindex`, `graph rebuild` and the UI button. The verification sections of a transcript
-note (`chunker.UNINDEXED_SECTIONS`) are not chunked or embedded. Frontend: fill = community (only 4
-hues pass all-pairs colour checks on the dark surface; others neutral, all named on the map), ring =
-source type, LinLog ForceAtlas2 with links inside a community pulling 4x harder.
+note (`chunker.UNINDEXED_SECTIONS`) are not chunked or embedded.
+
+Graph view (`frontend/components/Graph.tsx`, Obsidian-like): a live d3-force simulation (centre, repel,
+link force/distance, collision, plus a community pull towards each community's centre; links across
+communities weaken as it grows), laid out 300 ticks before the first frame; notes can be dragged.
+Fill = community (12 hues, any changeable in the pane; communities also named on the map), ring =
+source type. Node sizes are in layout units (`itemSizesReference: 'positions'`), so the collision
+radius matches what's drawn and titles appear as you zoom in. The right-hand pane
+(`GraphPane.tsx`, settings in localStorage) has Filters (query language in `lib/graphQuery.ts`:
+`tag:` `person:` `org:` `source:` `type:` `community:` `year:2021-2023`, `-` negates; types, years,
+link kinds, minimum strength, orphans, neighbourhood of the selected note), Communities (show/hide,
+highlight, what stands out in each: topics/people/organisations at 1.5x their overall rate),
+Groups (colour by community/year/source/type, query -> colour groups), Display and Forces.
 
 ### LanceDB tables
 

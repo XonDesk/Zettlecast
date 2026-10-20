@@ -65,6 +65,12 @@ export interface GraphNode {
     source_type: string;
     val: number;
     community: number | null;
+    tags: string[];
+    people: string[];
+    organisations: string[];
+    source: string; // podcast show, website host, or type
+    date: string | null; // YYYY-MM-DD: published (podcasts) or added
+    duration: number | null; // seconds (audio)
 }
 
 export interface GraphLink {

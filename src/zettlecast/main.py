@@ -4,6 +4,7 @@ API endpoints for ingestion, search, and note management.
 """
 
 import asyncio
+import json
 import logging
 import mimetypes
 import re
@@ -350,6 +351,37 @@ async def manage_link(
 
 # --- Graph Data ---
 
+def _iso_date(value) -> Optional[str]:
+    """YYYY-MM-DD from an RSS date ("Wed, 27 Nov 2019 ...") or an ISO one."""
+    if not value:
+        return None
+    from email.utils import parsedate_to_datetime
+
+    try:
+        return parsedate_to_datetime(str(value)).date().isoformat()
+    except (TypeError, ValueError):
+        return str(value)[:10] if re.match(r"\d{4}-\d{2}-\d{2}", str(value)) else None
+
+
+def _graph_facets(note: dict, row: dict) -> dict:
+    """What the graph view filters and colours by: topics, people, organisations, source, date."""
+    from .linker import source_group
+
+    meta = json.loads(row.get("metadata_json") or "{}")
+    custom = meta.get("custom") or {}
+    podcast = custom.get("podcast") or {}
+    group = source_group({"source_type": note["source_type"], "source_path": row.get("source_path"),
+                          "metadata": meta})
+    return {
+        "tags": [str(t) for t in meta.get("tags") or []],
+        "people": [str(p) for p in custom.get("people") or [] if p],
+        "organisations": [str(o) for o in custom.get("organisations") or [] if o],
+        "source": group.split(":", 1)[-1],  # show name, website host, or type
+        "date": _iso_date(podcast.get("published")) or str(note.get("created_at") or "")[:10] or None,
+        "duration": meta.get("duration_seconds"),
+    }
+
+
 @app.get("/graph")
 async def get_graph_data(
     token: str = Query(...),
@@ -363,6 +395,11 @@ async def get_graph_data(
     """
     notes = db.list_notes(limit=limit)
     ids = {n["uuid"] for n in notes}
+    details = {
+        r["uuid"]: r
+        for r in db.notes.search().select(["uuid", "source_path", "metadata_json"]).limit(100_000).to_list()
+        if r["uuid"] in ids
+    }
     edges = [e for e in db.get_all_edges() if e["source_uuid"] in ids and e["target_uuid"] in ids]
     links = [
         {"source": e["source_uuid"], "target": e["target_uuid"], "value": round(float(e["weight"]), 3),
@@ -391,6 +428,7 @@ async def get_graph_data(
             "source_type": n["source_type"],
             "val": 1 + degree.get(n["uuid"], 0),  # node size: more links, bigger node
             "community": community.get(n["uuid"]),
+            **_graph_facets(n, details.get(n["uuid"], {})),
         }
         for n in notes
     ]
