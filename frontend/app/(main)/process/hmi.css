@@ -15,6 +15,16 @@
   --hmi-run: #c8cbd0;
   --hmi-run-text: #1c1d20;
   --hmi-band: #34373c;
+  /* section accents: working equipment, its frame, label and moving pipes. Blues, teal and
+     violet only, so red / amber / yellow keep meaning "alarm" */
+  --hmi-pass1: #2bb3a3;
+  --hmi-pass2: #4d8fe0;
+  --hmi-store: #9b87f5;
+  --hmi-llm: #38bdf8;
+  --hmi-queue: #7c9cc4;
+  --hmi-io: #8fa3b8;
+  --accent: var(--hmi-run);
+
   --hmi-high: #e5484d;
   --hmi-medium: #f5a524;
   --hmi-low: #c9c27a;
@@ -50,7 +60,7 @@
   letter-spacing: 0.06em;
 }
 
-.hmi-state[data-state='running'] { background: var(--hmi-run); color: var(--hmi-run-text); border-color: var(--hmi-run); }
+.hmi-state[data-state='running'] { background: var(--hmi-pass2); color: var(--hmi-run-text); border-color: var(--hmi-pass2); }
 .hmi-state[data-state='fault'] { border-color: var(--hmi-high); color: var(--hmi-high); }
 .hmi-state[data-state='stopping'] { border-color: var(--hmi-medium); color: var(--hmi-medium); }
 
@@ -76,25 +86,36 @@
 .hmi-mimic svg { display: block; width: 100%; height: auto; }
 
 /* SVG equipment */
+.hmi-mimic [data-group='pass1'] { --accent: var(--hmi-pass1); }
+.hmi-mimic [data-group='pass2'] { --accent: var(--hmi-pass2); }
+.hmi-mimic [data-group='store'] { --accent: var(--hmi-store); }
+.hmi-mimic [data-group='llm'] { --accent: var(--hmi-llm); }
+.hmi-mimic [data-group='queue'] { --accent: var(--hmi-queue); }
+.hmi-mimic [data-group='io'] { --accent: var(--hmi-io); }
+.hmi-mimic .pipe.service { stroke-dasharray: 3 4; }
+.hmi-mimic .pipe.service.live { stroke: var(--accent); }
+.hmi-mimic .label.accent { fill: var(--accent); }
 .hmi-mimic .pipe { stroke: var(--hmi-line); stroke-width: 2; fill: none; }
-.hmi-mimic .pipe.flow { stroke: var(--hmi-run); stroke-dasharray: 6 6; animation: hmi-flow 1.2s linear infinite; }
+.hmi-mimic .pipe.flow { stroke: var(--accent); stroke-width: 2.5; stroke-dasharray: 6 6; animation: hmi-flow 1.2s linear infinite; }
 @keyframes hmi-flow { to { stroke-dashoffset: -12; } }
 @media (prefers-reduced-motion: reduce) { .hmi-mimic .pipe.flow { animation: none; } }
 
-.hmi-mimic .frame { fill: none; stroke: var(--hmi-line-soft); stroke-width: 1; stroke-dasharray: 4 3; }
-.hmi-mimic .frame-label { fill: var(--hmi-muted); font-size: 11px; letter-spacing: 0.08em; }
-.hmi-mimic .unit rect.body { fill: var(--hmi-panel-2); stroke: var(--hmi-line); stroke-width: 1.5; }
+.hmi-mimic .frame { fill: color-mix(in srgb, var(--accent) 5%, transparent); stroke: color-mix(in srgb, var(--accent) 45%, transparent); stroke-width: 1; stroke-dasharray: 4 3; }
+.hmi-mimic .frame-label { fill: color-mix(in srgb, var(--accent) 80%, var(--hmi-muted)); font-size: 11px; letter-spacing: 0.08em; font-weight: 600; }
+.hmi-mimic .unit rect.body { fill: var(--hmi-panel-2); stroke: color-mix(in srgb, var(--accent) 40%, var(--hmi-line)); stroke-width: 1.5; }
+.hmi-mimic .unit .name { fill: color-mix(in srgb, var(--accent) 35%, var(--hmi-text)); }
 .hmi-mimic .unit text { fill: var(--hmi-muted); font-size: 11px; }
 .hmi-mimic .unit .name { font-weight: 600; fill: var(--hmi-text); font-size: 11px; letter-spacing: 0.04em; }
-.hmi-mimic .unit.running rect.body { fill: var(--hmi-run); stroke: var(--hmi-run); }
+.hmi-mimic .unit.running rect.body { fill: var(--accent); stroke: var(--accent); }
+.hmi-mimic .unit.running .name { fill: var(--hmi-run-text); }
 .hmi-mimic .unit.running text { fill: var(--hmi-run-text); }
 .hmi-mimic .unit.fault rect.body { stroke: var(--hmi-high); stroke-width: 2.5; }
 .hmi-mimic .unit .bar-bg { fill: var(--hmi-band); }
 .hmi-mimic .unit .bar { fill: var(--hmi-text); }
-.hmi-mimic .unit.running .bar-bg { fill: #9da1a7; }
+.hmi-mimic .unit.running .bar-bg { fill: color-mix(in srgb, var(--hmi-run-text) 30%, var(--accent)); }
 .hmi-mimic .unit.running .bar { fill: var(--hmi-run-text); }
-.hmi-mimic .tank { fill: var(--hmi-panel-2); stroke: var(--hmi-line); stroke-width: 1.5; }
-.hmi-mimic .tank-level { fill: #6b7078; }
+.hmi-mimic .tank { fill: var(--hmi-panel-2); stroke: color-mix(in srgb, var(--accent) 50%, var(--hmi-line)); stroke-width: 1.5; }
+.hmi-mimic .tank-level { fill: color-mix(in srgb, var(--accent) 75%, var(--hmi-panel-2)); }
 .hmi-mimic .value { fill: var(--hmi-text); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .hmi-mimic .label { fill: var(--hmi-muted); font-size: 11px; }
 .hmi-mimic .alarm-marker { fill: var(--hmi-high); }
@@ -116,6 +137,13 @@
   min-width: 0;
 }
 
+.hmi-panel { border-top: 2px solid var(--panel-accent, var(--hmi-line-soft)); }
+.hmi-panel[data-accent='run'] { --panel-accent: var(--hmi-pass2); }
+.hmi-panel[data-accent='equipment'] { --panel-accent: var(--hmi-llm); }
+.hmi-panel[data-accent='queue'] { --panel-accent: var(--hmi-pass1); }
+.hmi-panel[data-accent='alarms'] { --panel-accent: var(--hmi-line); }
+.hmi-panel[data-accent='recent'] { --panel-accent: var(--hmi-store); }
+
 .hmi-panel h2 {
   font-size: 0.75rem;
   font-weight: 600;
@@ -136,7 +164,7 @@
 .hmi-analog-zone { position: absolute; top: 0; bottom: 0; }
 .hmi-analog-zone.warn { background: #44474d; }
 .hmi-analog-zone.alarm { background: #55585e; }
-.hmi-analog-fill { position: absolute; top: 2px; bottom: 2px; left: 0; background: var(--hmi-run); }
+.hmi-analog-fill { position: absolute; top: 2px; bottom: 2px; left: 0; background: var(--hmi-llm); }
 .hmi-analog-fill[data-level='medium'] { background: var(--hmi-medium); }
 .hmi-analog-fill[data-level='high'] { background: var(--hmi-high); }
 .hmi-analog-scale { display: flex; justify-content: space-between; color: var(--hmi-muted); font-size: 0.6875rem; }
@@ -155,7 +183,7 @@
   cursor: pointer;
 }
 
-.hmi-btn:hover:not(:disabled) { border-color: var(--hmi-run); }
+.hmi-btn:hover:not(:disabled) { border-color: var(--hmi-llm); color: #fff; }
 .hmi-btn:disabled { color: #5d6168; border-color: var(--hmi-line-soft); cursor: not-allowed; }
 .hmi-btn[data-armed='true'] { border-color: var(--hmi-medium); color: var(--hmi-medium); }
 
@@ -175,7 +203,7 @@
 .hmi-message { color: var(--hmi-muted); min-height: 1.1em; }
 
 .hmi-progress { height: 6px; background: var(--hmi-band); }
-.hmi-progress > div { height: 100%; background: var(--hmi-run); }
+.hmi-progress > div { height: 100%; background: var(--hmi-pass2); }
 
 .hmi-alarms { list-style: none; display: flex; flex-direction: column; gap: 0.25rem; }
 .hmi-alarm {

@@ -146,7 +146,7 @@ function Mimic({ s, now }: { s: SystemStatus; now: number }) {
         <svg viewBox="0 0 1180 470" role="img" aria-label="Process diagram: sources, queue, pass 1 transcription, saved transcriptions, pass 2 analysis, knowledge store, graph">
             <defs>
                 <marker id="hmi-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-                    <path d="M0 0 L10 5 L0 10 z" fill="#5a5e66" />
+                    <path d="M0 0 L10 5 L0 10 z" fill="context-stroke" />
                 </marker>
             </defs>
 
@@ -159,12 +159,15 @@ function Mimic({ s, now }: { s: SystemStatus; now: number }) {
             </g>
             <path className="pipe" d="M130 85 H168" markerEnd="url(#hmi-arrow)" />
 
+            <g data-group="queue">
             <rect className="tank" x={170} y={40} width={70} height={tankH} rx={6} />
             <rect className="tank-level" x={172} y={40 + tankH - 2 - level} width={66} height={level} rx={4} />
             <text className="label" x={205} y={32} textAnchor="middle">QUEUE</text>
             <text className="value" x={205} y={150} textAnchor="middle">{pending}</text>
             <text className="label" x={205} y={165} textAnchor="middle">pending of {s.queues.podcast.total}</text>
+            </g>
 
+            <g data-group="pass1">
             <path className={`pipe ${pass1Active ? 'flow' : ''}`} d="M240 85 H288" markerEnd="url(#hmi-arrow)" />
             <rect className="frame" x={280} y={28} width={530} height={116} />
             <text className="frame-label" x={290} y={22}>PASS 1 · TRANSCRIPTION{pass1Active ? phaseCount : ''}</text>
@@ -177,14 +180,15 @@ function Mimic({ s, now }: { s: SystemStatus; now: number }) {
                 <path key={u.id} className="pipe" d={`M${405 + i * 128} 85 H${421 + i * 128}`} markerEnd="url(#hmi-arrow)" />
             ))}
             <path className={`pipe ${pass1Active ? 'flow' : ''}`} d="M789 85 H838" markerEnd="url(#hmi-arrow)" />
+            </g>
 
-            <rect className="tank" x={840} y={40} width={80} height={tankH} rx={6} />
+            <rect className="tank" data-group="pass1" x={840} y={40} width={80} height={tankH} rx={6} />
             <text className="label" x={880} y={32} textAnchor="middle">SAVED ASR</text>
             <text className="value" x={880} y={82} textAnchor="middle">{s.queues.podcast.total - (q.cancelled ?? 0)}</text>
             <text className="label" x={880} y={98} textAnchor="middle">.asr.json</text>
 
             {/* LLM server (utility for pass 2) */}
-            <g className={`unit ${server.state === 'ready' ? 'running' : llmDown ? 'fault' : 'idle'}`} transform="translate(975 40)">
+            <g data-group="llm" className={`unit ${server.state === 'ready' ? 'running' : llmDown ? 'fault' : 'idle'}`} transform="translate(975 40)">
                 <rect className="body" width={185} height={90} />
                 <text className="name" x={10} y={18}>LLM SERVER</text>
                 <text x={10} y={36}>{s.llm.backend === 'llama-server' ? 'llama-server' : 'Ollama'} · {s.llm.model}</text>
@@ -192,10 +196,13 @@ function Mimic({ s, now }: { s: SystemStatus; now: number }) {
                 <text x={10} y={72}>GPU {gb(s.gpu?.memory_used_mib)} / {gb(s.gpu?.memory_total_mib)} GB</text>
             </g>
             {vramAlarm && <rect className="alarm-marker" x={1146} y={46} width={9} height={9} transform="rotate(45 1150 50)" />}
-            <path className="pipe" d="M1067 130 V180 H905 V198" strokeDasharray="3 4" markerEnd="url(#hmi-arrow)" />
-            <text className="label" x={985} y={176}>LLM service</text>
+            <g data-group="llm">
+            <path className={`pipe service ${server.state === 'ready' ? 'live' : ''}`} d="M1067 130 V180 H905 V198" markerEnd="url(#hmi-arrow)" />
+            <text className="label accent" x={985} y={176}>LLM service</text>
+            </g>
 
             {/* ASR results -> pass 2 */}
+            <g data-group="pass2">
             <path className={`pipe ${pass2Active ? 'flow' : ''}`} d="M880 130 V172 H40 V238" markerEnd="url(#hmi-arrow)" />
 
             {/* Row 2: pass 2 -> store -> graph */}
@@ -211,7 +218,9 @@ function Mimic({ s, now }: { s: SystemStatus; now: number }) {
                 <path key={u.id} className="pipe" d={`M${142 + i * 126} 267 H${156 + i * 126}`} markerEnd="url(#hmi-arrow)" />
             ))}
             <path className={`pipe ${pass2Active ? 'flow' : ''}`} d="M898 267 H948" markerEnd="url(#hmi-arrow)" />
+            </g>
 
+            <g data-group="store">
             <g transform="translate(950 214)">
                 <rect className="tank" width={100} height={104} rx={8} />
                 <text className="label" x={50} y={-6} textAnchor="middle">KNOWLEDGE</text>
@@ -227,8 +236,10 @@ function Mimic({ s, now }: { s: SystemStatus; now: number }) {
                 <text x={8} y={32}>{s.database.communities ?? 0} communities</text>
                 <text x={8} y={46}>{graphActive ? 'REBUILDING' : 'Leiden'}</text>
             </g>
+            </g>
 
             {/* Row 3: image and web lines into the store */}
+            <g data-group="io">
             <text className="frame-label" x={30} y={360}>IMAGES</text>
             <g className="unit idle" transform="translate(20 370)">
                 <rect className="body" width={110} height={54} />
@@ -247,6 +258,7 @@ function Mimic({ s, now }: { s: SystemStatus; now: number }) {
             <path className="pipe" d="M600 397 H628" markerEnd="url(#hmi-arrow)" />
             <Unit x={630} y={370} name="ENRICH" note="LLM tags" state="idle" />
             <path className="pipe" d="M740 397 H1015 V320" markerEnd="url(#hmi-arrow)" />
+            </g>
         </svg>
     );
 }
@@ -364,7 +376,7 @@ export default function ProcessPage() {
             </section>
 
             <div className="hmi-grid">
-                <section className="hmi-panel" aria-label="Podcast run">
+                <section className="hmi-panel" data-accent="run" aria-label="Podcast run">
                     <h2>Podcast run</h2>
                     <div className="hmi-row"><span>State</span><span>{stateLabel}{run.alive ? ` · ${phaseName}` : ''}</span></div>
                     {run.alive && !!run.phase_total && (
@@ -394,7 +406,7 @@ export default function ProcessPage() {
                     </div>
                 </section>
 
-                <section className="hmi-panel" aria-label="Equipment">
+                <section className="hmi-panel" data-accent="equipment" aria-label="Equipment">
                     <h2>Equipment</h2>
                     <div className="hmi-row"><span>GPU</span><span>{gpu?.name ?? 'not found'}</span></div>
                     <Analog label="GPU memory" unit="GB" value={gpu?.memory_used_mib ? gpu.memory_used_mib / 1024 : null} max={vramMax}
@@ -411,7 +423,7 @@ export default function ProcessPage() {
                     </div>
                 </section>
 
-                <section className="hmi-panel" aria-label="Queue and maintenance">
+                <section className="hmi-panel" data-accent="queue" aria-label="Queue and maintenance">
                     <h2>Queue & maintenance</h2>
                     <div className="hmi-row"><span>Podcast queue</span><span>{q.pending ?? 0} pending · {q.processing ?? 0} active · {q.completed ?? 0} done · {q.failed ?? 0} failed</span></div>
                     <div className="hmi-buttons">
@@ -450,7 +462,7 @@ export default function ProcessPage() {
             </div>
 
             <div className="hmi-grid">
-                <section className="hmi-panel" aria-label="Alarms">
+                <section className="hmi-panel" data-accent="alarms" aria-label="Alarms">
                     <h2>Alarms</h2>
                     {alarms.length === 0 ? <span className="hmi-muted">No active alarms.</span> : (
                         <>
@@ -480,7 +492,7 @@ export default function ProcessPage() {
                     )}
                 </section>
 
-                <section className="hmi-panel" aria-label="Recent episodes">
+                <section className="hmi-panel" data-accent="recent" aria-label="Recent episodes">
                     <h2>Recent episodes</h2>
                     {recent.length === 0 ? <span className="hmi-muted">None yet in this run.</span> : (
                         <table className="hmi-table">
