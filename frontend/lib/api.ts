@@ -10,8 +10,15 @@ import type {
     SystemStatus,
 } from './types';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-const API_TOKEN = process.env.NEXT_PUBLIC_API_TOKEN || '';
+// Calls go to /zc-api on the web UI's own server, which checks the sign-in and forwards them to
+// the API with its token (proxy.ts): the browser never holds the token.
+const API_BASE = '/zc-api';
+
+/** Same-origin URL of an API path (with its query), for fetch, <img>, <audio> and links */
+function apiUrl(endpoint: string, params: Record<string, string> = {}): string {
+    const query = new URLSearchParams(params).toString();
+    return `${API_BASE}${endpoint}${query ? (endpoint.includes('?') ? '&' : '?') + query : ''}`;
+}
 
 class APIError extends Error {
     constructor(public status: number, message: string) {
@@ -24,10 +31,7 @@ async function fetchAPI<T>(
     endpoint: string,
     options: RequestInit = {}
 ): Promise<T> {
-    const url = new URL(endpoint, API_URL);
-    url.searchParams.set('token', API_TOKEN);
-
-    const res = await fetch(url.toString(), {
+    const res = await fetch(apiUrl(endpoint), {
         ...options,
         headers: {
             'Content-Type': 'application/json',
@@ -35,6 +39,10 @@ async function fetchAPI<T>(
         },
     });
 
+    if (res.status === 401 && typeof window !== 'undefined') {
+        // signed out (or the session expired): back to the sign-in page, then here again
+        window.location.href = `/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`;
+    }
     if (!res.ok) {
         throw new APIError(res.status, `API Error: ${res.status} ${res.statusText}`);
     }
@@ -67,17 +75,9 @@ export const api = {
             method: 'DELETE',
         }),
 
-    getNoteSourceUrl: (uuid: string) => {
-        const url = new URL(`/notes/${uuid}/source`, API_URL);
-        url.searchParams.set('token', API_TOKEN);
-        return url.toString();
-    },
+    getNoteSourceUrl: (uuid: string) => apiUrl(`/notes/${uuid}/source`),
 
-    getNoteMarkdownUrl: (uuid: string) => {
-        const url = new URL(`/notes/${uuid}/markdown`, API_URL);
-        url.searchParams.set('token', API_TOKEN);
-        return url.toString();
-    },
+    getNoteMarkdownUrl: (uuid: string) => apiUrl(`/notes/${uuid}/markdown`),
 
     // Search
     search: (query: string, topK = 5, rerank = true) =>
@@ -286,12 +286,7 @@ export const api = {
         fetchAPI<{ status: string; pending_count?: number; message?: string }>('/image/triage/process', { method: 'POST' }),
 
     /** URL of a screenshot in a triage folder, for an <img> */
-    triageImageUrl: (path: string) => {
-        const url = new URL('/image/triage/file', API_URL);
-        url.searchParams.set('path', path);
-        url.searchParams.set('token', API_TOKEN);
-        return url.toString();
-    },
+    triageImageUrl: (path: string) => apiUrl('/image/triage/file', { path }),
 };
 
 export type TriageDecision = 'keep' | 'keep_image' | 'skip';

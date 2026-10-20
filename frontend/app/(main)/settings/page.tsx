@@ -38,8 +38,14 @@ export default function SettingsPage() {
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+    const [bookmarklet, setBookmarklet] = useState('');
 
     useEffect(() => {
+        // it carries the API token, so the server hands it out (to a signed-in browser only)
+        fetch('/auth/bookmarklet')
+            .then((r) => r.json())
+            .then((d) => setBookmarklet(d.bookmarklet))
+            .catch(() => undefined);
         api.getSettings()
             .then((data) => {
                 setSettings(data);
@@ -84,8 +90,6 @@ export default function SettingsPage() {
     if (error) return <div className="empty-state">{error}</div>;
     if (!settings || !form) return <div className="empty-state">No settings available</div>;
 
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-    const bookmarklet = `javascript:(function(){fetch('${apiUrl}/ingest?token=${process.env.NEXT_PUBLIC_API_TOKEN}&url='+encodeURIComponent(location.href),{method:'POST'}).then(r=>r.json()).then(j=>alert('Zettlecast: '+j.status))})();`;
 
     return (
         <div>
@@ -183,7 +187,8 @@ export default function SettingsPage() {
                 <h2 className="card-title mb-4">Bookmarklet</h2>
                 <div className="card">
                     <p className="text-muted mb-2">
-                        Drag this link to your bookmarks bar, then click it on any page to save it:{' '}
+                        Drag this link to your bookmarks bar, then click it on any page to save it (works on
+                        this computer, where the API runs):{' '}
                         <a href={bookmarklet} className="btn btn-secondary" onClick={(e) => e.preventDefault()}>📌 Save to Zettlecast</a>
                     </p>
                     <code className="setting-value" style={{

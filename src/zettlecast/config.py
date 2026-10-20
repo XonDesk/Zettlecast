@@ -102,6 +102,7 @@ class Settings(BaseSettings):
     # --- Server ---
     api_port: int = 8000
     api_host: str = "127.0.0.1"
+    web_lan: bool = False  # Web UI reachable from other devices on the network (sign-in; API stays local)
 
     # --- Image Processing ---
     vision_model: str = "qwen3.6:35b-a3b"  # Same model as text: no model swapping

@@ -1540,3 +1540,27 @@ a.btn {
   font-size: 0.875rem;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
 }
+
+/* Sign in */
+.login {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: var(--color-bg);
+}
+.login-card {
+  width: 100%;
+  max-width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.875rem;
+  padding: 1.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.75rem;
+  background: var(--color-bg-secondary);
+}
+.login-card h1 { font-size: 1.25rem; }
+.login-card label { display: flex; flex-direction: column; gap: 0.375rem; font-size: 0.875rem; color: var(--color-text-muted); }
+.login-card .input { font-size: 1rem; } /* 16px: phones don't zoom into the field */
+.login-error { color: var(--color-error); font-size: 0.875rem; }

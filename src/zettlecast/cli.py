@@ -28,6 +28,16 @@ def cli():
         logging.getLogger(name).setLevel(logging.ERROR)
 
 
+def _lan_addresses() -> list:
+    import socket
+
+    try:
+        return sorted({a[4][0] for a in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+                       if not a[4][0].startswith("127.")})
+    except OSError:
+        return []
+
+
 @cli.command()
 @click.option("--port", "-p", default=None, type=int, help="API port (default: API_PORT)")
 @click.option("--no-frontend", is_flag=True, help="Only start the API")
@@ -44,11 +54,17 @@ def serve(port: int, no_frontend: bool):
     ])]
     frontend = PROJECT_ROOT / "frontend"
     if not no_frontend and (frontend / "node_modules").exists():
-        procs.append(subprocess.Popen("npm run dev", cwd=frontend, shell=True))
+        # WEB_LAN: the web UI also answers other devices on the network (sign-in required; the
+        # API itself stays on this computer)
+        host = " -- -H 0.0.0.0" if settings.web_lan else ""
+        procs.append(subprocess.Popen(f"npm run dev{host}", cwd=frontend, shell=True))
 
     click.echo(f"API:      http://localhost:{port}  (docs: /docs)")
     if len(procs) > 1:
         click.echo("Web UI:   http://localhost:3000")
+        if settings.web_lan:
+            for address in _lan_addresses():
+                click.echo(f"          http://{address}:3000  (other devices on the network)")
     click.echo("Press Ctrl+C to stop")
     try:
         for p in procs:

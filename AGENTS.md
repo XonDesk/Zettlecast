@@ -79,7 +79,14 @@ zc.ps1               CLI shortcut
 - NeMo is installed from GitHub at a pinned commit (`pyproject.toml`): the
   diarization model needs `rope` attention, which is newer than the 3.0.0 PyPI release.
   Switch the dependency to `nemo-toolkit>=3.1` once 3.1 is published (main is already 3.1.0).
-- API token lives in `.env` (`API_TOKEN`) and `frontend/.env.local` (`NEXT_PUBLIC_API_TOKEN`).
+- API token lives in `.env` (`API_TOKEN`) and, server-side only, in `frontend/.env.local` (`ZC_API_TOKEN`).
+- **Web UI sign-in** (`frontend/proxy.ts`, `lib/auth.ts`): every page needs a session cookie (signed,
+  HttpOnly, 1 year); `/login` posts to `/auth/login` (PBKDF2 hash in `ZC_LOGIN_HASH`, user
+  `ZC_LOGIN_USER`, case-insensitive; slows and locks after repeated failures). The browser calls
+  `/zc-api/<path>`; the gate forwards it to the API on 127.0.0.1 with the token, so the token is
+  never in the JavaScript. `WEB_LAN=true` (`.env`) makes `serve` start the web UI on 0.0.0.0 for
+  phones on the home network; the API stays on 127.0.0.1. Windows Firewall must allow Node on
+  private networks (the user's call).
 
 ### Windows gotchas (already handled in code)
 
