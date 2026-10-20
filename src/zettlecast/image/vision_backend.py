@@ -20,23 +20,40 @@ class VisionModelNotFoundError(Exception):
 
 
 VISION_PROMPT = """Analyse this image and return JSON with:
-- "description": 2-3 specific, factual sentences about the main subject, setting and notable details
+- "kind": "screenshot" (of an app, website, chat, document or social feed), "photo", or "other"
+- "focus": for a screenshot, the one piece of content it was most likely taken for, copied word
+  for word: usually a single post, comment, reply, message or paragraph - the one that is
+  highlighted, circled, selected or pointed at if anything is, else the one fully in view near
+  the middle of the screen. Leave out the other comments and posts, navigation, buttons, ads,
+  like counts and timestamps. Empty for photos, and for a screenshot where nothing stands out
+  (then "detected_text" carries it).
+- "context": for a screenshot, one sentence: the app or site, who wrote the focus (name or
+  handle) and what it replies to or sits under. Empty otherwise.
+- "title": 4-10 words saying what the focus (or the image) is about, for a note title
+- "description": 2-3 specific, factual sentences about the focus content, or for a photo the main
+  subject, setting and notable details
 - "detected_text": ALL visible text (signs, documents, UI, captions), preserving line breaks;
   "No text detected." if there is none
-- "concepts": 5-7 lowercase key objects, concepts or themes. No names of people or organisations.
-- "people": full names of people shown or named in the image (empty if none)
-- "organisations": organisations, companies, products, races or events shown or named (empty if none)"""
+- "concepts": 5-7 lowercase key topics of the focus content (or the image). No names of people or
+  organisations.
+- "people": full names of people who matter to the focus content (or shown in the image)
+- "organisations": organisations, companies, products, races or events the focus content names"""
 
 VISION_SCHEMA = {
     "type": "object",
     "properties": {
+        "kind": {"type": "string", "enum": ["screenshot", "photo", "other"]},
+        "focus": {"type": "string"},
+        "context": {"type": "string"},
+        "title": {"type": "string"},
         "description": {"type": "string"},
         "detected_text": {"type": "string"},
         "concepts": {"type": "array", "items": {"type": "string"}},
         "people": {"type": "array", "items": {"type": "string"}},
         "organisations": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["description", "detected_text", "concepts", "people", "organisations"],
+    "required": ["kind", "focus", "context", "title", "description", "detected_text", "concepts",
+                 "people", "organisations"],
 }
 
 
@@ -57,7 +74,19 @@ class VisionBackend:
             raise VisionModelNotFoundError(str(e)) from e
 
         concepts = [str(c).lower().strip() for c in result.get("concepts", []) if str(c).strip()]
+        focus = (result.get("focus") or "").strip()
+        if focus:
+            # names only from the content the screenshot was taken for, not the ads or the other
+            # comments around it (the model lists those too)
+            about = f"{focus} {result.get('context') or ''}".lower()
+            for field in ("people", "organisations"):
+                result[field] = [n for n in result.get(field) or []
+                                 if isinstance(n, str) and n.strip().lower() in about]
         return VisionExtraction(
+            kind=result.get("kind") or "other",
+            focus=(result.get("focus") or "").strip(),
+            context=(result.get("context") or "").strip(),
+            title=(result.get("title") or "").strip(),
             description=result.get("description", "").strip(),
             detected_text=result.get("detected_text", "").strip(),
             concepts=concepts[:7],

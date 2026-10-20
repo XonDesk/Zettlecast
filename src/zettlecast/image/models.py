@@ -25,12 +25,17 @@ class ImageItem(BaseModel):
     width: Optional[int] = None
     height: Optional[int] = None
     megapixels: Optional[float] = None
+    keep_image: bool = True  # False: only the extracted information is kept (screenshot triage "keep")
 
 
 class VisionExtraction(BaseModel):
     """
     Structured vision data extracted from image by vision model.
     """
+    kind: str = "other"  # screenshot | photo | other
+    focus: str = ""  # screenshot: the content it was taken for, word for word
+    context: str = ""  # screenshot: app/site, author, what the focus replies to
+    title: str = ""
     description: str  # Scene description (2-3 sentences)
     detected_text: str  # OCR content
     concepts: List[str] = Field(default_factory=list)  # Object/concept tags

@@ -112,7 +112,9 @@ def _split_transcript(text: str, chunk_size: int) -> List[str]:
 
 # The pipeline's own reports in a transcript note: not content, so never searched or linked on
 # (their fixed wording made every episode "match" every other)
-UNINDEXED_SECTIONS = ("Automatic Corrections", "Needs Review")
+# Kept in a note but not embedded: transcript verification reports; everything else on a
+# screenshot besides what it was taken for, and image file details
+UNINDEXED_SECTIONS = ("Automatic Corrections", "Needs Review", "Screen Text", "Image Details")
 
 
 def _drop_sections(text: str, titles: tuple) -> str:
@@ -135,7 +137,7 @@ def create_chunks(text: str, base_chunk_id: str) -> List[ChunkModel]:
         head = _drop_sections(head, UNINDEXED_SECTIONS)
         raw_chunks = recursive_split(head.strip()) + _split_transcript(transcript, chunk_size)
     else:
-        raw_chunks = recursive_split(text)
+        raw_chunks = recursive_split(_drop_sections(text, UNINDEXED_SECTIONS).strip())
 
     chunks = []
     current_pos = 0

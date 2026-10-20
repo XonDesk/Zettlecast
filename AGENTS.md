@@ -52,11 +52,13 @@ src/zettlecast/
     verifier.py          Audio-checked corrections: suspects/publisher/glossary/lookup proposals, cleanup edits, glossary learning
     lookup.py            Online name lookup (Wikipedia): real names found via what the passage says about them
   image/
-    vision_backend.py    One structured vision call (description, OCR text, concepts)
+    vision_backend.py    One structured vision call (screenshot focus + context, description, OCR text, concepts)
     image_parser.py      Image -> note
     queue.py             Image queue
+    triage.py            Screenshot triage: folders, keep / keep_image / skip decisions by content hash
 frontend/            Next.js UI: app/(main)/ pages share the sidebar (notes, podcasts, images, search,
-                     process, settings); app/(main)/process is the HMI-style control page (ISA-101 look); app/graph is a full-screen view; components/Transcript renders speaker turns
+                     process, settings); app/(main)/process is the HMI-style control page (ISA-101 look); app/graph is a full-screen view;
+                     app/triage sorts screenshots (swipe / arrow keys); components/Transcript renders speaker turns
 tests/               pytest suite (LLM and models mocked)
 start.ps1            Start Ollama + API + web UI
 zc.ps1               CLI shortcut
@@ -190,6 +192,10 @@ POST /podcast/retry | POST /podcast/sync | POST /podcast/reset-stuck
 
 GET  /image/status | POST /image/scan | POST /image/add | POST /image/run {limit}
 GET  /image/running | POST /image/retry
+GET  /image/triage?limit=               next undecided screenshots (newest first), counts, folders, queue
+POST|DELETE /image/triage/folders {path} | GET /image/triage/file?path= (only inside a triage folder)
+POST /image/triage/decide {path, decision: keep|keep_image|skip} | POST /image/triage/undo {path}
+POST /image/triage/process              read every kept screenshot (vision model; refused during a podcast run)
 
 GET  /system/status                     run state (any process), queues, GPU, LLM server, Ollama, DB, disk, alarms
 POST /system/run/stop {mode: after_episode|abort} | POST /system/run/resume
@@ -232,6 +238,19 @@ podcast: {show: KoopCast, episode: ..., feed_url: ..., published: ...}
 [8.1s - 97.6s] Jason Koop: ...
 [97.8s - 103.0s] Scott Frey: ...
 ```
+
+### Screenshots
+
+Triage (`/triage` page): ← discard (nothing added), → keep (the information only: the note
+records the original path, `image_kept: false`, and `/notes/{uuid}/source` won't serve it),
+↑ keep with the image (copied to `_BRAIN_STORAGE/images/`, shown on the note). Original files
+are never changed. Decisions are keyed by content hash (`_BRAIN_STORAGE/image_triage.json`), so
+moved or renamed screenshots aren't asked about again. The vision call finds the screenshot's
+**focus** (the post / comment it was taken for: highlighted, else fully in view near the middle)
+and its context (site, author, what it replies to); only those, the description and concepts
+are embedded. The rest of the screen goes in `## Screen Text` and file details in
+`## Image Details` (both in `chunker.UNINDEXED_SECTIONS`). People / organisations must appear in
+the focus or context (ads and neighbouring comments are dropped).
 
 ### Knowledge graph
 

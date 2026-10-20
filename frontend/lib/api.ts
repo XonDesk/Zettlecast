@@ -260,7 +260,58 @@ export const api = {
     reindex: () => fetchAPI<{ status: string; message?: string }>('/system/reindex', { method: 'POST' }),
 
     rebuildGraph: () => fetchAPI<{ status: string; edges: number }>('/graph/rebuild', { method: 'POST' }),
+
+    // Screenshot triage
+    getTriage: (limit = 20) => fetchAPI<TriageState>(`/image/triage?limit=${limit}`),
+
+    addTriageFolder: (path: string) =>
+        fetchAPI<{ folders: string[] }>('/image/triage/folders', { method: 'POST', body: JSON.stringify({ path }) }),
+
+    removeTriageFolder: (path: string) =>
+        fetchAPI<{ folders: string[] }>('/image/triage/folders', { method: 'DELETE', body: JSON.stringify({ path }) }),
+
+    decideTriage: (path: string, decision: TriageDecision) =>
+        fetchAPI<{ decision: TriageDecision; job_id: string | null }>('/image/triage/decide', {
+            method: 'POST',
+            body: JSON.stringify({ path, decision }),
+        }),
+
+    undoTriage: (path: string) =>
+        fetchAPI<{ undone: { decision: TriageDecision; note_kept?: boolean } | null }>('/image/triage/undo', {
+            method: 'POST',
+            body: JSON.stringify({ path }),
+        }),
+
+    processTriage: () =>
+        fetchAPI<{ status: string; pending_count?: number; message?: string }>('/image/triage/process', { method: 'POST' }),
+
+    /** URL of a screenshot in a triage folder, for an <img> */
+    triageImageUrl: (path: string) => {
+        const url = new URL('/image/triage/file', API_URL);
+        url.searchParams.set('path', path);
+        url.searchParams.set('token', API_TOKEN);
+        return url.toString();
+    },
 };
+
+export type TriageDecision = 'keep' | 'keep_image' | 'skip';
+
+export interface TriageItem {
+    path: string;
+    name: string;
+    folder: string;
+    size_kb: number;
+    modified: string;
+}
+
+export interface TriageState {
+    items: TriageItem[];
+    remaining: number;
+    decided: Record<TriageDecision, number>;
+    folders: string[];
+    queue: Record<string, number>;
+    processing: boolean;
+}
 
 export { APIError };
 

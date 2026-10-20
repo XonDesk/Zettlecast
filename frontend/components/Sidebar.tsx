@@ -10,6 +10,7 @@ const navItems = [
     { href: '/notes', label: '📚 Notes', icon: '📚' },
     { href: '/podcasts', label: '🎙️ Podcasts', icon: '🎙️' },
     { href: '/images', label: '🖼️ Images', icon: '🖼️' },
+    { href: '/triage', label: '👆 Screenshots', icon: '👆' },
     { href: '/search', label: '🔍 Search', icon: '🔍' },
     { href: '/graph', label: '📊 Graph', icon: '📊' },
     { href: '/process', label: '🏭 Process', icon: '🏭' },

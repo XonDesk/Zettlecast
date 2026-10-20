@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatDate } from '@/lib/utils';
 
@@ -232,6 +233,16 @@ export default function ImagesPage() {
                 <p className="text-muted">
                     Extract descriptions, OCR, and concepts from images
                 </p>
+            </div>
+
+            <div className="card mb-4" style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+                <div style={{ flex: 1, minWidth: 220 }}>
+                    <strong>Sort screenshots</strong>
+                    <p className="text-muted">
+                        One at a time: ← discard, → keep the information, ↑ keep it with the image. Swipe on a phone.
+                    </p>
+                </div>
+                <Link href="/triage" className="btn btn-primary">Start sorting</Link>
             </div>
 
             {message && (

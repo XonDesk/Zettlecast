@@ -16,55 +16,35 @@ def format_vision_result(
     """
     Format vision extraction into searchable markdown.
 
-    Creates a structured document with:
-    - Visual description
-    - OCR text
-    - Detected concepts
-    - Image metadata
-
-    This format makes the full_text field semantically rich for embeddings.
-
-    Args:
-        vision: Vision extraction results
-        width: Image width in pixels
-        height: Image height in pixels
-        file_format: Image format (PNG, JPEG, etc.)
-
-    Returns:
-        Formatted markdown string
+    A screenshot with a focus (the post / comment it was taken for) keeps everything else on
+    the screen in "## Screen Text", which isn't embedded (chunker.UNINDEXED_SECTIONS): the
+    other comments and the page around it would otherwise link the note to unrelated topics.
+    Without a focus, all the text is indexed. File details are never indexed.
     """
     megapixels = (width * height) / 1_000_000
     aspect_ratio = width / height if height > 0 else 1.0
+    text = vision.detected_text.strip()
+    has_text = bool(text) and text != "No text detected."
 
-    sections = [
-        "# Visual Description",
-        "",
-        vision.description,
-        "",
-        "# Detected Text (OCR)",
-        "",
-        vision.detected_text if vision.detected_text.strip() else "_No text detected_",
-        "",
-        "# Detected Objects & Concepts",
-        "",
-    ]
+    sections = ["## Description", "", vision.description, ""]
+    if vision.focus:
+        sections += ["## Focus", "", vision.focus, ""]
+    if vision.context:
+        sections += ["## Context", "", vision.context, ""]
+    if has_text and not vision.focus:
+        sections += ["## Text", "", text, ""]
 
-    # Add concepts as bullet list
-    if vision.concepts:
-        for concept in vision.concepts:
-            sections.append(f"- {concept}")
-    else:
-        sections.append("_No specific objects detected_")
+    sections += ["## Concepts", ""]
+    sections += [f"- {c}" for c in vision.concepts] or ["_None detected_"]
+    sections.append("")
 
-    # Add metadata section
-    sections.extend([
+    if has_text and vision.focus:
+        sections += ["## Screen Text", "", text, ""]
+    sections += [
+        "## Image Details",
         "",
-        "# Image Metadata",
-        "",
+        f"- **Kind**: {vision.kind}",
         f"- **Format**: {file_format.upper()}",
-        f"- **Dimensions**: {width} × {height} pixels",
-        f"- **Megapixels**: {megapixels:.2f} MP",
-        f"- **Aspect Ratio**: {aspect_ratio:.2f}:1",
-    ])
-
+        f"- **Dimensions**: {width} × {height} pixels ({megapixels:.2f} MP, {aspect_ratio:.2f}:1)",
+    ]
     return "\n".join(sections)

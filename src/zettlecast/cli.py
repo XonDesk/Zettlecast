@@ -496,7 +496,7 @@ def image_run(limit: int):
         click.echo(f"{Path(item.image.image_path).name} ... ", nl=False)
         queue.mark_started(item.image.id)
         started = time.time()
-        result = parse_image(Path(item.image.image_path))
+        result = parse_image(Path(item.image.image_path), keep_image=item.image.keep_image)
         if result.status == "success":
             ingest_note(result.note)
             queue.mark_completed(item.image.id, time.time() - started)

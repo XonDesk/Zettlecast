@@ -119,6 +119,14 @@ export default function NoteDetailPage() {
                 </div>
             </div>
 
+            {note.source_type === 'image' && note.metadata.custom.image_kept !== false && (
+                <div className="card mb-4" style={{ textAlign: 'center' }}>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={api.getNoteSourceUrl(uuid)} alt={note.title}
+                         style={{ maxWidth: '100%', maxHeight: '70vh', borderRadius: '0.375rem' }} />
+                </div>
+            )}
+
             {note.source_type === 'audio' && (
                 <div className="card mb-4">
                     <audio

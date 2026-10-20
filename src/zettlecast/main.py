@@ -228,6 +228,9 @@ async def get_note_source_file(
         raise HTTPException(status_code=404, detail="Note not found")
 
     source_path = Path(note.source_path)
+    if note.metadata.custom.get("image_kept") is False:
+        # screenshot kept for its information only
+        raise HTTPException(status_code=404, detail="Image not kept for this note")
 
     # Check if it's a URL
     if note.source_path.startswith(('http://', 'https://')):
@@ -1154,7 +1157,7 @@ def _run_image_processing_background(limit: int = None):
 
             try:
                 # Parse image
-                result = parse_image(P(image.image_path))
+                result = parse_image(P(image.image_path), keep_image=image.keep_image)
 
                 if result.status == "success" and result.note:
                     ingest_note(result.note)
@@ -1231,6 +1234,95 @@ async def run_image_processing(
     except Exception as e:
         logger.error(f"Failed to start processing: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- Screenshot triage (keep / keep with image / skip, one at a time) ---
+
+
+class TriageFolderRequest(BaseModel):
+    path: str
+
+
+class TriageDecisionRequest(BaseModel):
+    path: str
+    decision: str  # keep | keep_image | skip
+
+
+@app.get("/image/triage")
+async def triage_pending(token: str = Query(...), limit: int = Query(20, ge=1, le=100)):
+    """The next undecided screenshots in the triage folders (newest first) and counts."""
+    from .image import triage
+
+    result = await asyncio.to_thread(triage.pending, limit)
+    from .image.queue import ImageQueue
+
+    result["queue"] = ImageQueue().get_status_summary()["by_status"]
+    result["processing"] = _image_processing_state["is_running"]
+    return result
+
+
+@app.post("/image/triage/folders")
+async def triage_add_folder(body: TriageFolderRequest, token: str = Query(...)):
+    from .image import triage
+
+    try:
+        return {"folders": triage.add_folder(body.path)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/image/triage/folders")
+async def triage_remove_folder(body: TriageFolderRequest, token: str = Query(...)):
+    from .image import triage
+
+    return {"folders": triage.remove_folder(body.path)}
+
+
+@app.get("/image/triage/file")
+async def triage_file(path: str = Query(...), token: str = Query(...)):
+    """A screenshot from a triage folder (nothing outside those folders is served)."""
+    from .image import triage
+
+    file = Path(path)
+    if file.suffix.lower() not in triage.IMAGE_EXTENSIONS or not file.is_file() or not triage.in_folders(file):
+        raise HTTPException(status_code=404, detail="Not a screenshot in a triage folder")
+    return FileResponse(file, media_type=mimetypes.guess_type(file.name)[0] or "application/octet-stream",
+                        headers={"Cache-Control": "private, max-age=3600"})
+
+
+@app.post("/image/triage/decide")
+async def triage_decide(body: TriageDecisionRequest, token: str = Query(...)):
+    from .image import triage
+
+    try:
+        return await asyncio.to_thread(triage.decide, Path(body.path), body.decision)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/image/triage/undo")
+async def triage_undo(body: TriageFolderRequest, token: str = Query(...)):
+    """Forget the decision on a screenshot (body.path); a keep not yet processed leaves the queue."""
+    from .image import triage
+
+    return {"undone": await asyncio.to_thread(triage.undo, Path(body.path))}
+
+
+@app.post("/image/triage/process")
+async def triage_process(background_tasks: BackgroundTasks, token: str = Query(...)):
+    """Read every kept screenshot into the knowledge base (vision model; not during a podcast run)."""
+    from .image.queue import ImageQueue
+    from . import runstate
+
+    if runstate.active_run():
+        return {"status": "refused", "message": "A podcast run is using the GPU: process after it finishes"}
+    if _image_processing_state["is_running"]:
+        return {"status": "already_running"}
+    pending = ImageQueue().get_pending_count()
+    if pending == 0:
+        return {"status": "no_pending"}
+    background_tasks.add_task(_run_image_processing_background, limit=None)
+    return {"status": "started", "pending_count": pending}
 
 
 @app.get("/image/running")

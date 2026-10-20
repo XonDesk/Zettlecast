@@ -257,6 +257,21 @@ class ImageQueue:
         logger.info(f"Added {len(job_ids)} images from {directory}")
         return job_ids
 
+    def set_options(self, job_id: str, keep_image: bool) -> None:
+        """keep_image: store a copy of the image with its note (otherwise only the information)."""
+        if job_id in self.items:
+            self.items[job_id].image.keep_image = keep_image
+            self._save_state()
+
+    def remove_pending(self, job_id: str) -> bool:
+        """Take a not-yet-processed image out of the queue."""
+        item = self.items.get(job_id)
+        if not item or item.status not in ("pending", "failed", "review"):
+            return False
+        del self.items[job_id]
+        self._save_state()
+        return True
+
     def get_next_pending(self) -> Optional[QueueItem]:
         """
         Get the next pending item to process.
