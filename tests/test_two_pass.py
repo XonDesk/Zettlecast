@@ -78,3 +78,13 @@ def test_saved_transcription_from_other_models_is_ignored(tmp_path, monkeypatch)
     assert load_asr(tmp_path / "ep0.mp3") is not None
     monkeypatch.setattr(pipeline.settings, "nemo_parakeet_model", "nvidia/some-other-model")
     assert load_asr(tmp_path / "ep0.mp3") is None
+
+
+def test_has_asr_reads_only_the_header(tmp_path, monkeypatch):
+    from zettlecast.podcast.asr_cache import has_asr
+
+    assert not has_asr(tmp_path / "ep0.mp3")
+    save_asr(tmp_path / "ep0.mp3", result())
+    assert has_asr(tmp_path / "ep0.mp3")
+    monkeypatch.setattr(pipeline.settings, "nemo_parakeet_model", "nvidia/some-other-model")
+    assert not has_asr(tmp_path / "ep0.mp3")

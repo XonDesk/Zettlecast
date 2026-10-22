@@ -42,6 +42,8 @@ export default function NoteDetailPage() {
     const [note, setNote] = useState<NoteDetailType | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [audioOff, setAudioOff] = useState(false); // the audio is on the desktop (two-machine setup), which is off
+    const [wakeNote, setWakeNote] = useState<string | null>(null);
 
     useEffect(() => {
         const fetchNote = async () => {
@@ -136,9 +138,21 @@ export default function NoteDetailPage() {
                         src={api.getNoteSourceUrl(uuid)}
                         style={{ width: '100%' }}
                         onLoadedMetadata={() => {
+                            setAudioOff(false);
                             if (startAt && audioRef.current) audioRef.current.currentTime = startAt;
                         }}
+                        onError={() => setAudioOff(note.source_path.startsWith('desktop:'))}
                     />
+                    {audioOff && (
+                        <p className="text-muted mt-2" style={{ fontSize: '0.875rem' }}>
+                            The audio is on the desktop, which is off.{' '}
+                            <button className="btn btn-secondary" onClick={() => {
+                                api.wakeDesktop().then((r) => setWakeNote(r.message ?? r.status)).catch(() => setWakeNote('Wake failed'));
+                            }}>Wake it</button>{' '}
+                            <button className="btn btn-secondary" onClick={() => audioRef.current?.load()}>Try again</button>
+                            {wakeNote && <> · {wakeNote}</>}
+                        </p>
+                    )}
                     {startAt > 0 && (
                         <p className="text-muted mt-2" style={{ fontSize: '0.875rem' }}>
                             Search match at {formatTimestamp(startAt)} — press play to listen from there.

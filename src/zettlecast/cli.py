@@ -2,6 +2,7 @@
 Zettlecast CLI
 """
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -38,11 +39,25 @@ def _lan_addresses() -> list:
         return []
 
 
+def _frontend_build_stale(frontend: Path) -> bool:
+    """True if there's no production build or a source file is newer than it."""
+    build = frontend / ".next" / "BUILD_ID"
+    if not build.exists():
+        return True
+    built = build.stat().st_mtime
+    sources = [frontend / name for name in ("package.json", "package-lock.json", "next.config.ts", "proxy.ts",
+                                            "tsconfig.json", ".env.local")]
+    for folder in ("app", "components", "lib", "public"):
+        sources += [f for f in (frontend / folder).rglob("*") if f.is_file()]
+    return any(f.exists() and f.stat().st_mtime > built for f in sources)
+
+
 @cli.command()
 @click.option("--port", "-p", default=None, type=int, help="API port (default: API_PORT)")
 @click.option("--no-frontend", is_flag=True, help="Only start the API")
-def serve(port: int, no_frontend: bool):
-    """Start the API server and the web UI."""
+@click.option("--dev", is_flag=True, help="Web UI in development mode (hot reload; several times slower)")
+def serve(port: int, no_frontend: bool, dev: bool):
+    """Start the API server and the web UI (a production build, rebuilt when the sources changed)."""
     from .config import settings
 
     settings.ensure_directories()
@@ -57,7 +72,16 @@ def serve(port: int, no_frontend: bool):
         # WEB_LAN: the web UI also answers other devices on the network (sign-in required; the
         # API itself stays on this computer)
         host = " -- -H 0.0.0.0" if settings.web_lan else ""
-        procs.append(subprocess.Popen(f"npm run dev{host}", cwd=frontend, shell=True))
+        if dev:
+            procs.append(subprocess.Popen(f"npm run dev{host}", cwd=frontend, shell=True))
+        else:
+            if _frontend_build_stale(frontend):
+                click.echo("Building the web UI (sources changed since the last build)...")
+                if subprocess.run("npm run build", cwd=frontend, shell=True).returncode != 0:
+                    for proc in procs:
+                        proc.terminate()
+                    raise click.ClickException("Web UI build failed (see above); `serve --dev` runs it unbuilt")
+            procs.append(subprocess.Popen(f"npm run start{host}", cwd=frontend, shell=True))
 
     click.echo(f"API:      http://localhost:{port}  (docs: /docs)")
     if len(procs) > 1:
@@ -80,6 +104,63 @@ def serve(port: int, no_frontend: bool):
                 p.terminate()
         from . import llm
         llm.unload(only_own=True)
+
+
+def _no_gpu_here() -> None:
+    """GPU work runs on the worker when this is the primary."""
+    from .config import settings
+
+    if settings.is_primary:
+        raise click.ClickException("This is the primary (ROLE=primary): the worker does GPU work. "
+                                   "Queued jobs wake it (`zettlecast wake` to wake it now).")
+
+
+@cli.command()
+@click.option("--once", is_flag=True, help="One claim and its batch, then exit (testing)")
+@click.option("--no-file-server", is_flag=True, help="Don't serve audio / screenshot triage to the primary")
+def worker(once: bool, no_file_server: bool):
+    """Do the primary's GPU jobs (ROLE=worker): podcasts, images, tagging. Started at boot."""
+    import logging
+
+    from . import llm
+    from . import worker as worker_module
+
+    logging.getLogger("zettlecast").setLevel(logging.INFO)
+    for handler in logging.getLogger().handlers:  # a log with times: it runs for days
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    try:
+        worker_module.run(file_server=not no_file_server, once=once)
+    except worker_module.PrimaryError as e:
+        raise click.ClickException(str(e))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        llm.unload(only_own=True)
+
+
+@cli.command()
+def wake():
+    """Wake the worker PC now (Wake-on-LAN; run on the primary)."""
+    from .wake import wake_now
+
+    result = wake_now("manual")
+    click.echo(result["message"])
+    if result["status"] in ("failed", "not_configured"):
+        sys.exit(1)
+
+
+@cli.command("migrate-paths")
+@click.option("--desktop-root", required=True,
+              help="The desktop's storage folder the data was copied from, e.g. C:/Users/me/_BRAIN_STORAGE")
+@click.option("--dry-run", is_flag=True, help="Only count what would change")
+def migrate_paths(desktop_root: str, dry_run: bool):
+    """After copying the storage folder to the primary: point notes at the copies or at the desktop."""
+    from .migrate import migrate
+
+    counts = migrate(desktop_root, dry_run=dry_run)
+    verb = "Would update" if dry_run else "Updated"
+    click.echo(f"{verb} {counts['notes']} note(s), {counts['transcripts']} transcript file(s), "
+               f"{counts['queue_items']} queue item(s)")
 
 
 @cli.command()
@@ -300,6 +381,7 @@ def podcast_run(limit: int, no_enhance: bool, no_verify: bool, no_sync: bool):
     from .pipeline import run_podcast_queue
     from .podcast.queue import TranscriptionQueue
 
+    _no_gpu_here()
     queue = TranscriptionQueue()
     if not no_sync:
         queue.sync_with_storage()
@@ -469,6 +551,79 @@ def podcast_retry():
 # =============================================================================
 
 @cli.group()
+def reddit():
+    """Reddit saves (from the private saved feed, REDDIT_SAVED_FEED)."""
+
+
+@reddit.command("sync")
+@click.option("--limit", type=int, default=None, help="Import at most N saves (newest first)")
+@click.option("--refresh", is_flag=True, help="Also retry saves whose thread couldn't be fetched")
+@click.option("--no-articles", is_flag=True, help="Don't read the pages link posts point to")
+@click.option("--no-llm", is_flag=True, help="No tags/summary now (GPU busy); `reddit tag` adds them later")
+@click.option("--no-threads", is_flag=True, help="No comments now (one request per save); --refresh adds them later")
+def reddit_sync(limit: int, refresh: bool, no_articles: bool, no_llm: bool, no_threads: bool):
+    """Import saved posts and comments not imported yet."""
+    from . import reddit as rd
+    from . import runstate
+
+    if runstate.active_run():
+        raise click.ClickException("A podcast run is using the GPU: sync after it finishes")
+    try:
+        counts = rd.sync(limit=limit, refresh=refresh, articles=not no_articles, enrich=not no_llm,
+                         threads=not no_threads,
+                         on_item=lambda n, total, title: click.echo(f"[{n}/{total}] {title[:90]}"))
+    except rd.RedditError as e:
+        raise click.ClickException(str(e))
+    click.echo(f"{counts['saved']} saves in the feed: {counts['imported']} imported, "
+               f"{counts['refreshed']} refreshed, {counts['failed']} failed"
+               + (f" ({counts['partial']} without their thread: run with --refresh later)" if counts["partial"] else "")
+               + (f"; {counts['unenriched']} without tags (run `reddit tag` when the GPU is free)"
+                  if counts["unenriched"] else "")
+               + (f"; {counts['tagged']} tagged" if counts["tagged"] else ""))
+
+
+@reddit.command("tag")
+def reddit_tag():
+    """Curate comments and add LLM tags + summaries where missing (no Reddit requests)."""
+    from . import reddit as rd
+
+    try:
+        counts = rd.tag_untagged(on_item=lambda n, total, title: click.echo(f"[{n}/{total}] {title[:90]}"))
+    except rd.RedditError as e:
+        raise click.ClickException(str(e))
+    click.echo(f"{counts['tagged']} tagged, {counts['curated']} curated"
+               + (" (stopped: the LLM isn't answering)" if counts["failed"] else ""))
+
+
+@reddit.command("review")
+@click.option("--count", type=int, default=20, help="Saves to curate")
+@click.option("--seed", type=int, default=1, help="Another seed picks other saves")
+@click.option("--out", type=click.Path(dir_okay=False, path_type=Path), required=True,
+              help="JSON file to write")
+def reddit_review(count: int, seed: int, out: Path):
+    """Curate a sample of saves without storing anything, to check the rubric against your judgement."""
+    from . import reddit as rd
+
+    reviews = rd.review_sample(count=count, seed=seed)
+    out.write_text(json.dumps(reviews, indent=1, ensure_ascii=False), encoding="utf-8")
+    kept = sum(v["keep"] for r in reviews for v in r["verdicts"])
+    total = sum(len(r["verdicts"]) for r in reviews)
+    click.echo(f"{len(reviews)} saves: kept {kept} of {total} comments -> {out}")
+
+
+@reddit.command("status")
+def reddit_status():
+    """Imported saves and the last sync."""
+    from . import reddit as rd
+
+    s = rd.status()
+    click.echo(f"feed: {'set' if s['configured'] else 'not set (REDDIT_SAVED_FEED)'}")
+    click.echo(f"imported: {s['imported']} ({s['partial']} without their thread, {s['untagged']} without tags, "
+               f"{s['uncurated']} with comments not curated yet)")
+    click.echo(f"last sync: {s['last_sync'] or 'never'}")
+
+
+@cli.group()
 def image():
     """Image processing pipeline."""
 
@@ -499,6 +654,7 @@ def image_run(limit: int):
     """Analyse pending images and index them."""
     import time
 
+    _no_gpu_here()
     from .image.image_parser import parse_image
     from .image.queue import ImageQueue
     from .pipeline import ingest_note

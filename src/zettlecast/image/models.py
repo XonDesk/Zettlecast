@@ -35,6 +35,10 @@ class VisionExtraction(BaseModel):
     """
     Structured vision data extracted from image by vision model.
     """
+    # what the user kept it for (media | quote | idea | tip | place | product | recipe | reference |
+    # other) and the thing itself: name, by, type, where, price (only the ones known)
+    saved_as: str = "other"
+    item: Dict[str, str] = Field(default_factory=dict)
     kind: str = "other"  # screenshot | photo | other
     focus: str = ""  # screenshot: the content it was taken for, word for word
     context: str = ""  # screenshot: app/site, author, what the focus replies to
@@ -75,3 +79,5 @@ class QueueItem(BaseModel):
     attempts: int = 0
     error_message: Optional[str] = None
     result_note_uuid: Optional[str] = None
+    worker_id: Optional[str] = None  # worker machine that claimed it
+    lease_until: Optional[datetime] = None  # claim runs out then unless the worker renews it

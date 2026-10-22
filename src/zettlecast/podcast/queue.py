@@ -9,11 +9,13 @@ import hashlib
 import json
 import logging
 import os
+from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 from statistics import mean
 from typing import Dict, List, Optional
 
+from .. import paths, statefile
 from ..config import settings
 from .models import PodcastEpisode, QueueItem, TranscriptionResult
 
@@ -56,11 +58,15 @@ class TranscriptionQueue:
     Tracks processing times for accurate ETA estimation.
     """
 
+    DATETIME_FIELDS = ("added_at", "started_at", "completed_at", "lease_until")
+    LISTS = {"processing_times": 100, "completed_hashes": 1000}  # entries kept
+
     def __init__(self, state_file: Optional[Path] = None):
         self.state_file = state_file or (settings.storage_path / "podcast_queue.json")
         self.items: Dict[str, QueueItem] = {}
         self.processing_times: List[float] = []
         self.completed_hashes: List[str] = []
+        self._base: dict = {}  # the file as loaded: saving merges with changes made elsewhere since
 
         self._load_state()
 
@@ -68,46 +74,50 @@ class TranscriptionQueue:
         """Load queue state from disk."""
         if self.state_file.exists():
             try:
-                data = json.loads(self.state_file.read_text(encoding="utf-8"))
+                self._parse(statefile.read(self.state_file))
+                logger.debug(f"Loaded queue state: {len(self.items)} items")
 
-                for job_id, item_data in data.get("items", {}).items():
-                    # Parse nested episode
-                    episode_data = item_data.pop("episode", {})
-                    episode = PodcastEpisode(**episode_data)
-                    
-                    # Parse datetime fields
-                    for dt_field in ["added_at", "started_at", "completed_at"]:
-                        if item_data.get(dt_field):
-                            item_data[dt_field] = datetime.fromisoformat(item_data[dt_field])
-                    
-                    self.items[job_id] = QueueItem(episode=episode, **item_data)
-
-                self.processing_times = data.get("processing_times", [])
-                self.completed_hashes = data.get("completed_hashes", [])
-
-                logger.info(f"Loaded queue state: {len(self.items)} items")
-                
                 # Auto-reset stuck 'processing' items
                 self._reset_stuck_items()
 
             except Exception as e:
                 logger.error(f"Failed to load queue state: {e}")
                 self.items = {}
-    
+
+    def _parse(self, data: dict) -> None:
+        self._base = json.loads(json.dumps(data))  # a copy: parsing must not change it
+        self.items = {}
+        for job_id, item_data in data.get("items", {}).items():
+            item_data = dict(item_data)
+            episode = PodcastEpisode(**item_data.pop("episode", {}))
+            for dt_field in self.DATETIME_FIELDS:
+                if item_data.get(dt_field):
+                    item_data[dt_field] = datetime.fromisoformat(item_data[dt_field])
+            self.items[job_id] = QueueItem(episode=episode, **item_data)
+        self.processing_times = list(data.get("processing_times", []))
+        self.completed_hashes = list(data.get("completed_hashes", []))
+
     def _reset_stuck_items(self):
         """
         Reset items stuck in 'processing' state.
-        
+
         This can happen when the process crashes or is killed during transcription.
-        An item is stuck once the process working on it has exited; for items without
-        a recorded process, after 1 hour of 'processing'.
+        An item claimed by a worker (another machine) is stuck once its lease runs out; one
+        started by a process here once that process has exited; for items without a recorded
+        process, after 1 hour of 'processing'.
         """
         now = datetime.utcnow()
         stuck_threshold = timedelta(hours=1)
         reset_count = 0
 
         for item in self.items.values():
-            if item.status == "processing":
+            if item.status == "processing" and item.lease_until:
+                if item.lease_until < now:
+                    logger.warning(f"Lease ran out, back to pending: {item.episode.episode_title}")
+                    item.status = "pending"
+                    item.started_at = item.worker_id = item.lease_until = None
+                    reset_count += 1
+            elif item.status == "processing":
                 alive = _worker_alive(item.worker_pid, item.started_at)
                 if alive is False:
                     logger.warning(f"Resetting job whose process exited: {item.episode.episode_title}")
@@ -133,32 +143,33 @@ class TranscriptionQueue:
             logger.info(f"Auto-reset {reset_count} stuck 'processing' items to 'pending'")
             self._save_state()
 
+    def _serialize(self) -> dict:
+        data = {
+            "items": {},
+            "processing_times": list(self.processing_times),
+            "completed_hashes": list(self.completed_hashes),
+        }
+        for job_id, item in self.items.items():
+            item_dict = item.model_dump()
+            for dt_field in self.DATETIME_FIELDS:
+                if item_dict.get(dt_field):
+                    item_dict[dt_field] = item_dict[dt_field].isoformat()
+            data["items"][job_id] = item_dict
+        # the same JSON types as a file read back (the merge compares item by item)
+        return json.loads(json.dumps(data, default=str))
+
     def _save_state(self):
-        """Save queue state to disk."""
+        """Save queue state to disk, merged with changes other writers made since it was loaded."""
         try:
-            self.state_file.parent.mkdir(parents=True, exist_ok=True)
-
-            data = {
-                "items": {},
-                "processing_times": self.processing_times[-100:],  # Keep last 100
-                "completed_hashes": self.completed_hashes[-1000:],  # Keep last 1000
-            }
-
-            for job_id, item in self.items.items():
-                item_dict = item.model_dump()
-                # Convert datetime to ISO format
-                for dt_field in ["added_at", "started_at", "completed_at"]:
-                    if item_dict.get(dt_field):
-                        item_dict[dt_field] = item_dict[dt_field].isoformat()
-                data["items"][job_id] = item_dict
-
-            self.state_file.write_text(
-                json.dumps(data, indent=2, default=str),
-                encoding="utf-8",
-            )
-
+            merged = statefile.save(self.state_file, self._base, self._serialize(), list_keys=self.LISTS)
+            self._parse(merged)
         except Exception as e:
             logger.error(f"Failed to save queue state: {e}")
+
+    def reload(self) -> None:
+        """Read the file again (changes other writers made)."""
+        self.items = {}
+        self._load_state()
 
     @staticmethod
     def compute_audio_hash(audio_path: Path) -> str:
@@ -178,6 +189,7 @@ class TranscriptionQueue:
         description: Optional[str] = None,
         published: Optional[str] = None,
         transcript_url: Optional[str] = None,
+        guid: Optional[str] = None,
         skip_duplicate: bool = True,
     ) -> str:
         """
@@ -211,18 +223,8 @@ class TranscriptionQueue:
 
         existing = next((i for i in self.items.values() if i.episode.audio_hash == audio_hash), None)
         if existing:
-            feed_info = {
-                "feed_url": feed_url,
-                "description": description,
-                "published": published,
-                "transcript_url": transcript_url,
-            }
-            missing = {k: v for k, v in feed_info.items() if v and not getattr(existing.episode, k)}
-            if missing:
-                for k, v in missing.items():
-                    setattr(existing.episode, k, v)
-                self._save_state()
-                logger.info(f"Added feed details to {existing.episode.episode_title}: {', '.join(missing)}")
+            self._fill_feed_details(existing, feed_url=feed_url, description=description,
+                                    published=published, transcript_url=transcript_url, guid=guid)
 
         if skip_duplicate and (
             audio_hash in self.completed_hashes or (existing and existing.status == "completed")
@@ -245,6 +247,7 @@ class TranscriptionQueue:
             description=description,
             published=published,
             transcript_url=transcript_url,
+            guid=guid,
         )
 
         # Create queue item
@@ -259,6 +262,15 @@ class TranscriptionQueue:
 
         logger.info(f"Added to queue: {episode.episode_title} (ID: {episode.id[:8]})")
         return episode.id
+
+    def _fill_feed_details(self, item: QueueItem, **feed_info):
+        """Set the feed details an item lacks (feed URL, show notes, publish date, transcript link, guid)."""
+        missing = {k: v for k, v in feed_info.items() if v and not getattr(item.episode, k)}
+        if missing:
+            for k, v in missing.items():
+                setattr(item.episode, k, v)
+            self._save_state()
+            logger.info(f"Added feed details to {item.episode.episode_title}: {', '.join(missing)}")
 
     def add_directory(
         self,
@@ -304,6 +316,35 @@ class TranscriptionQueue:
         logger.info(f"Added {len(job_ids)} episodes from {directory}")
         return job_ids
 
+    def find_feed_episode(
+        self, feed_url: str, episode, podcast_dir: Path, filename: Optional[str] = None
+    ) -> Optional[QueueItem]:
+        """
+        The queue item for a feed episode, if any: same guid, else (items imported before guids
+        were kept) same feed and title, or same downloaded file. Failed and cancelled items don't count.
+        """
+        from .rss import sanitize_filename
+
+        filename = filename or sanitize_filename(episode.title)
+        for item in self.items.values():
+            if item.status in ("failed", "cancelled"):
+                continue
+            ep = item.episode
+            if episode.guid and ep.guid:
+                if ep.guid == episode.guid:
+                    return item
+                continue
+            if (ep.feed_url == feed_url and ep.episode_title == episode.title
+                    and (ep.published or "") == (episode.published or "")):
+                return item
+            path = Path(paths.strip(ep.audio_path))
+            if path.stem == filename and (
+                path.parent.name == podcast_dir.name if paths.is_worker_ref(ep.audio_path)
+                else path.parent.resolve() == podcast_dir.resolve()
+            ):
+                return item
+        return None
+
     def add_from_feed(
         self,
         feed_url: str,
@@ -321,7 +362,7 @@ class TranscriptionQueue:
         Returns:
             List of added job IDs
         """
-        from .rss import parse_feed, download_episode, sanitize_filename
+        from .rss import download_episode, episode_date, parse_feed, sanitize_filename
 
         # Default download dir
         if not download_dir:
@@ -335,14 +376,23 @@ class TranscriptionQueue:
         
         logger.info(f"Processing feed: {feed.title} ({len(feed.episodes)} episodes)")
 
+        # Episodes sharing a title ("Summer Q&A") get the publish date in their file name
+        title_counts = Counter(sanitize_filename(e.title) for e in feed.episodes)
+
         for episode in feed.episodes:
+            stem = sanitize_filename(episode.title)
+            if title_counts[stem] > 1:
+                stem = f"{stem} {episode_date(episode.published)}"
+            known = self.find_feed_episode(feed_url, episode, podcast_dir, stem)
+            if known:
+                # Same feed item: no download, even if it was retitled or its audio re-encoded
+                self._fill_feed_details(known, feed_url=feed_url, description=episode.description,
+                                        published=episode.published, transcript_url=episode.transcript_url,
+                                        guid=episode.guid)
+                logger.debug(f"Already known: {episode.title}")
+                continue
             try:
-                # Check if we should download
-                # We can't easily check hash before download, but we can check if file exists
-                # or if we have a completed job with same title/feed
-                
-                # Download
-                audio_path = download_episode(episode, podcast_dir)
+                audio_path = download_episode(episode, podcast_dir, stem=stem)
                 
                 # Add to queue
                 job_id = self.add(
@@ -353,6 +403,7 @@ class TranscriptionQueue:
                     description=episode.description,
                     published=episode.published,
                     transcript_url=episode.transcript_url,
+                    guid=episode.guid,
                 )
                 job_ids.append(job_id)
                 
@@ -398,14 +449,49 @@ class TranscriptionQueue:
 
         return timedelta(seconds=avg_time * pending)
 
-    def mark_started(self, job_id: str):
-        """Mark a job as started."""
+    def mark_started(self, job_id: str, remote: bool = False):
+        """Mark a job as started (remote: by a worker on another machine, which holds a lease)."""
         if job_id in self.items:
             self.items[job_id].status = "processing"
             self.items[job_id].started_at = datetime.utcnow()
-            self.items[job_id].worker_pid = os.getpid()
+            self.items[job_id].worker_pid = None if remote else os.getpid()
             self.items[job_id].attempts += 1
             self._save_state()
+
+    def set_path(self, job_id: str, path: str) -> None:
+        """Point a job at another copy of its file (the worker's, once it has fetched it)."""
+        if job_id in self.items:
+            self.items[job_id].episode.audio_path = path
+            self._save_state()
+
+    def claim(self, worker_id: str, lease: timedelta, limit: Optional[int] = None) -> List[QueueItem]:
+        """Hand pending jobs to a worker: processing under a lease it renews with each heartbeat."""
+        pending = [i for i in self.items.values() if i.status == "pending"]
+        if limit is not None:
+            pending = pending[:limit]
+        now = datetime.utcnow()
+        for item in pending:
+            item.status = "processing"
+            item.started_at = now
+            item.worker_id = worker_id
+            item.worker_pid = None
+            item.lease_until = now + lease
+        if pending:
+            self._save_state()
+        return [self.items[i.episode.id] for i in pending]
+
+    def renew(self, worker_id: str, lease: timedelta) -> int:
+        """Extend the leases of the jobs a worker holds."""
+        held = [i for i in self.items.values() if i.status == "processing" and i.worker_id == worker_id]
+        for item in held:
+            item.lease_until = datetime.utcnow() + lease
+        if held:
+            self._save_state()
+        return len(held)
+
+    @staticmethod
+    def _unclaim(item: QueueItem) -> None:
+        item.worker_pid = item.worker_id = item.lease_until = None
 
     def release(self, job_ids) -> int:
         """Put unfinished jobs of a stopped run back to pending (the attempt isn't counted)."""
@@ -414,7 +500,8 @@ class TranscriptionQueue:
             item = self.items.get(job_id)
             if item and item.status == "processing":
                 item.status = "pending"
-                item.started_at = item.worker_pid = None
+                item.started_at = None
+                self._unclaim(item)
                 item.attempts = max(0, item.attempts - 1)
                 count += 1
         if count:
@@ -428,6 +515,7 @@ class TranscriptionQueue:
             item.status = "completed"
             item.completed_at = datetime.utcnow()
             item.result_path = str(result_path)
+            self._unclaim(item)
 
             # Track processing time
             self.processing_times.append(result.processing_time_seconds)
@@ -447,6 +535,7 @@ class TranscriptionQueue:
         if job_id in self.items:
             item = self.items[job_id]
             item.error_message = error
+            self._unclaim(item)
 
             if item.attempts >= max_retries:
                 item.status = "review"
@@ -530,6 +619,7 @@ class TranscriptionQueue:
             item = self.items[job_id]
             item.status = "cancelled"
             item.error_message = "Cancelled by user"
+            self._unclaim(item)
             self._save_state()
             logger.info(f"Cancelled: {item.episode.episode_title}")
 
@@ -633,6 +723,8 @@ class TranscriptionQueue:
             # Check if already in queue
             already_in_queue = False
             for item in self.items.values():
+                if paths.is_worker_ref(item.episode.audio_path):
+                    continue  # held by the worker, not in this folder
                 if Path(item.episode.audio_path).resolve() == podcast_file.resolve():
                     already_in_queue = True
                     # If completed or has transcript, skip

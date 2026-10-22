@@ -23,6 +23,7 @@
   --hmi-llm: #38bdf8;
   --hmi-queue: #7c9cc4;
   --hmi-io: #8fa3b8;
+  --hmi-images: #c98bb0;
   --accent: var(--hmi-run);
 
   --hmi-high: #e5484d;
@@ -92,6 +93,7 @@
 .hmi-mimic [data-group='llm'] { --accent: var(--hmi-llm); }
 .hmi-mimic [data-group='queue'] { --accent: var(--hmi-queue); }
 .hmi-mimic [data-group='io'] { --accent: var(--hmi-io); }
+.hmi-mimic [data-group='images'] { --accent: var(--hmi-images); }
 .hmi-mimic .pipe.service { stroke-dasharray: 3 4; }
 .hmi-mimic .pipe.service.live { stroke: var(--accent); }
 .hmi-mimic .label.accent { fill: var(--accent); }
@@ -143,6 +145,8 @@
 .hmi-panel[data-accent='queue'] { --panel-accent: var(--hmi-pass1); }
 .hmi-panel[data-accent='alarms'] { --panel-accent: var(--hmi-line); }
 .hmi-panel[data-accent='recent'] { --panel-accent: var(--hmi-store); }
+.hmi-panel[data-accent='images'] { --panel-accent: var(--hmi-images); }
+.hmi-panel[data-accent='desktop'] { --panel-accent: var(--hmi-llm); }
 
 .hmi-panel h2 {
   font-size: 0.75rem;
@@ -185,6 +189,7 @@
 
 .hmi-btn:hover:not(:disabled) { border-color: var(--hmi-llm); color: #fff; }
 .hmi-btn:disabled { color: #5d6168; border-color: var(--hmi-line-soft); cursor: not-allowed; }
+a.hmi-btn { display: inline-flex; align-items: center; text-decoration: none; }
 .hmi-btn[data-armed='true'] { border-color: var(--hmi-medium); color: var(--hmi-medium); }
 
 .hmi-input {

@@ -84,6 +84,7 @@ class Settings(BaseSettings):
     max_file_size_mb: int = 50
     use_marker_fallback: bool = True  # Marker for scanned/complex PDFs
     name_lookup: bool = True  # Look up unconfirmed names in podcast transcripts on Wikipedia (online)
+    reddit_saved_feed: str = ""  # Private JSON feed of your saved links (reddit.com/prefs/feeds)
 
     # --- Graph Construction ---
     # weight = semantic * centred cosine + passage * matching passages + entity * shared entities
@@ -104,6 +105,21 @@ class Settings(BaseSettings):
     api_host: str = "127.0.0.1"
     web_lan: bool = False  # Web UI reachable from other devices on the network (sign-in; API stays local)
 
+    # --- Two machines: an always-on primary (API, UI, database) and a GPU worker ---
+    # standalone: everything on this machine (as before). primary: no GPU work here; the worker
+    # claims it over HTTP. worker: runs `zettlecast worker` against PRIMARY_URL, holds the media.
+    role: str = "standalone"
+    worker_token: str = ""  # shared by primary and worker (not the UI's API token)
+    primary_url: str = ""  # worker: the primary's API, e.g. http://192.168.1.20:8000
+    worker_url: str = ""  # primary: the worker's file server, e.g. http://192.168.1.30:8010
+    worker_port: int = 8010  # worker: its file server (audio, screenshots, triage) for the primary
+    worker_heartbeat_seconds: float = 10
+    worker_lease_minutes: float = 10  # a claimed job goes back to pending this long after the last heartbeat
+    worker_idle_shutdown_minutes: float = 15  # worker shuts its PC down idle this long (nobody signed in; 0 = never)
+    desktop_mac_address: str = ""  # primary: the worker's network card, for Wake-on-LAN
+    wake_broadcast: str = "255.255.255.255"
+    wake_window: str = ""  # primary: "HH:MM-HH:MM" to wake the worker for queued jobs only then (empty = any time)
+
     # --- Image Processing ---
     vision_model: str = "qwen3.6:35b-a3b"  # Same model as text: no model swapping
     max_image_size_mb: int = 25
@@ -115,6 +131,22 @@ class Settings(BaseSettings):
         # On Windows "localhost" tries IPv6 ::1 first; Ollama listens on IPv4 only, so every
         # request waited ~2 s for the fallback
         return url.replace("//localhost:", "//127.0.0.1:")
+
+    @field_validator("role")
+    @classmethod
+    def _known_role(cls, role: str) -> str:
+        role = role.strip().lower()
+        if role not in ("standalone", "primary", "worker"):
+            raise ValueError(f"ROLE must be standalone, primary or worker, not {role!r}")
+        return role
+
+    @property
+    def is_primary(self) -> bool:
+        return self.role == "primary"
+
+    @property
+    def is_worker(self) -> bool:
+        return self.role == "worker"
 
     def ensure_directories(self) -> None:
         """Create storage directories if they don't exist."""

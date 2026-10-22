@@ -2,6 +2,7 @@
 
 import os
 import time
+from datetime import datetime, timedelta
 
 import pytest
 from PIL import Image
@@ -47,11 +48,25 @@ def test_pending_newest_first_and_decisions(storage):
     triage.decide(storage / "shot0.png", "keep_image")
     result = triage.pending()
     assert result["items"] == [] and result["remaining"] == 0
-    assert result["decided"] == {"keep": 1, "keep_image": 1, "skip": 1}
+    assert result["decided"] == {"keep": 1, "keep_image": 1, "skip": 1, "ignore": 0}
 
     queue = ImageQueue()
     kept = {i.image.image_title: i.image.keep_image for i in queue.items.values()}
     assert kept == {"shot1": False, "shot0": True}  # skips are never queued
+
+
+def test_ignore_adds_nothing_and_keeps_the_file(storage, monkeypatch):
+    triage.add_folder(str(storage))
+    triage.decide(storage / "shot1.png", "ignore", {"box": [0.1, 0.1, 0.5, 0.5], "points": []})
+    assert ImageQueue().items == {}
+    assert triage.pending()["decided"]["ignore"] == 1
+    assert triage.pending()["remaining"] == 2  # not asked about again
+
+    recycled = []
+    monkeypatch.setattr(triage, "recycle", lambda path: recycled.append(path) or True)
+    state = triage._load()
+    triage._sweep(state, now=datetime.now() + timedelta(hours=1))
+    assert recycled == [] and (storage / "shot1.png").exists()
 
 
 def test_renamed_copy_is_not_asked_again(storage):
@@ -80,6 +95,16 @@ def test_only_files_in_triage_folders(storage, tmp_path):
         triage.decide(outside, "keep")
     with pytest.raises(ValueError):
         triage.decide(storage / "shot0.png", "maybe")
+
+
+def test_a_screenshot_gone_after_the_listing_is_skipped(storage, monkeypatch):
+    # the Recycle Bin sweeper (or OneDrive) removed it between listing the folder and reading it
+    triage.add_folder(str(storage))
+    listed = triage._images_in(str(storage))
+    (storage / "shot1.png").unlink()
+    monkeypatch.setattr(triage, "_images_in", lambda folder: listed)
+    p = triage.pending()
+    assert [i["name"] for i in p["items"]] == ["shot2.png", "shot0.png"] and p["remaining"] == 2
 
 
 def test_screenshot_note_indexes_only_its_focus():
@@ -118,6 +143,39 @@ def test_names_outside_the_focus_are_dropped(monkeypatch):
     image = __import__("pathlib").Path(__file__)  # any existing file; chat is mocked
     v = vision_backend.VisionBackend().analyze_image(image)
     assert v.people == ["Julien Périard"] and v.organisations == ["Reddit"]
+
+
+def test_what_a_screenshot_was_kept_for_leads_the_note(monkeypatch):
+    from zettlecast.image import vision_backend
+    from zettlecast.image.formatter import saved_tag, saved_title
+
+    monkeypatch.setattr(vision_backend, "chat", lambda *a, **k: {
+        "saved_as": "media", "item": {"name": "Functional Programming in Scala",
+                                      "by": "Paul Chiusano, Runar Bjarnason", "type": "book", "where": "", "price": ""},
+        "kind": "screenshot", "title": "Book cover in a podcast video", "focus": "Functional Programming in Scala",
+        "context": "The Peterman Pod on YouTube", "description": "A book cover.", "detected_text": "...",
+        "concepts": ["functional programming"], "people": [], "organisations": []})
+    v = vision_backend.VisionBackend().analyze_image(__import__("pathlib").Path(__file__))
+    assert v.item == {"name": "Functional Programming in Scala", "by": "Paul Chiusano, Runar Bjarnason", "type": "book"}
+    assert saved_tag(v) == "to read" and saved_title(v) == "Book: Functional Programming in Scala"
+    text = format_vision_result(v, 1170, 2532, "PNG")
+    assert text.startswith("## Kept\n\n**To read**: Functional Programming in Scala - Paul Chiusano")
+    assert "To read" in " ".join(c.text for c in create_chunks(text, "n3"))
+
+
+def test_places_and_products_keep_where_and_price():
+    from zettlecast.image.formatter import saved_tag, saved_title
+
+    place = VisionExtraction(saved_as="place", item={"name": "Kamikochi", "type": "valley", "where": "Nagano, Japan"},
+                             title="Mountain valley", description="", detected_text="")
+    assert saved_tag(place) == "place to visit" and saved_title(place) == "Place: Kamikochi"
+    assert "- **Where**: Nagano, Japan" in format_vision_result(place, 10, 10)
+    ring = VisionExtraction(saved_as="product", item={"name": "Blue stone ring", "where": "Amazon", "price": "$79.99"},
+                            description="", detected_text="")
+    assert saved_tag(ring) == "to buy" and "- **Price**: $79.99" in format_vision_result(ring, 10, 10)
+    moment = VisionExtraction(saved_as="other", title="Sunset over the bay", description="", detected_text="")
+    assert saved_tag(moment) == "" and saved_title(moment) == "Sunset over the bay"
+    assert not format_vision_result(moment, 10, 10).startswith("## Kept")
 
 
 def test_discards_go_to_the_recycle_bin_after_the_undo_window(storage, monkeypatch):
@@ -163,3 +221,15 @@ def test_a_different_file_at_a_discarded_path_is_not_recycled(storage, monkeypat
     triage._sweep(state, now=datetime.now() + triage.RECYCLE_DELAY)
     assert next(iter(state["decisions"].values()))["recycled"] == "replaced"
     assert (storage / "shot0.png").exists()
+
+
+def test_save_waits_for_a_reader_holding_the_state_file(tmp_path, monkeypatch):
+    # Windows refuses to replace a file someone has open: the save must wait, not fail the request
+    import threading
+
+    monkeypatch.setattr(triage, "state_path", lambda: tmp_path / "image_triage.json")
+    triage._save({"folders": [], "decisions": {}, "hashes": {}})
+    reader = open(tmp_path / "image_triage.json", "rb")
+    threading.Timer(0.2, reader.close).start()
+    triage._save({"folders": ["x"], "decisions": {}, "hashes": {}})
+    assert triage._load()["folders"] == ["x"]

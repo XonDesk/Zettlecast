@@ -11,6 +11,7 @@
   "dependencies": {
     "@sigma/node-border": "3.0.0",
     "clsx": "^2.1.1",
+    "d3-contour": "^4.0.2",
     "d3-force": "^3.0.0",
     "graphology": "^0.26.0",
     "graphology-types": "^0.24.8",
@@ -23,6 +24,7 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@types/d3-contour": "^3.0.6",
     "@types/d3-force": "^3.0.10",
     "@types/node": "^20",
     "@types/react": "^19",

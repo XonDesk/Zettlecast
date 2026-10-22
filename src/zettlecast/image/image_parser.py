@@ -10,13 +10,13 @@ import shutil
 import time
 from pathlib import Path
 from typing import Optional
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid5
 
 from PIL import Image, UnidentifiedImageError
 
 from ..config import settings
 from ..models import NoteMetadata, NoteModel, ProcessingResult
-from .formatter import format_vision_result
+from .formatter import format_vision_result, saved_tag, saved_title
 from .vision_backend import VisionBackend, VisionModelNotFoundError
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,10 @@ def keep_copy(file_path: Path) -> Path:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(file_path, target)
     return target
+
+
+def image_note_uuid(file_path: Path) -> str:
+    return str(uuid5(NAMESPACE_URL, "zettlecast:image:" + hashlib.sha256(file_path.read_bytes()).hexdigest()))
 
 
 def parse_image(file_path: Path, keep_image: bool = True, focus_region: Optional[dict] = None) -> ProcessingResult:
@@ -106,9 +110,10 @@ def parse_image(file_path: Path, keep_image: bool = True, focus_region: Optional
         # 5. Format as markdown
         full_text = format_vision_result(vision_data, width, height, file_format)
 
-        # 6. Create note with UUID
-        note_uuid = str(uuid4())
-        title = vision_data.title or file_path.stem.replace("_", " ").replace("-", " ").title()
+        # 6. Create note: the uuid comes from the image's bytes, so reading it again replaces the note
+        note_uuid = image_note_uuid(file_path)
+        title = saved_title(vision_data) or file_path.stem.replace("_", " ").replace("-", " ").title()
+        tag = saved_tag(vision_data)
         source = file_path.absolute()
         if keep_image and _is_triage_screenshot(file_path):
             source = keep_copy(file_path)
@@ -121,7 +126,7 @@ def parse_image(file_path: Path, keep_image: bool = True, focus_region: Optional
             full_text=full_text,
             content_hash=compute_content_hash(full_text),
             metadata=NoteMetadata(
-                tags=vision_data.concepts,  # Use concepts as tags
+                tags=([tag] if tag else []) + [c for c in vision_data.concepts if c != tag],
                 custom={
                     "image_width": width,
                     "image_height": height,
@@ -130,6 +135,8 @@ def parse_image(file_path: Path, keep_image: bool = True, focus_region: Optional
                     "image_kept": keep_image,
                     "original_path": str(file_path.absolute()),
                     "kind": vision_data.kind,
+                    "saved_as": vision_data.saved_as,
+                    **({"item": vision_data.item} if vision_data.item else {}),
                     **({"focus_region": focus_region} if focus_region else {}),
                     **({"focus": vision_data.focus} if vision_data.focus else {}),
                     **({"context": vision_data.context} if vision_data.context else {}),

@@ -376,7 +376,7 @@ a:hover > .search-result-title,
 .graph-search {
   position: relative;
   margin-left: auto;
-  width: 320px;
+  width: 420px;
 }
 
 .graph-search-results {
@@ -409,6 +409,87 @@ a:hover > .search-result-title,
 
 .graph-search-results button:hover {
   background: var(--color-bg-tertiary);
+}
+
+.graph-search-results {
+  max-height: min(70vh, 640px);
+  overflow-y: auto;
+  z-index: 20;
+}
+
+.graph-search-results ul {
+  list-style: none;
+}
+
+.graph-search .input {
+  width: 100%;
+  padding-right: 2rem;
+}
+
+.graph-search-clear {
+  position: absolute;
+  top: 50%;
+  right: 0.5rem;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.graph-search-heading,
+.graph-search-empty {
+  padding: 0.4rem 0.75rem;
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+.graph-search-heading {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-top: 1px solid var(--color-border);
+}
+
+.graph-search-heading:first-child {
+  border-top: none;
+}
+
+.graph-search-hit {
+  display: flex;
+  align-items: flex-start;
+}
+
+.graph-search-hit button {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.graph-search-hit-title {
+  font-weight: 600;
+}
+
+.graph-search-hit-snippet {
+  color: var(--color-text-muted);
+  font-size: 0.8rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.graph-search-open {
+  flex: none;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.8rem;
+  white-space: nowrap;
+  color: var(--color-primary);
+  text-decoration: none;
+}
+
+.graph-search-open:hover {
+  text-decoration: underline;
 }
 
 .graph-loading,
@@ -503,8 +584,11 @@ a:hover > .search-result-title,
 }
 
 .graph-community-label {
+  /* placed by Graph.tsx after each frame (transform), hidden until then */
+  display: none;
   position: absolute;
-  transform: translate(-50%, -50%);
+  left: 0;
+  top: 0;
   max-width: 220px;
   padding: 0.125rem 0.5rem;
   border-radius: 0.25rem;
@@ -1498,6 +1582,7 @@ a.btn {
 .stamp-keep { color: var(--keep); }
 .stamp-keep_image { color: var(--keep-image); }
 .stamp-skip { color: var(--skip); }
+.stamp-ignore { color: var(--color-text-muted); }
 
 .triage-done { text-align: center; font-size: 1.125rem; display: flex; flex-direction: column; gap: 0.5rem; }
 
@@ -1513,7 +1598,7 @@ a.btn {
 
 .triage-actions {
   display: grid;
-  grid-template-columns: auto auto 1fr 1fr 1fr;
+  grid-template-columns: auto auto 1fr 1fr 1fr 1fr;
   gap: 0.5rem;
   padding: 0.625rem 1rem calc(0.75rem + env(safe-area-inset-bottom));
 }
@@ -1537,7 +1622,9 @@ a.btn {
 .btn-skip .triage-key { color: var(--skip); }
 .btn-keep .triage-key { color: var(--keep); }
 .btn-keep_image .triage-key { color: var(--keep-image); }
+.btn-ignore .triage-key { color: var(--color-text-muted); }
 .btn-skip:hover:not(:disabled) { border-color: var(--skip); }
+.btn-ignore:hover:not(:disabled) { border-color: var(--color-text-muted); }
 .btn-keep:hover:not(:disabled) { border-color: var(--keep); }
 .btn-keep_image:hover:not(:disabled) { border-color: var(--keep-image); }
 

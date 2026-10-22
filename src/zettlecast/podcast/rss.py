@@ -5,6 +5,7 @@ Fetches podcast feeds and downloads episodes for transcription.
 """
 
 import logging
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import List, Optional
 from urllib.parse import urlparse
@@ -49,6 +50,14 @@ def sanitize_filename(name: str) -> str:
     name = re.sub(r'[<>:"/\\|?*]', '', name)
     # Truncate
     return name[:200]
+
+
+def episode_date(published: str) -> str:
+    """Feed publish date (RFC 822) as YYYY-MM-DD, for telling same-titled episodes apart."""
+    try:
+        return parsedate_to_datetime(published).strftime("%Y-%m-%d")
+    except (TypeError, ValueError):
+        return sanitize_filename(published) or "undated"
 
 
 def html_to_text(html: str) -> str:
@@ -154,7 +163,8 @@ def parse_feed(feed_url: str, limit: int = 5) -> PodcastFeed:
 def download_episode(
     episode: FeedEpisode, 
     output_dir: Path,
-    client: Optional[httpx.Client] = None
+    client: Optional[httpx.Client] = None,
+    stem: Optional[str] = None,
 ) -> Path:
     """
     Download podcast episode audio to local file.
@@ -174,7 +184,7 @@ def download_episode(
     ext = Path(path).suffix or ".mp3"
     
     # Create safe filename
-    safe_title = sanitize_filename(episode.title)
+    safe_title = stem or sanitize_filename(episode.title)
     filename = f"{safe_title}{ext}"
     output_path = output_dir / filename
     

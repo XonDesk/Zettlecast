@@ -34,7 +34,18 @@ _holds = 0  # GPU work in this process that must not see the cache emptied (Para
 def _device() -> str:
     import torch
 
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():  # Apple silicon (the always-on primary)
+        return "mps"
+    return "cpu"
+
+
+def _dtype():
+    """bfloat16 on CUDA; float16 on Apple's GPU (bfloat16 kernels are patchy there); float32 on a CPU."""
+    import torch
+
+    return {"cuda": torch.bfloat16, "mps": torch.float16}.get(_device(), torch.float32)
 
 
 def _quiet_transformers() -> None:
@@ -53,7 +64,6 @@ def get_embedder():
     global _embedder
     _touch()
     if _embedder is None:
-        import torch
         from sentence_transformers import SentenceTransformer
 
         _quiet_transformers()
@@ -63,7 +73,7 @@ def get_embedder():
         _embedder = SentenceTransformer(
             settings.embedding_model,
             device=_device(),
-            model_kwargs={"torch_dtype": torch.bfloat16},
+            model_kwargs={"torch_dtype": _dtype()},
             truncate_dim=settings.embedding_dimensions,
         )
     return _embedder
@@ -73,7 +83,6 @@ def get_reranker():
     global _reranker
     _touch()
     if _reranker is None:
-        import torch
         from sentence_transformers import CrossEncoder
 
         _quiet_transformers()
@@ -81,7 +90,7 @@ def get_reranker():
         _reranker = CrossEncoder(
             settings.reranker_model,
             device=_device(),
-            model_kwargs={"torch_dtype": torch.bfloat16},
+            model_kwargs={"torch_dtype": _dtype()},
         )
     return _reranker
 
@@ -149,6 +158,8 @@ def release_models(force: bool = False) -> bool:
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        elif torch.backends.mps.is_available():
+            torch.mps.empty_cache()
     logger.info("Search models unloaded")
     return True
 

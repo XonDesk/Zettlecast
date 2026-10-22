@@ -59,6 +59,9 @@ def chat(
     Returns:
         Response text, or the parsed JSON object when schema is given
     """
+    if settings.is_primary:
+        # no GPU on the primary: LLM work is queued for the worker (which claims it over HTTP)
+        raise LLMError("No LLM on the primary machine (ROLE=primary): the worker does this")
     if _use_server(model):
         content = _server_chat(prompt, schema, images, system, temperature)
     else:
@@ -179,6 +182,28 @@ def _pid_and_vision() -> tuple[Optional[int], bool]:
         return None, False
 
 
+def _serves_images() -> bool:
+    """Whether the running llama-server takes images: asked from the server (its pid file can be gone)."""
+    try:
+        return bool(httpx.get(f"{_server_url()}/props", timeout=2).json()["modalities"]["vision"])
+    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        return _pid_and_vision()[1]
+
+
+def _port_pid() -> Optional[int]:
+    """Pid of the process listening on llama-server's port (for a server whose pid file is gone)."""
+    try:
+        import psutil
+
+        for c in psutil.net_connections(kind="tcp"):
+            if c.laddr and c.laddr.port == settings.llama_server_port and c.status == psutil.CONN_LISTEN:
+                if c.pid and psutil.Process(c.pid).name().lower().startswith("llama-server"):
+                    return c.pid
+    except Exception as e:
+        logger.debug(f"Port owner lookup failed: {e}")
+    return None
+
+
 def _ensure_server(vision: bool = False) -> None:
     """
     Start llama-server unless it's already up (perhaps started by another process).
@@ -190,11 +215,12 @@ def _ensure_server(vision: bool = False) -> None:
     with _server_lock:
         status = _health()
         if status == 200:
-            pid, has_vision = _pid_and_vision()
-            if not vision or has_vision or pid is None:
+            if not vision or _serves_images():
                 return
             stop_server()  # restart with the projector
-            status = None
+            status = _health()
+            if status is not None:
+                raise LLMError("llama-server without the vision projector is running and could not be stopped")
         log = settings.storage_path / "llama-server.log"
         if status is None:
             model = ollama_blob(settings.ollama_model, "model")
@@ -242,10 +268,13 @@ def stop_server(only_own: bool = False) -> None:
     only_own: only if this process started it (exit, idle timer).
     """
     pid_file = _pid_file()
-    if not pid_file.exists():
+    if pid_file.exists():
+        pid, _ = _pid_and_vision()
+    elif not only_own and _health() is not None:
+        pid = _port_pid()  # up without a pid file
+    else:
         return
     try:
-        pid, _ = _pid_and_vision()
         if pid is None or (only_own and pid != _own_pid):
             return
         if sys.platform == "win32":
@@ -340,6 +369,8 @@ def unload(model: Optional[str] = None, only_own: bool = False) -> None:
     Free the LLM's VRAM now (before GPU-heavy ASR work): stop llama-server, unload Ollama.
     only_own: leave a llama-server another process started (shutting down the API server).
     """
+    if settings.is_primary:
+        return
     stop_server(only_own=only_own)
     try:
         httpx.post(

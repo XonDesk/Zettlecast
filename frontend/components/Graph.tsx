@@ -20,7 +20,9 @@ import type { NodeHoverDrawingFunction } from 'sigma/rendering';
 import { createNodeBorderProgram } from '@sigma/node-border';
 import { api } from '@/lib/api';
 import { compileQuery } from '@/lib/graphQuery';
-import type { GraphData, GraphNode, LinkSuggestion } from '@/lib/types';
+import type { GraphData, GraphNode, LinkSuggestion, SearchResult } from '@/lib/types';
+import { formatTimestamp } from '@/lib/utils';
+import { type ContourLayer, type ContourPoint, densityContours, drawContours } from './graphContours';
 import GraphPane, {
     type CommunityInsight,
     type Facets,
@@ -30,8 +32,9 @@ import GraphPane, {
 
 // Community fills: one hue per community, as Obsidian's groups. Twelve is more than the eye
 // can tell apart in every pair, so the communities are also named on the map and the colour of
-// any of them can be changed in the pane. Colour follows the community id, never its rank;
-// ids past the palette use the neutral fill.
+// any of them can be changed in the pane. Unless changed, colours are picked per graph so linked
+// communities (neighbours on the map) look as different as possible.
+// Colour follows the community id, never its rank; ids past the palette get generated colours.
 const COMMUNITY_COLORS = [
     '#4e9af1', '#f0a33a', '#e0607e', '#3fb950', '#a78bfa', '#2dd4bf',
     '#e3c84b', '#ef6b5b', '#a3d65c', '#d46fd8', '#7dd3fc', '#c9a27e',
@@ -49,11 +52,25 @@ const RINGS: Record<string, { color: string; size: number; label: string }> = {
     pdf: { color: '#94a3b8', size: 0.22, label: 'document' },
     markdown: { color: '#94a3b8', size: 0.22, label: 'document' },
     image: { color: '#f8fafc', size: 0.42, label: 'image' },
+    reddit: { color: '#ff7a45', size: 0.3, label: 'reddit' },
 };
-const RING_LEGEND = [{ label: 'podcast', color: 'transparent', size: 0 }, RINGS.web, RINGS.pdf, RINGS.image];
-const TYPE_LABELS: Record<string, string> = { audio: 'podcast', pdf: 'PDF', markdown: 'note', web: 'web page', image: 'image' };
+const RING_LEGEND = [{ label: 'podcast', color: 'transparent', size: 0 }, RINGS.web, RINGS.pdf, RINGS.image, RINGS.reddit];
+const TYPE_LABELS: Record<string, string> = { audio: 'podcast', pdf: 'PDF', markdown: 'note', web: 'web page', image: 'image', reddit: 'Reddit save' };
 const SETTINGS_KEY = 'zettlecast.graph.settings.v2'; // v2: d3 forces
 const MAX_INSIGHT_CHIPS = 6;
+const CONTOUR_INTERVAL = 150; // ms between contour recomputes while the layout moves
+const LAYOUT_KEY = 'zettlecast.graph.layout.v1'; // last settled positions, so reopening skips the pre-layout
+const PRELAYOUT_TICKS = 300;
+const PRELAYOUT_TICKS_CACHED = 40; // most notes start where they were: settle only the new ones in
+const SEARCH_MIN_CHARS = 3;
+const SEARCH_DEBOUNCE_MS = 450; // passage search runs the embedder + reranker: wait for a pause in typing
+const SEARCH_RESULTS = 12;
+
+/** A search snippet without its leading "[12.3s - 45.6s]" (the result shows the time), shortened. */
+function snippetText(snippet: string): string {
+    const text = snippet.replace(/^\[[\d.]+s(?: - [\d.]+s)?\]\s*/, '');
+    return text.length > 220 ? `${text.slice(0, 220)}…` : text;
+}
 
 const NodeRingProgram = createNodeBorderProgram({
     borders: [
@@ -62,10 +79,81 @@ const NodeRingProgram = createNodeBorderProgram({
     ],
 });
 
+function hslHex(h: number, s: number, l: number): string {
+    const a = s * Math.min(l, 1 - l);
+    const f = (n: number) => {
+        const k = (n + h / 30) % 12;
+        return Math.round(255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)))).toString(16).padStart(2, '0');
+    };
+    return `#${f(0)}${f(8)}${f(4)}`;
+}
+
+/** The colour for a community id: the palette, then golden-angle hues (stable per id, far from the last). */
+function defaultColor(id: number): string {
+    if (id < 0) return OTHER_COMMUNITY;
+    if (id < COMMUNITY_COLORS.length) return COMMUNITY_COLORS[id];
+    const k = id - COMMUNITY_COLORS.length;
+    return hslHex((15 + k * 137.508) % 360, 0.62, k % 2 ? 0.7 : 0.56);
+}
+
 function paletteColor(id: number | null | undefined, overrides: Record<number, string>): string {
     if (id === null || id === undefined) return UNCLUSTERED;
-    if (overrides[id]) return overrides[id];
-    return id >= 0 && id < COMMUNITY_COLORS.length ? COMMUNITY_COLORS[id] : OTHER_COMMUNITY;
+    return overrides[id] ?? defaultColor(id);
+}
+
+function colorDistance(a: string, b: string): number {
+    // "redmean" RGB distance: cheap and close enough to perceived difference
+    const rgb = (h: string) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+    const [r1, g1, b1] = rgb(a);
+    const [r2, g2, b2] = rgb(b);
+    const r = (r1 + r2) / 2;
+    return Math.sqrt((2 + r / 256) * (r1 - r2) ** 2 + 4 * (g1 - g2) ** 2 + (2 + (255 - r) / 256) * (b1 - b2) ** 2);
+}
+
+/**
+ * A colour for every community, each one different, chosen so communities that share many links
+ * (they sit next to each other on the map) look as different as possible. Largest first: they
+ * take up the most of the map, so they get the clearest contrasts.
+ */
+function autoCommunityColors(data: GraphData): Record<number, string> {
+    const ids = data.communities.map((c) => c.id);
+    const size = new Map(ids.map((id) => [id, 0]));
+    const communityOf = new Map<string, number>();
+    data.nodes.forEach((n) => {
+        if (n.community === null || n.community === undefined) return;
+        communityOf.set(n.id, n.community);
+        size.set(n.community, (size.get(n.community) ?? 0) + 1);
+    });
+    const shared = new Map<string, number>();
+    const key = (a: number, b: number) => (a < b ? `${a}:${b}` : `${b}:${a}`);
+    data.links.forEach((l) => {
+        const a = communityOf.get(l.source);
+        const b = communityOf.get(l.target);
+        if (a === undefined || b === undefined || a === b) return;
+        shared.set(key(a, b), (shared.get(key(a, b)) ?? 0) + (l.value ?? 1));
+    });
+    const candidates = Array.from({ length: Math.max(ids.length, COMMUNITY_COLORS.length) }, (_, i) => defaultColor(i));
+    const out: Record<number, string> = {};
+    const order = [...ids].sort((a, b) => (size.get(b) ?? 0) - (size.get(a) ?? 0));
+    for (const id of order) {
+        const free = candidates.filter((c) => !Object.values(out).includes(c));
+        let best = free[0];
+        let bestPenalty = Infinity;
+        for (const colour of free) {
+            let penalty = 0;
+            for (const [other, assigned] of Object.entries(out)) {
+                const w = shared.get(key(id, Number(other))) ?? 0;
+                // close colours on linked communities cost the most; any two alike cost a little
+                penalty += (w + 0.05) * Math.exp(-colorDistance(colour, assigned) / 120);
+            }
+            if (penalty < bestPenalty) {
+                bestPenalty = penalty;
+                best = colour;
+            }
+        }
+        out[id] = best;
+    }
+    return out;
 }
 
 function yearColor(year: number, from: number, to: number): string {
@@ -191,6 +279,52 @@ function seedPositions(nodes: SimNode[]): void {
         n.vx = 0;
         n.vy = 0;
     });
+}
+
+type LayoutCache = Record<string, [number, number]>;
+
+function loadLayout(): LayoutCache {
+    try {
+        return JSON.parse(window.localStorage.getItem(LAYOUT_KEY) ?? '{}') as LayoutCache;
+    } catch {
+        return {};
+    }
+}
+
+function saveLayout(nodes: Iterable<SimNode>): void {
+    const out: LayoutCache = {};
+    for (const n of nodes) if (Number.isFinite(n.x) && Number.isFinite(n.y)) out[n.id] = [Math.round(n.x!), Math.round(n.y!)];
+    try {
+        window.localStorage.setItem(LAYOUT_KEY, JSON.stringify(out));
+    } catch {
+        /* storage full or blocked: the next open lays out from scratch */
+    }
+}
+
+/**
+ * Positions from the last visit; a note that wasn't there starts next to a linked note that was.
+ * Returns how many notes had a saved position.
+ */
+function restorePositions(nodes: SimNode[], neighbours: (id: string) => string[]): number {
+    const saved = loadLayout();
+    let known = 0;
+    for (const n of nodes) {
+        const p = saved[n.id];
+        if (p) {
+            [n.x, n.y] = p;
+            known++;
+        }
+    }
+    const random = mulberry32(7);
+    for (const n of nodes) {
+        if (saved[n.id]) continue;
+        const anchor = neighbours(n.id).map((id) => saved[id]).find(Boolean);
+        if (anchor) {
+            n.x = anchor[0] + (random() - 0.5) * 40;
+            n.y = anchor[1] + (random() - 0.5) * 40;
+        }
+    }
+    return known;
 }
 
 function nodeAttributes(n: GraphNode) {
@@ -357,12 +491,6 @@ const drawHover: NodeHoverDrawingFunction = (context, data, settings) => {
     context.fillText(label, data.x + data.size + 10, data.y + size / 3);
 };
 
-interface MapLabel {
-    id: number;
-    label: string;
-    x: number;
-    y: number;
-}
 
 export default function KnowledgeGraph() {
     const router = useRouter();
@@ -374,8 +502,14 @@ export default function KnowledgeGraph() {
     const [selected, setSelected] = useState<string | null>(null);
     const [focusCommunity, setFocusCommunity] = useState<number | null>(null);
     const [query, setQuery] = useState('');
+    // passage search (embeddings + reranker): the notes found stay highlighted until the box is cleared
+    const [hits, setHits] = useState<{ query: string; results: SearchResult[] } | null>(null);
+    const [searching, setSearching] = useState(false);
+    const [resultsOpen, setResultsOpen] = useState(false);
     const [links, setLinks] = useState<{ uuid: string; items: LinkSuggestion[] } | null>(null);
-    const [mapLabels, setMapLabels] = useState<MapLabel[]>([]);
+    // community names on the map: placed straight in the DOM after each frame (React state per frame
+    // re-rendered the whole page at every camera or layout move)
+    const labelEls = useRef(new Map<number, HTMLSpanElement>());
     const [settings, setSettings] = useState<GraphSettings>(loadSettings);
     const [paneOpen, setPaneOpen] = useState(true);
     const [visibleCount, setVisibleCount] = useState({ nodes: 0, links: 0 });
@@ -387,10 +521,27 @@ export default function KnowledgeGraph() {
     const sim = useMemo(() => createSimulation(), []);
     const simNodes = useRef(new Map<string, SimNode>());
     const drag = useRef({ node: null as string | null, moved: false, fitOnEnd: false });
+    // density contours: recomputed (at most every CONTOUR_INTERVAL ms) when the layout or what
+    // they show changes, redrawn on every frame for the camera
+    const contours = useRef({ layers: [] as ContourLayer[], dirty: true, last: 0, timer: 0 });
+    const contourInput = useRef({
+        enabled: false, bandwidth: 20, dim: false, focusCommunity: null as number | null,
+        colorOf: (() => UNCLUSTERED) as (a: Record<string, unknown>) => string,
+    });
     const communities = useMemo(() => data?.communities ?? [], [data]);
+    const hitNodes = useMemo(
+        () => new Set((hits?.results ?? []).map((r) => r.uuid).filter((id) => full?.hasNode(id))),
+        [hits, full],
+    );
+    // picked for this graph (neighbours far apart); the colours chosen in the pane override them
+    const autoColors = useMemo(() => (data ? autoCommunityColors(data) : {}), [data]);
+    const communityColors = useMemo(
+        () => ({ ...autoColors, ...settings.groups.communityColors }),
+        [autoColors, settings.groups.communityColors],
+    );
     const insights = useMemo(
-        () => (data ? communityInsights(data, settings.groups.communityColors) : []),
-        [data, settings.groups.communityColors],
+        () => (data ? communityInsights(data, communityColors) : []),
+        [data, communityColors],
     );
     const facets = useMemo<Facets>(() => (data ? facetsOf(data) : { tag: [], person: [], org: [], source: [] }), [data]);
     const years = useMemo(
@@ -439,8 +590,10 @@ export default function KnowledgeGraph() {
                 const n = nodes.get(node);
                 return n ? { ...a, x: n.x, y: n.y } : a;
             }, { attributes: ['x', 'y'] });
+            contours.current.dirty = true;
         });
         sim.on('end', () => {
+            saveLayout(simNodes.current.values());
             if (drag.current.fitOnEnd) {
                 drag.current.fitOnEnd = false;
                 fit();
@@ -467,7 +620,11 @@ export default function KnowledgeGraph() {
             })),
         );
         applyForces(prelayout, settings.forces, settings.display.nodeSize);
-        prelayout.tick(300);
+        // reopening: most notes have their last positions, so a short settle replaces the full layout
+        const known = restorePositions(nodes, (id) => full.neighbors(id));
+        const cached = known >= 0.8 * nodes.length;
+        prelayout.alpha(cached ? 0.3 : 1).tick(cached ? PRELAYOUT_TICKS_CACHED : PRELAYOUT_TICKS);
+        saveLayout(nodes);
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [full]);
 
@@ -544,6 +701,11 @@ export default function KnowledgeGraph() {
         });
         renderer.setCustomBBox(renderer.getBBox());
         const state = drag.current;
+        const c = contours.current;
+        const contourCanvas = renderer.createCanvas('contours', {
+            beforeLayer: 'edges',
+            style: { width: '100%', height: '100%', pointerEvents: 'none' },
+        });
 
         renderer.on('enterNode', ({ node }) => setHovered(node));
         renderer.on('leaveNode', () => setHovered(null));
@@ -591,6 +753,29 @@ export default function KnowledgeGraph() {
         renderer.on('upNode', release);
         renderer.on('upStage', release);
 
+        renderer.on('afterRender', () => {
+            const input = contourInput.current;
+            if (!input.enabled) {
+                c.layers = [];
+            } else if (c.dirty && performance.now() - c.last >= CONTOUR_INTERVAL) {
+                const points: ContourPoint[] = [];
+                view.forEachNode((_, a) => {
+                    if (input.focusCommunity !== null && a.community !== input.focusCommunity) return;
+                    points.push({ x: a.x, y: a.y, color: input.colorOf(a) });
+                });
+                c.layers = densityContours(points, input.bandwidth);
+                c.dirty = false;
+                c.last = performance.now();
+            } else if (c.dirty && !c.timer) {
+                // the layout moved since: catch up once the interval has passed
+                c.timer = window.setTimeout(() => {
+                    c.timer = 0;
+                    renderer.scheduleRender();
+                }, CONTOUR_INTERVAL);
+            }
+            drawContours(contourCanvas, c.layers, (p) => renderer.graphToViewport(p), input.dim ? 0.35 : 1);
+        });
+
         // community names just above their notes, kept in place as the camera and layout move
         // (from sigma's own display positions, so they line up with what is drawn)
         renderer.on('afterRender', () => {
@@ -603,16 +788,20 @@ export default function KnowledgeGraph() {
                 const c = spans.get(a.community) ?? { x: 0, top: Infinity, n: 0 };
                 spans.set(a.community, { x: c.x + p.x, top: Math.min(c.top, p.y), n: c.n + 1 });
             });
-            setMapLabels(
-                communities.flatMap((c) => {
-                    const span = spans.get(c.id);
-                    if (!span || span.n < 2) return [];
-                    return [{ id: c.id, label: c.label, x: span.x / span.n, y: span.top - 18 }];
-                }),
-            );
+            labelEls.current.forEach((el, id) => {
+                const span = spans.get(id);
+                if (!span || span.n < 2) {
+                    el.style.display = 'none';
+                    return;
+                }
+                el.style.display = 'block';
+                el.style.transform = `translate(${span.x / span.n}px, ${span.top - 18}px) translate(-50%, -50%)`;
+            });
         });
         sigmaRef.current = renderer;
         return () => {
+            window.clearTimeout(c.timer);
+            c.timer = 0;
             renderer.kill();
             sigmaRef.current = null;
         };
@@ -636,14 +825,27 @@ export default function KnowledgeGraph() {
                     return Number.isFinite(year) && year ? yearColor(year, from, to) : UNCLUSTERED;
                 }
                 case 'source':
-                    return COMMUNITY_COLORS[sources.indexOf(a.source as string)] ?? OTHER_COMMUNITY;
+                    return defaultColor(sources.indexOf(a.source as string));
                 case 'type':
-                    return COMMUNITY_COLORS[typeOrder.indexOf(a.sourceType as string)] ?? OTHER_COMMUNITY;
+                    return defaultColor(typeOrder.indexOf(a.sourceType as string));
                 default:
-                    return paletteColor(a.community as number | null, g.communityColors);
+                    return paletteColor(a.community as number | null, communityColors);
             }
         };
-    }, [settings.groups, facets, types, years]);
+    }, [settings.groups, communityColors, facets, types, years]);
+
+    useEffect(() => {
+        contourInput.current = {
+            enabled: settings.display.contours,
+            bandwidth: settings.display.contourBandwidth,
+            dim: !!(hovered || selected),
+            focusCommunity,
+            colorOf,
+        };
+        contours.current.dirty = true;
+        sigmaRef.current?.scheduleRender();
+    }, [settings.display.contours, settings.display.contourBandwidth, hovered, selected, focusCommunity, colorOf,
+        settings.filter, full]);
 
     useEffect(() => {
         const renderer = sigmaRef.current;
@@ -659,6 +861,10 @@ export default function KnowledgeGraph() {
                 if (neighbours.has(node)) return { ...shown, forceLabel: true, zIndex: 1 };
                 return { ...shown, color: DIMMED, ringColor: 'transparent', label: '', zIndex: 0 };
             }
+            if (hitNodes.size) {
+                return hitNodes.has(node) ? { ...shown, highlighted: true, forceLabel: true, zIndex: 2 }
+                    : { ...shown, color: DIMMED, ringColor: 'transparent', label: '', zIndex: 0 };
+            }
             if (focusCommunity !== null && attrs.community !== focusCommunity) {
                 return { ...shown, color: DIMMED, ringColor: 'transparent', label: '', zIndex: 0 };
             }
@@ -669,6 +875,10 @@ export default function KnowledgeGraph() {
             if (focus && view.hasNode(focus)) {
                 return view.hasExtremity(edge, focus) ? { ...shown, color: '#94a3b8', zIndex: 1 } : { ...shown, hidden: true };
             }
+            if (hitNodes.size) {
+                const [a, b] = view.extremities(edge);
+                return hitNodes.has(a) && hitNodes.has(b) ? shown : { ...shown, hidden: true };
+            }
             if (focusCommunity !== null) {
                 const [a, b] = view.extremities(edge);
                 const inside = view.getNodeAttribute(a, 'community') === focusCommunity
@@ -677,7 +887,7 @@ export default function KnowledgeGraph() {
             }
             return shown;
         });
-    }, [view, full, hovered, selected, focusCommunity, settings, colorOf]);
+    }, [view, full, hovered, selected, focusCommunity, settings, colorOf, hitNodes]);
 
     // Why the selected note links to each neighbour (shared people/topics, matching passage)
     useEffect(() => {
@@ -696,12 +906,42 @@ export default function KnowledgeGraph() {
     const matches = useMemo(() => {
         if (!full || query.trim().length < 2) return [];
         const q = query.toLowerCase();
-        return full.filterNodes((_, attrs) => String(attrs.label).toLowerCase().includes(q)).slice(0, 8);
+        return full.filterNodes((_, attrs) => String(attrs.label).toLowerCase().includes(q)).slice(0, 5);
     }, [full, query]);
+
+    useEffect(() => {
+        const q = query.trim();
+        if (q.length < SEARCH_MIN_CHARS) {
+            setHits(null);
+            return;
+        }
+        let cancelled = false;
+        const timer = setTimeout(() => {
+            setSearching(true);
+            api.search(q, SEARCH_RESULTS, true)
+                .then((data) => {
+                    if (!cancelled) setHits({ query: q, results: data.results });
+                })
+                .catch((err) => console.error('Search failed:', err))
+                .finally(() => {
+                    if (!cancelled) setSearching(false);
+                });
+        }, SEARCH_DEBOUNCE_MS);
+        return () => {
+            cancelled = true;
+            clearTimeout(timer);
+        };
+    }, [query]);
+
+    const clearSearch = () => {
+        setQuery('');
+        setHits(null);
+        setResultsOpen(false);
+    };
 
     const focusNode = (node: string) => {
         setSelected(node);
-        setQuery('');
+        setResultsOpen(false);
         const renderer = sigmaRef.current;
         const display = renderer?.getNodeDisplayData(node);
         if (renderer && display) {
@@ -769,17 +1009,63 @@ export default function KnowledgeGraph() {
                     <input
                         className="input"
                         value={query}
-                        onChange={(e) => setQuery(e.target.value)}
-                        placeholder="Find a note…"
+                        onChange={(e) => {
+                            setQuery(e.target.value);
+                            setResultsOpen(true);
+                        }}
+                        onFocus={() => setResultsOpen(true)}
+                        onKeyDown={(e) => {
+                            if (e.key === 'Escape') clearSearch();
+                        }}
+                        placeholder="Search notes and what was said…"
+                        aria-label="Search notes"
                     />
-                    {matches.length > 0 && (
-                        <ul className="graph-search-results">
-                            {matches.map((node) => (
-                                <li key={node}>
-                                    <button onClick={() => focusNode(node)}>{full?.getNodeAttribute(node, 'label')}</button>
-                                </li>
-                            ))}
-                        </ul>
+                    {query && (
+                        <button className="graph-search-clear" onClick={clearSearch} aria-label="Clear search" title="Clear (Esc)">✕</button>
+                    )}
+                    {resultsOpen && (matches.length > 0 || hits || searching) && (
+                        <div className="graph-search-results">
+                            {matches.length > 0 && (
+                                <>
+                                    <div className="graph-search-heading">Titles</div>
+                                    <ul>
+                                        {matches.map((node) => (
+                                            <li key={node}>
+                                                <button onClick={() => focusNode(node)}>{full?.getNodeAttribute(node, 'label')}</button>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                </>
+                            )}
+                            {query.trim().length >= SEARCH_MIN_CHARS && (
+                                <div className="graph-search-heading">
+                                    Passages{searching ? ' · searching…' : hits ? ` · ${hits.results.length} notes highlighted` : ''}
+                                </div>
+                            )}
+                            {hits && hits.results.length === 0 && !searching && (
+                                <div className="graph-search-empty">Nothing found.</div>
+                            )}
+                            {hits && hits.results.length > 0 && (
+                                <ul>
+                                    {hits.results.map((r) => (
+                                        <li key={r.uuid} className="graph-search-hit">
+                                            <button onClick={() => full?.hasNode(r.uuid) && focusNode(r.uuid)}
+                                                    title={full?.hasNode(r.uuid) ? 'Show on the graph' : 'Not on the graph'}>
+                                                <span className="graph-search-hit-title">{r.title}</span>
+                                                <span className="graph-search-hit-snippet">
+                                                    {snippetText(r.snippet)}
+                                                </span>
+                                            </button>
+                                            <Link className="graph-search-open"
+                                                  href={r.timestamp_seconds != null
+                                                      ? `/notes/${r.uuid}?t=${Math.floor(r.timestamp_seconds)}` : `/notes/${r.uuid}`}>
+                                                {r.timestamp_seconds != null ? `▶ ${formatTimestamp(r.timestamp_seconds)}` : 'Open'}
+                                            </Link>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
+                        </div>
                     )}
                 </div>
                 <button className="btn btn-secondary" onClick={fit}>Fit</button>
@@ -802,11 +1088,15 @@ export default function KnowledgeGraph() {
 
             {!selected && !hovered && settings.display.communityLabels && settings.groups.colorBy === 'community' && (
                 <div className="graph-community-labels" aria-hidden="true">
-                    {mapLabels
-                        .filter((l) => focusCommunity === null || l.id === focusCommunity)
-                        .map((l) => (
-                            <span key={l.id} className="graph-community-label" style={{ left: l.x, top: l.y }}>
-                                {l.label}
+                    {communities
+                        .filter((c) => focusCommunity === null || c.id === focusCommunity)
+                        .map((c) => (
+                            <span key={c.id} className="graph-community-label"
+                                  ref={(el) => {
+                                      if (el) labelEls.current.set(c.id, el);
+                                      else labelEls.current.delete(c.id);
+                                  }}>
+                                {c.label}
                             </span>
                         ))}
                 </div>

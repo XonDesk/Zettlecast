@@ -24,7 +24,7 @@ from .config import settings
 from .db import db
 from .linker import update_edges_for_note
 from .models import NoteModel, ProcessingResult
-from .parser import AUDIO_EXTENSIONS, parse_file
+from .parser import AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, parse_file
 from .podcast.models import PodcastEpisode, TranscriptionResult
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,8 @@ def ingest_path(path: Path, podcast_name: Optional[str] = None) -> ProcessingRes
     Ingest one file.
 
     Audio files are added to the podcast queue (status "queued"); run the
-    queue to transcribe them. Everything else is parsed and stored now.
+    queue to transcribe them. On the primary (no GPU) images go to the image
+    queue the same way. Everything else is parsed and stored now.
     """
     path = Path(path)
     if path.suffix.lower() in AUDIO_EXTENSIONS:
@@ -51,6 +52,14 @@ def ingest_path(path: Path, podcast_name: Optional[str] = None) -> ProcessingRes
         try:
             job_id = TranscriptionQueue().add(path, podcast_name=podcast_name)
         except DuplicateEpisodeError:
+            return ProcessingResult(status="duplicate", title=path.stem)
+        return ProcessingResult(status="queued", uuid=job_id, title=path.stem)
+    if settings.is_primary and path.suffix.lower() in IMAGE_EXTENSIONS:
+        from .image.queue import DuplicateImageError, ImageQueue
+
+        try:
+            job_id = ImageQueue().add(path, collection_name=podcast_name)
+        except DuplicateImageError:
             return ProcessingResult(status="duplicate", title=path.stem)
         return ProcessingResult(status="queued", uuid=job_id, title=path.stem)
 
@@ -269,6 +278,18 @@ def _seed_glossaries(episodes: List[PodcastEpisode], results: Dict[str, Transcri
         logger.info(f"{show}: {len(names)} publisher-confirmed speaker names added to the glossary")
 
 
+def store_transcript(note_path: Path, check_cancel: Callable[[str], None] = lambda stage: None):
+    """Index a transcript note written by save_result and link it into the graph."""
+    parsed = parse_file(note_path)
+    if parsed.status != "success" or not parsed.note:
+        raise RuntimeError(f"Could not read back transcript note: {parsed.error_message}")
+    check_cancel("index")
+    db.upsert_note(parsed.note)
+    check_cancel("link")
+    update_edges_for_note(parsed.note.uuid)
+    return parsed.note
+
+
 def _run_podcast_queue(
     limit: Optional[int] = None,
     enhance: bool = True,
@@ -279,6 +300,8 @@ def _run_podcast_queue(
     progress_for: Optional[Callable[[str], ProgressCallback]] = None,
     on_pass: Optional[Callable[[str, int], None]] = None,
     run=None,
+    queue=None,
+    store: Optional[Callable[[Path, Callable[[str], None]], object]] = None,
 ) -> QueueRunSummary:
     """
     Process pending podcast episodes in two passes:
@@ -301,6 +324,10 @@ def _run_podcast_queue(
         run: runstate.RunState publishing progress for the process page. A stop request
             (runstate.request_stop) ends the run after the current episode; the rest go
             back to pending
+        queue: The jobs to run (default: this machine's TranscriptionQueue; a worker passes
+            the jobs it claimed from the primary)
+        store: (note path, check_cancel) -> indexes a written note (default: store_transcript;
+            a worker's queue sends the note to the primary when the job is marked completed)
     """
     from . import runstate
 
@@ -311,7 +338,8 @@ def _run_podcast_queue(
     from .podcast.nemo_transcriber import CancellationError, NeMoTranscriber
     from .podcast.queue import TranscriptionQueue
 
-    queue = TranscriptionQueue()
+    queue = queue if queue is not None else TranscriptionQueue()
+    store = store or store_transcript
     if sync:
         queue.sync_with_storage()
 
@@ -465,13 +493,7 @@ def _run_podcast_queue(
 
             check_cancel("save")
             note_path = save_result(result, episode, enhanced)
-            parsed = parse_file(note_path)
-            if parsed.status != "success" or not parsed.note:
-                raise RuntimeError(f"Could not read back transcript note: {parsed.error_message}")
-            check_cancel("index")
-            db.upsert_note(parsed.note)
-            check_cancel("link")
-            update_edges_for_note(parsed.note.uuid)
+            store(note_path, check_cancel)
             if verifier is not None:
                 from .podcast.verifier import save_glossary
 
@@ -514,11 +536,13 @@ class RunActiveError(RuntimeError):
     """Another process is already running the queue (only one run can use the GPU)."""
 
 
-def run_podcast_queue(*args, source: str = "cli", **kwargs) -> QueueRunSummary:
+def run_podcast_queue(*args, source: str = "cli", link: Optional[Callable[[], object]] = None,
+                      **kwargs) -> QueueRunSummary:
     """
     Process pending podcast episodes end to end, keeping the PC awake meanwhile and
-    publishing progress to the run state (source: "cli" | "api", shown on the process page).
-    Arguments: see _run_podcast_queue. Raises RunActiveError if a run is already going.
+    publishing progress to the run state (source: "cli" | "api" | "worker", shown on the process page).
+    link: called once after episodes completed (default: rebuild_graph here; a worker asks the
+    primary). Arguments: see _run_podcast_queue. Raises RunActiveError if a run is already going.
     """
     from . import embeddings, runstate
 
@@ -538,7 +562,7 @@ def run_podcast_queue(*args, source: str = "cli", **kwargs) -> QueueRunSummary:
 
             run.phase("graph")
             try:
-                rebuild_graph()
+                (link or rebuild_graph)()
             except Exception:
                 logger.exception("Graph rebuild after the run failed (run `zettlecast graph rebuild`)")
         return summary

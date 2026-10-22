@@ -8,6 +8,7 @@ podcast enhancer and images from the vision step.
 
 import logging
 
+from .chunker import UNINDEXED_SECTIONS, _drop_sections
 from .config import settings
 from .llm import LLMError, chat
 from .models import NoteModel
@@ -57,8 +58,8 @@ def enrich_note(note: NoteModel) -> NoteModel:
 
     Failures (Ollama down, bad output) leave the note unchanged.
     """
-    if not settings.enable_auto_tagging:
-        return note
+    if not settings.enable_auto_tagging or settings.is_primary:
+        return note  # the primary has no LLM: the worker tags it later (tagging.py)
     if note.metadata.tags and "summary" in note.metadata.custom:
         return note
     if len(note.full_text.strip()) < 100:
@@ -69,7 +70,7 @@ def enrich_note(note: NoteModel) -> NoteModel:
             ENRICH_PROMPT.format(
                 count=settings.auto_tag_count,
                 title=note.title,
-                text=note.full_text[:40_000],
+                text=_drop_sections(note.full_text, UNINDEXED_SECTIONS)[:40_000],  # what's indexed
             ),
             schema=ENRICH_SCHEMA,
         )

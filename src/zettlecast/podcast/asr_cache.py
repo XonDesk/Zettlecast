@@ -50,6 +50,17 @@ def load_asr(audio_path: Path) -> Optional[TranscriptionResult]:
         return None
 
 
+def has_asr(audio_path: Path) -> bool:
+    """Whether a saved result from the current models exists, from the file's first bytes only
+    (the process page asks for every pending episode; the files are megabytes)."""
+    try:
+        with asr_path(audio_path).open("r", encoding="utf-8") as f:
+            head = f.read(1024)
+    except OSError:
+        return False
+    return head.startswith(json.dumps({"models": _models()})[:-1] + ",")
+
+
 def delete_asr(audio_path: Path) -> bool:
     path = asr_path(audio_path)
     if path.exists():

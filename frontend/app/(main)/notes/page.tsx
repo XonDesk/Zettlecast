@@ -48,6 +48,7 @@ export default function NotesPage() {
             audio: '🎙️',
             markdown: '📝',
             rss: '📰',
+            reddit: '👽',
             image: '🖼️',
         };
         return emojis[type] || '📋';
@@ -81,6 +82,7 @@ export default function NotesPage() {
                     <option value="audio">Audio</option>
                     <option value="markdown">Markdown</option>
                     <option value="image">Image</option>
+                    <option value="reddit">Reddit</option>
                 </select>
                 <span className="text-muted">{notes.length} notes</span>
             </div>

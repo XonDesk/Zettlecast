@@ -33,6 +33,8 @@ export interface GraphSettings {
         linkThickness: number;
         textFade: number; // labels shown from this rendered node size
         communityLabels: boolean;
+        contours: boolean; // density contours per colour group, as in Embedding Atlas
+        contourBandwidth: number; // their smoothing, in layout units
     };
     forces: {
         center: number; // pull towards the middle
@@ -57,7 +59,7 @@ export const DEFAULT_SETTINGS: GraphSettings = {
         depth: 1,
     },
     groups: { colorBy: 'community', custom: [], communityColors: {} },
-    display: { nodeSize: 1, linkThickness: 1, textFade: 14, communityLabels: true },
+    display: { nodeSize: 1, linkThickness: 1, textFade: 14, communityLabels: true, contours: false, contourBandwidth: 20 },
     // tuned on the KoopCast graph: no overlaps, every community clear of its neighbours
     forces: { center: 0.04, repel: 120, link: 1, distance: 40, communityPull: 0.3 },
 };
@@ -285,6 +287,14 @@ export default function GraphPane(props: Props) {
 
             <details open className="gp-section">
                 <summary>Communities</summary>
+                {Object.keys(groups.communityColors).length > 0 && (
+                    <div className="gp-row-buttons">
+                        <button className="btn btn-secondary" onClick={() => set('groups', { communityColors: {} })}
+                                title="Drop the colours picked here: back to the automatic ones">
+                            Reset colours
+                        </button>
+                    </div>
+                )}
                 <ul className="gp-communities">
                     {props.communities.map((c) => {
                         const hidden = filter.hiddenCommunities.includes(c.id);
@@ -390,6 +400,12 @@ export default function GraphPane(props: Props) {
                         onChange={(v) => set('display', { textFade: v })} format={(v) => (v === 0 ? 'all' : `${v}px`)} />
                 <Toggle label="Community names" checked={display.communityLabels}
                         onChange={(v) => set('display', { communityLabels: v })} />
+                <Toggle label="Density contours" checked={display.contours}
+                        onChange={(v) => set('display', { contours: v })} />
+                {display.contours && (
+                    <Slider label="Contour smoothing" value={display.contourBandwidth} min={5} max={60} step={1}
+                            onChange={(v) => set('display', { contourBandwidth: v })} />
+                )}
                 {props.legend}
             </details>
 

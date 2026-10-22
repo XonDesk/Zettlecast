@@ -141,3 +141,67 @@ def test_known_speakers_prefers_verified_names(tmp_path, monkeypatch):
     note("c", "Ryan Anderson")
     monkeypatch.setattr(type(pipeline.settings), "transcripts_path", property(lambda self: tmp_path))
     assert pipeline.known_speakers("KoopCast") == ["Ryne Anderson"]
+
+
+def test_feed_import_skips_known_episodes_without_downloading(queue, tmp_path):
+    from zettlecast.podcast.rss import FeedEpisode, PodcastFeed
+
+    q, audio = queue
+    job_id = q.add(audio, podcast_name="KoopCast", episode_title="Old title",
+                   feed_url="https://feed", guid="guid-1")
+    q.items[job_id].status = "completed"
+    retitled = FeedEpisode(title="New title #12", audio_url="https://x/a.mp3", published="", guid="guid-1",
+                           description=NOTES)
+    new = FeedEpisode(title="Another", audio_url="https://x/b.mp3", published="", guid="guid-2")
+    feed = PodcastFeed(title="KoopCast", episodes=[retitled, new])
+
+    downloaded = []
+
+    def fake_download(episode, output_dir, stem=None):
+        downloaded.append(episode.guid)
+        path = output_dir / f"{episode.guid}.mp3"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(episode.guid.encode())
+        return path
+
+    with patch("zettlecast.podcast.rss.parse_feed", return_value=feed), \
+         patch("zettlecast.podcast.rss.download_episode", side_effect=fake_download):
+        job_ids = q.add_from_feed("https://feed", limit=10, download_dir=tmp_path / "dl")
+
+    assert downloaded == ["guid-2"]
+    assert len(job_ids) == 1 and q.items[job_ids[0]].episode.guid == "guid-2"
+    assert q.items[job_id].episode.description == NOTES  # show notes still filled in
+
+
+def test_feed_import_matches_items_saved_before_guids(queue, tmp_path):
+    from zettlecast.podcast.rss import FeedEpisode
+
+    q, audio = queue
+    job_id = q.add(audio, episode_title="Pacing | KoopCast #243")  # no feed_url / guid
+    episode = FeedEpisode(title="Pacing | KoopCast #243", audio_url="u", published="", guid="g")
+    assert q.find_feed_episode("https://other", episode, tmp_path / "elsewhere") is None
+    q.items[job_id].episode.feed_url = "https://feed"
+    assert q.find_feed_episode("https://feed", episode, tmp_path / "elsewhere").episode.id == job_id
+
+
+def test_feed_episodes_sharing_a_title_get_separate_files(queue, tmp_path):
+    from zettlecast.podcast.rss import FeedEpisode, PodcastFeed
+
+    q, _ = queue
+    feed = PodcastFeed(title="Show", episodes=[
+        FeedEpisode(title="Summer Q&A", audio_url="u1", published="Wed, 02 Jul 2025 01:00:00 GMT", guid="a"),
+        FeedEpisode(title="Summer Q&A", audio_url="u2", published="Wed, 23 Jul 2025 01:00:00 GMT", guid="b"),
+    ])
+    stems = []
+
+    def fake_download(episode, output_dir, stem=None):
+        stems.append(stem)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        path = output_dir / f"{stem}.mp3"
+        path.write_bytes(episode.guid.encode())
+        return path
+
+    with patch("zettlecast.podcast.rss.parse_feed", return_value=feed), \
+         patch("zettlecast.podcast.rss.download_episode", side_effect=fake_download):
+        assert len(q.add_from_feed("https://feed", download_dir=tmp_path / "dl")) == 2
+    assert stems == ["Summer Q&A 2025-07-02", "Summer Q&A 2025-07-23"]

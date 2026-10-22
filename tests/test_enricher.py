@@ -26,6 +26,7 @@ def make_note(**metadata) -> NoteModel:
 def tagging_on():
     with patch("zettlecast.enricher.settings") as s:
         s.enable_auto_tagging = True
+        s.is_primary = False
         s.auto_tag_count = 3
         yield s
 

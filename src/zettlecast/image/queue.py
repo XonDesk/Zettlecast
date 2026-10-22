@@ -15,6 +15,7 @@ from typing import Dict, List, Optional
 
 from PIL import Image
 
+from .. import statefile
 from ..config import settings
 from .models import ImageItem, QueueItem
 
@@ -34,11 +35,15 @@ class ImageQueue:
     Tracks processing times per megapixel for accurate ETA estimation.
     """
 
+    DATETIME_FIELDS = ("added_at", "started_at", "completed_at", "lease_until")
+    LISTS = {"processing_times_per_mp": 100, "completed_hashes": 5000}  # entries kept
+
     def __init__(self, state_file: Optional[Path] = None):
         self.state_file = state_file or (settings.storage_path / "image_queue.json")
         self.items: Dict[str, QueueItem] = {}
         self.processing_times_per_mp: List[float] = []  # Seconds per megapixel
         self.completed_hashes: List[str] = []
+        self._base: dict = {}  # the file as loaded: saving merges with changes made elsewhere since
 
         self._load_state()
 
@@ -46,24 +51,8 @@ class ImageQueue:
         """Load queue state from disk."""
         if self.state_file.exists():
             try:
-                data = json.loads(self.state_file.read_text(encoding="utf-8"))
-
-                for job_id, item_data in data.get("items", {}).items():
-                    # Parse nested image
-                    image_data = item_data.pop("image", {})
-                    image = ImageItem(**image_data)
-
-                    # Parse datetime fields
-                    for dt_field in ["added_at", "started_at", "completed_at"]:
-                        if item_data.get(dt_field):
-                            item_data[dt_field] = datetime.fromisoformat(item_data[dt_field])
-
-                    self.items[job_id] = QueueItem(image=image, **item_data)
-
-                self.processing_times_per_mp = data.get("processing_times_per_mp", [])
-                self.completed_hashes = data.get("completed_hashes", [])
-
-                logger.info(f"Loaded queue state: {len(self.items)} items")
+                self._parse(statefile.read(self.state_file))
+                logger.debug(f"Loaded queue state: {len(self.items)} items")
 
                 # Auto-reset stuck 'processing' items
                 self._reset_stuck_items()
@@ -72,19 +61,38 @@ class ImageQueue:
                 logger.error(f"Failed to load queue state: {e}")
                 self.items = {}
 
+    def _parse(self, data: dict) -> None:
+        self._base = json.loads(json.dumps(data))  # a copy: parsing must not change it
+        self.items = {}
+        for job_id, item_data in data.get("items", {}).items():
+            item_data = dict(item_data)
+            image = ImageItem(**item_data.pop("image", {}))
+            for dt_field in self.DATETIME_FIELDS:
+                if item_data.get(dt_field):
+                    item_data[dt_field] = datetime.fromisoformat(item_data[dt_field])
+            self.items[job_id] = QueueItem(image=image, **item_data)
+        self.processing_times_per_mp = list(data.get("processing_times_per_mp", []))
+        self.completed_hashes = list(data.get("completed_hashes", []))
+
     def _reset_stuck_items(self):
         """
         Reset items stuck in 'processing' state.
 
-        Items that have been 'processing' for more than 1 hour are considered stuck
-        (e.g., due to process crash).
+        An item claimed by a worker (another machine) is stuck once its lease runs out; others
+        after more than 1 hour of 'processing' (e.g., due to process crash).
         """
         now = datetime.utcnow()
         stuck_threshold = timedelta(hours=1)
         reset_count = 0
 
         for item in self.items.values():
-            if item.status == "processing":
+            if item.status == "processing" and item.lease_until:
+                if item.lease_until < now:
+                    logger.warning(f"Lease ran out, back to pending: {item.image.image_title}")
+                    item.status = "pending"
+                    item.started_at = item.worker_id = item.lease_until = None
+                    reset_count += 1
+            elif item.status == "processing":
                 if item.started_at:
                     processing_time = now - item.started_at
                     if processing_time > stuck_threshold:
@@ -104,30 +112,26 @@ class ImageQueue:
             logger.info(f"Auto-reset {reset_count} stuck 'processing' items to 'pending'")
             self._save_state()
 
+    def _serialize(self) -> dict:
+        data = {
+            "items": {},
+            "processing_times_per_mp": list(self.processing_times_per_mp),
+            "completed_hashes": list(self.completed_hashes),
+        }
+        for job_id, item in self.items.items():
+            item_dict = item.model_dump()
+            for dt_field in self.DATETIME_FIELDS:
+                if item_dict.get(dt_field):
+                    item_dict[dt_field] = item_dict[dt_field].isoformat()
+            data["items"][job_id] = item_dict
+        # the same JSON types as a file read back (the merge compares item by item)
+        return json.loads(json.dumps(data, default=str))
+
     def _save_state(self):
-        """Save queue state to disk."""
+        """Save queue state to disk, merged with changes other writers made since it was loaded."""
         try:
-            self.state_file.parent.mkdir(parents=True, exist_ok=True)
-
-            data = {
-                "items": {},
-                "processing_times_per_mp": self.processing_times_per_mp[-100:],  # Keep last 100
-                "completed_hashes": self.completed_hashes[-1000:],  # Keep last 1000
-            }
-
-            for job_id, item in self.items.items():
-                item_dict = item.model_dump()
-                # Convert datetime to ISO format
-                for dt_field in ["added_at", "started_at", "completed_at"]:
-                    if item_dict.get(dt_field):
-                        item_dict[dt_field] = item_dict[dt_field].isoformat()
-                data["items"][job_id] = item_dict
-
-            self.state_file.write_text(
-                json.dumps(data, indent=2, default=str),
-                encoding="utf-8",
-            )
-
+            merged = statefile.save(self.state_file, self._base, self._serialize(), list_keys=self.LISTS)
+            self._parse(merged)
         except Exception as e:
             logger.error(f"Failed to save queue state: {e}")
 
@@ -267,6 +271,96 @@ class ImageQueue:
             self.items[job_id].image.focus_region = focus_region
             self._save_state()
 
+    def add_remote(
+        self,
+        ref: str,
+        image_hash: str,
+        collection_name: Optional[str] = None,
+        title: Optional[str] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        keep_image: bool = True,
+        focus_region: Optional[dict] = None,
+    ) -> str:
+        """
+        Queue an image that is on the worker machine (ref: "desktop:..."), described by the worker.
+
+        Raises:
+            DuplicateImageError: If the image was already processed
+        """
+        if image_hash in self.completed_hashes:
+            raise DuplicateImageError(f"Image already processed: {title or ref} (hash: {image_hash[:8]})")
+        for item in self.items.values():
+            if item.image.image_hash == image_hash:
+                return item.image.id
+        image = ImageItem(
+            image_path=ref,
+            image_hash=image_hash,
+            collection_name=collection_name,
+            image_title=title,
+            width=width,
+            height=height,
+            megapixels=(width * height) / 1_000_000 if width and height else None,
+            keep_image=keep_image,
+            focus_region=focus_region,
+        )
+        self.items[image.id] = QueueItem(image=image, status="pending", added_at=datetime.utcnow())
+        self._save_state()
+        logger.info(f"Added to queue from the worker: {image.image_title} (ID: {image.id[:8]})")
+        return image.id
+
+    def remove_by_hash(self, image_hash: str) -> Optional[bool]:
+        """Take a not-yet-processed image out (None: not queued; False: already processed)."""
+        item = next((i for i in self.items.values() if i.image.image_hash == image_hash), None)
+        if item is None:
+            return None
+        return self.remove_pending(item.image.id)
+
+    def claim(self, worker_id: str, lease: timedelta, limit: Optional[int] = None) -> List[QueueItem]:
+        """Hand pending images to a worker: processing under a lease it renews with each heartbeat."""
+        pending = [i for i in self.items.values() if i.status == "pending"]
+        if limit is not None:
+            pending = pending[:limit]
+        now = datetime.utcnow()
+        for item in pending:
+            item.status = "processing"
+            item.started_at = now
+            item.worker_id = worker_id
+            item.lease_until = now + lease
+            item.attempts += 1
+        if pending:
+            self._save_state()
+        return [self.items[i.image.id] for i in pending]
+
+    def renew(self, worker_id: str, lease: timedelta) -> int:
+        """Extend the leases of the images a worker holds."""
+        held = [i for i in self.items.values() if i.status == "processing" and i.worker_id == worker_id]
+        for item in held:
+            item.lease_until = datetime.utcnow() + lease
+        if held:
+            self._save_state()
+        return len(held)
+
+    def release(self, job_ids) -> int:
+        """Put claimed images that weren't read back to pending (the attempt isn't counted)."""
+        count = 0
+        for job_id in job_ids:
+            item = self.items.get(job_id)
+            if item and item.status == "processing":
+                item.status = "pending"
+                item.started_at = item.worker_id = item.lease_until = None
+                item.attempts = max(0, item.attempts - 1)
+                count += 1
+        if count:
+            self._save_state()
+        return count
+
+    def set_path(self, job_id: str, path: str) -> None:
+        """Point a job at another copy of its file (the worker's, once it has fetched it)."""
+        if job_id in self.items:
+            self.items[job_id].image.image_path = path
+            self._save_state()
+
     def remove_pending(self, job_id: str) -> bool:
         """Take a not-yet-processed image out of the queue."""
         item = self.items.get(job_id)
@@ -313,6 +407,7 @@ class ImageQueue:
             item.status = "completed"
             item.completed_at = datetime.utcnow()
             item.processing_time_seconds = processing_time_seconds
+            item.worker_id = item.lease_until = None
 
             # Track processing time per megapixel for ETA
             if item.image.megapixels and item.image.megapixels > 0:
@@ -335,6 +430,7 @@ class ImageQueue:
         if job_id in self.items:
             item = self.items[job_id]
             item.error_message = error_message
+            item.worker_id = item.lease_until = None
 
             # Move to review if max retries exceeded
             if item.attempts >= settings.image_max_retries:

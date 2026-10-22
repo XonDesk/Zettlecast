@@ -7,6 +7,8 @@ Reference for AI agents working on this repository.
 Local-first Zettelkasten for **Windows + NVIDIA GPU only**. Podcasts are
 transcribed with speaker labels, everything is chunked and embedded into
 LanceDB for semantic search, and notes are linked into a knowledge graph.
+It can also run split across two machines (`ROLE`, see "Two machines" below): an always-on Mac
+mini as the primary (API, web UI, database) and the GPU PC as a worker it wakes for jobs.
 
 | Component | Technology |
 |-----------|-----------|
@@ -37,8 +39,20 @@ src/zettlecast/
   enricher.py        LLM tags + summary for non-podcast notes
   identity.py        UUID frontmatter, wikilinks
   models.py          Pydantic models
-  runstate.py        Run state shared across processes (<storage>/run_state.json) + stop requests; one run at a time
+  reddit.py          Reddit saves -> notes: private saved feed (RSS), thread feeds, paced client
+  curation.py        Reddit comment curation: the user's rubric (<storage>/reddit_curation.md, Settings page) -> takeaways
+  runstate.py        Run state shared across processes (<storage>/run_state.json) + stop requests; one run at a time;
+                     cycle times per phase, step times, per-phase averages carried to the next run (HMI ETA)
   system.py          Process page status (run, queues, GPU, LLM server, DB, disk, alarms) and controls
+  statefile.py       JSON state with merge-on-save (queues: writers never undo each other's changes)
+  paths.py           "desktop:<path>" references to files on the worker
+  worker_api.py      Primary: /worker/* (heartbeat, claim, inputs, results, link), WORKER_TOKEN
+  workerstate.py     Primary: the worker's last heartbeat, commands for it, pause / stay on (worker_state.json)
+  wake.py            Primary: Wake-on-LAN + the policy (jobs waiting, worker offline, WAKE_WINDOW, give up after 3)
+  tagging.py         LLM tags the primary couldn't do: found in the DB (no summary / uncurated save), done by the worker
+  worker.py          Worker: claim -> fetch inputs -> pipeline -> send results; heartbeat; idle shutdown
+  worker_files.py    Worker: file server for the primary (audio with Range, screenshot triage)
+  migrate.py         `migrate-paths`: desktop paths in copied data -> the primary's copies or desktop: refs
   podcast/
     nemo_transcriber.py  Parakeet + Nemotron diarization on CUDA
     asr_cache.py         Saved raw transcription (<audio>.asr.json) between the two passes
@@ -56,9 +70,11 @@ src/zettlecast/
     image_parser.py      Image -> note
     queue.py             Image queue
     triage.py            Screenshot triage: folders, keep / keep_image / skip decisions by content hash
-frontend/            Next.js UI: app/(main)/ pages share the sidebar (notes, podcasts, images, search,
-                     process, settings); app/(main)/process is the HMI-style control page (ISA-101 look); app/graph is a full-screen view;
-                     app/triage sorts screenshots (swipe / arrow keys); components/Transcript renders speaker turns
+frontend/            Next.js UI: app/(main)/ pages share the sidebar (notes, podcasts, images,
+                     process, settings; app/(main)/search still exists but is hidden: the graph's search box replaces it);
+                     app/(main)/process is the HMI-style control page (ISA-101 look; cycle times + rough ETA; the image line
+                     screenshots -> sorting -> vision with its controls); app/graph is a full-screen view;
+                     app/triage sorts screenshots (swipe / arrow keys; reached from Images and the process page); components/Transcript renders speaker turns
 tests/               pytest suite (LLM and models mocked)
 start.ps1            Start Ollama + API + web UI
 zc.ps1               CLI shortcut
@@ -73,9 +89,11 @@ zc.ps1               CLI shortcut
 .\zc.ps1 --help                                      # CLI
 ```
 
-- Single machine only; the environment (.venv, .env, models) is already installed. No setup script.
-- PyTorch comes from the CUDA 13 wheel index (RTX 50-series needs torch >= 2.7):
-  `uv pip install --python .venv\Scripts\python.exe -e ".[dev]" --extra-index-url https://download.pytorch.org/whl/cu130 --index-strategy unsafe-best-match`
+- On this PC the environment (.venv, .env, models) is already installed. The two-machine setup has
+  its own guides: `deploy/macos/README.md` (primary) and `deploy/windows/README.md` (worker).
+- PyTorch comes from the CUDA 13 wheel index (RTX 50-series needs torch >= 2.7); NeMo, torchaudio
+  and Marker are the `[gpu]` extra (the Mac primary installs without it):
+  `uv pip install --python .venv\Scripts\python.exe -e ".[gpu,dev]" --extra-index-url https://download.pytorch.org/whl/cu130 --index-strategy unsafe-best-match`
 - NeMo is installed from GitHub at a pinned commit (`pyproject.toml`): the
   diarization model needs `rope` attention, which is newer than the 3.0.0 PyPI release.
   Switch the dependency to `nemo-toolkit>=3.1` once 3.1 is published (main is already 3.1.0).
@@ -157,6 +175,10 @@ the same word count and a close spelling is proposed as a new name. Single words
 | `podcast verify [MATCH] [-s N]` | Compare notes with the feed's published transcripts (word/speaker agreement, passages to spot-check) |
 | `podcast status` / `podcast retry` | Queue status / reset failed |
 | `image add PATH` / `image run` / `image status` / `image retry` | Image pipeline |
+| `worker [--once] [--no-file-server]` | Worker (`ROLE=worker`): do the primary's jobs; started at boot by Task Scheduler |
+| `wake` | Primary: Wake-on-LAN to the worker now |
+| `migrate-paths --desktop-root PATH [--dry-run]` | Primary, once after copying the storage folder: repoint paths |
+| `reddit sync [--limit N] [--refresh] [--no-articles] [--no-llm] [--no-threads]` / `reddit tag` / `reddit status` | Import Reddit saves (`--refresh` fetches threads missing so far; `tag` adds LLM tags to saves imported without) |
 
 `podcast run` works in two passes, so the LLM is loaded once per run. Pass 1, for every
 pending episode (speech models reloaded per episode: a Parakeet kept across a diarization
@@ -199,6 +221,7 @@ POST /podcast/retry | POST /podcast/sync | POST /podcast/reset-stuck
 
 GET  /image/status | POST /image/scan | POST /image/add | POST /image/run {limit}
 GET  /image/running | POST /image/retry
+POST /image/stop                        finish the images being read, start no more, link what was stored
 GET  /image/triage?limit=               next undecided screenshots (newest first), counts, folders, queue
 POST|DELETE /image/triage/folders {path} | GET /image/triage/file?path= (only inside a triage folder)
 POST /image/triage/decide {path, decision: keep|keep_image|skip} | POST /image/triage/undo {path}
@@ -208,8 +231,47 @@ GET  /system/status                     run state (any process), queues, GPU, LL
 POST /system/run/stop {mode: after_episode|abort} | POST /system/run/resume
 POST /system/unload (free the GPU; not during a run) | POST /system/reindex (background task)
 
+GET  /reddit/status                     feed set?, imported, without thread, last sync, sync progress
+POST /reddit/sync?refresh=&enrich=&threads=   background task (refused during a podcast run)
+POST /reddit/tag | POST /reddit/stop     tag untagged saves (LLM, no Reddit requests) | stop after the current save
+
 GET  /settings | POST /settings {key: value}   (written to .env; restart to apply)
+
+POST /system/wake | POST /system/desktop {stay_on}     primary: wake the worker / keep it on when idle
+
+# Primary only, Bearer WORKER_TOKEN (not the API token): the worker's side of the job queues
+POST /worker/heartbeat {worker_id, busy, run, images, task, gpu, llm, triage, ...} -> commands
+POST /worker/claim {worker_id, kinds, limits}  -> {kind: podcast|image|tag|null, items}
+GET  /worker/input/{kind}/{job} | POST /worker/{kind}/{job}/fetched {ref}
+POST /worker/podcast/{job}/started|completed|failed | POST /worker/podcast/release
+POST /worker/image/{job}/completed|failed | POST /worker/image/release|add|remove
+POST /worker/tag/{uuid} | POST /worker/tag/release | POST /worker/link
 ```
+
+### Two machines (ROLE=primary / ROLE=worker)
+
+`ROLE=standalone` (default) is everything on one PC, as above. Split:
+
+- **Primary** (Mac mini, always on): API (0.0.0.0, for the worker), web UI, LanceDB, notes, both queues,
+  Reddit sync, graph rebuilds, search (embedder/reranker on MPS float16). It never loads an LLM
+  (`llm.chat` raises, `enrich_note` returns the note as is): notes are stored at once and
+  `tagging.py` finds the ones still without summary for the worker. GPU endpoints (`/podcast/run`,
+  `/image/run`, `/image/triage/process`, `/reddit/tag`) unpause the worker and wake it. Triage and a
+  `desktop:` note source are forwarded to the worker's file server (503 "desktop is off" when it isn't
+  heard from in 30 s). Process page: `system.status()` uses the worker's heartbeat; Stop pauses the
+  worker (no new claims until Resume).
+- **Worker** (GPU PC, normally off): `zettlecast worker` claims one kind per batch (podcasts first,
+  10 at a time, so the two passes still load the LLM once; then images; then tags), downloads inputs
+  the primary holds (uploads, feed downloads) into its own storage and tells the primary to use that
+  copy (`desktop:...`; the primary deletes its own), runs the same pipeline with `RemoteTranscriptionQueue`
+  / `RemoteImageQueue` (results posted to the primary, which stores, embeds and links them; one `/worker/link`
+  rebuild per batch). Keeps the audio, `.asr.json`, glossaries, lookups and its own transcript copies (known
+  speakers). Claims are **leases** renewed by the heartbeat; a worker id is new per start, so a crashed
+  worker's jobs go back to pending after `WORKER_LEASE_MINUTES`. Idle `WORKER_IDLE_SHUTDOWN_MINUTES` with no
+  Windows session signed in (WTS API; console or RDP) and not "stay on": `shutdown /s /t 120` (cancelled if
+  someone signs in).
+- Queue files are written by several threads on the primary: `statefile.save` merges three ways (as
+  loaded / now / on disk), so a long feed import doesn't undo the worker's results.
 
 ---
 
@@ -252,17 +314,50 @@ Triage (`/triage` page): ← delete (nothing added; the file goes to the Windows
 `triage.RECYCLE_DELAY` = 10 min later, by a sweeper thread in the API server, so Undo until then
 just cancels it; only the very file decided on, checked by key or hash), → keep (the information only: the note
 records the original path, `image_kept: false`, and `/notes/{uuid}/source` won't serve it),
-↑ keep with the image (copied to `_BRAIN_STORAGE/images/`, shown on the note). Kept files
+↑ keep with the image (copied to `_BRAIN_STORAGE/images/`, shown on the note). The Discard button
+(no key or swipe) adds nothing and leaves the file where it is. Kept files
 are never changed. Decisions are keyed by content hash (`_BRAIN_STORAGE/image_triage.json`), so
 moved or renamed screenshots aren't asked about again. The vision call finds the screenshot's
 **focus** (the post / comment it was taken for: highlighted, else fully in view near the middle)
 and its context (site, author, what it replies to); only those, the description and concepts
-are embedded. **Circling** (✎ / M on the triage page) saves the stroke and its box (fractions of
+are embedded. The call also says what the screenshot was **kept as** (`saved_as`: media, quote, idea,
+tip, place, product, recipe, reference, other) and the thing itself (`item`: name, by, type, where,
+price): it leads the note (`## Kept`, indexed), the title ("Book: Dune", "Place: Kamikochi") and the
+tags ("to read", "to watch", "to listen", "to play", "place to visit", "to buy", "quote"...;
+`formatter.saved_tag`). Image note uuids come from the image's bytes, so reading one again replaces its note. An image run
+reads `LLM_PARALLEL` images at once and links the new notes with one graph rebuild at the end
+(linking per note rebuilds the graph each time: ~10 s of CPU against ~2 s to read an image). **Circling** (✎ / M on the triage page) saves the stroke and its box (fractions of
 the image) with the decision; the vision call then gets the screenshot with the mark drawn on it
 plus a padded, enlarged crop of the circle, and reads the circled content as the focus (it
 overrides the model's own pick). The rest of the screen goes in `## Screen Text` and file details in
 `## Image Details` (both in `chunker.UNINDEXED_SECTIONS`). People / organisations must appear in
 the focus or context (ads and neighbouring comments are dropped).
+
+### Reddit saves
+
+`REDDIT_SAVED_FEED` (Settings page; read from .env at each sync, no restart) is the private RSS link
+for "your saved links" on reddit.com/prefs/feeds: no Reddit app or login, newest ~1000 saves.
+Reddit sends anonymous JSON to its login page, so everything is read as RSS (Atom): one thread
+feed per save (`depth=1`, top order; no scores or reply nesting in feeds). Measured Oct 2026: about
+**one request a minute** anonymously (429 with `x-ratelimit-remaining: 0`); `reddit.Client` paces itself
+(6.5 s, or Reddit's rate-limit headers) and merges its params into the link's own query (httpx's `params=`
+replaces it: the feed key was dropped -> 404). OAuth is no way out: since Nov 2025 new Reddit API apps
+need manual approval. Hence **quick sync** (`threads=False`: notes from the saved feed alone, ~100 a
+minute) then **fetch comments** (`refresh=True`, ~1 a minute, resumable, keeps tags);
+`enrich=False` skips the LLM (GPU busy) and `tag_untagged` / `reddit tag` / `POST /reddit/tag` adds
+tags + summaries later from the database (no Reddit requests); `POST /reddit/stop` ends a sync after the
+current save. A sync stores notes with `db.upsert_note` and links them with **one** `rebuild_graph()` at
+the end (`update_edges_for_note` is ~10 s per note at ~1300 notes). One note per save,
+`source_type: reddit`, uuid from the Reddit id (refresh replaces in place): a post has its text, the
+linked article (web parser, `parse_url(enrich=False)`; media and Reddit links skipped) and the top
+comments; a saved comment has the post and the other top comments (up to 25 top-level, raw in
+`custom.reddit.comments` and the unindexed `## Thread comments`). **Curation** (`curation.py`, before tagging):
+the LLM judges every comment by the user's rubric (products, advice, experience, insight kept; jokes, banter,
+debate dropped; a saved comment is always kept) and writes one-line takeaways to `## From the comments`,
+which is indexed; tags come from that, not the raw comments. `reddit tag` also curates stored notes (older
+ones have `## Top comments`, converted); `reddit review --out f.json` curates a sample without storing.
+LLM tags/summary as for web notes. Graph source group per subreddit (`reddit:r/<sub>`), date = posted. Imported ids in
+`_BRAIN_STORAGE/reddit_saved.json`; a note deleted in the UI isn't imported again.
 
 ### Knowledge graph
 
@@ -279,14 +374,19 @@ note (`chunker.UNINDEXED_SECTIONS`) are not chunked or embedded.
 Graph view (`frontend/components/Graph.tsx`, Obsidian-like): a live d3-force simulation (centre, repel,
 link force/distance, collision, plus a community pull towards each community's centre; links across
 communities weaken as it grows), laid out 300 ticks before the first frame; notes can be dragged.
-Fill = community (12 hues, any changeable in the pane; communities also named on the map), ring =
-source type. Node sizes are in layout units (`itemSizesReference: 'positions'`), so the collision
+Fill = community: picked per graph so linked communities (neighbours on the map) differ most
+(`autoCommunityColors`: 12 hues, then golden-angle ones; any changeable in the pane, Reset colours drops
+the picks; communities also named on the map), ring = source type. Node sizes are in layout units (`itemSizesReference: 'positions'`), so the collision
 radius matches what's drawn and titles appear as you zoom in. The right-hand pane
 (`GraphPane.tsx`, settings in localStorage) has Filters (query language in `lib/graphQuery.ts`:
 `tag:` `person:` `org:` `source:` `type:` `community:` `year:2021-2023`, `-` negates; types, years,
 link kinds, minimum strength, orphans, neighbourhood of the selected note), Communities (show/hide,
 highlight, what stands out in each: topics/people/organisations at 1.5x their overall rate),
 Groups (colour by community/year/source/type, query -> colour groups), Display and Forces.
+The search box matches titles as you type and, after a pause, runs passage search (`/search`, embeddings +
+reranker): the notes found are highlighted on the map, each result opens the note at the passage's time.
+Display → Density contours (off by default) draws Embedding Atlas-style KDE outlines per colour group
+under the links (`components/graphContours.ts`, d3-contour; computed in layout units, redrawn per frame).
 
 ### LanceDB tables
 

@@ -8,6 +8,7 @@ import type {
     GraphData,
     Settings,
     SystemStatus,
+    DesktopStatus,
 } from './types';
 
 // Calls go to /zc-api on the web UI's own server, which checks the sign-in and forwards them to
@@ -255,9 +256,22 @@ export const api = {
 
     resumeRun: () => fetchAPI<{ status: string }>('/system/run/resume', { method: 'POST' }),
 
+    // The worker PC (primary only)
+    wakeDesktop: () => fetchAPI<{ status: string; message?: string }>('/system/wake', { method: 'POST' }),
+    setDesktopStayOn: (stayOn: boolean) =>
+        fetchAPI<DesktopStatus>('/system/desktop', { method: 'POST', body: JSON.stringify({ stay_on: stayOn }) }),
+
     unloadModels: () => fetchAPI<{ status: string; message?: string }>('/system/unload', { method: 'POST' }),
 
     reindex: () => fetchAPI<{ status: string; message?: string }>('/system/reindex', { method: 'POST' }),
+    syncReddit: (refresh: boolean = false, enrich: boolean = true, threads: boolean = true) =>
+        fetchAPI<{ status: string; message?: string }>(
+            `/reddit/sync?refresh=${refresh}&enrich=${enrich}&threads=${threads}`, { method: 'POST' }),
+    getRedditRubric: () => fetchAPI<{ text: string; default: boolean; default_text: string }>('/reddit/rubric'),
+    saveRedditRubric: (text: string) =>
+        fetchAPI<{ status: string; default: boolean }>('/reddit/rubric', { method: 'POST', body: JSON.stringify({ text }) }),
+    tagReddit: () => fetchAPI<{ status: string; message?: string }>('/reddit/tag', { method: 'POST' }),
+    stopReddit: () => fetchAPI<{ status: string; message?: string }>('/reddit/stop', { method: 'POST' }),
 
     rebuildGraph: () => fetchAPI<{ status: string; edges: number }>('/graph/rebuild', { method: 'POST' }),
 
@@ -285,11 +299,13 @@ export const api = {
     processTriage: () =>
         fetchAPI<{ status: string; pending_count?: number; message?: string }>('/image/triage/process', { method: 'POST' }),
 
+    stopImages: () => fetchAPI<{ status: string; message?: string }>('/image/stop', { method: 'POST' }),
+
     /** URL of a screenshot in a triage folder, for an <img> */
     triageImageUrl: (path: string) => apiUrl('/image/triage/file', { path }),
 };
 
-export type TriageDecision = 'keep' | 'keep_image' | 'skip';
+export type TriageDecision = 'keep' | 'keep_image' | 'skip' | 'ignore';
 
 /** The part of a screenshot the user circled, as fractions of the image */
 export interface TriageRegion {

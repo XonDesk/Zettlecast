@@ -44,11 +44,14 @@ _ENTITY_KINDS = ("topic", "person", "org")
 
 
 def source_group(note: dict) -> str:
-    """The source a note belongs to: a podcast show, a website, the images, else its type."""
+    """The source a note belongs to: a podcast show, a website, a subreddit, the images, else its type."""
     meta = note.get("metadata") or {}
     show = ((meta.get("custom") or {}).get("podcast") or {}).get("show")
     if show:
         return f"podcast:{show}"
+    subreddit = ((meta.get("custom") or {}).get("reddit") or {}).get("subreddit")
+    if subreddit:
+        return f"reddit:r/{subreddit}"
     if note.get("source_type") == "web":
         host = urlparse(meta.get("source_url") or note.get("source_path") or "").netloc.lower()
         return f"web:{host.removeprefix('www.')}" if host else "web"

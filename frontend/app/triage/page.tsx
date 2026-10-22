@@ -2,12 +2,13 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { api, type TriageDecision, type TriageItem, type TriageRegion, type TriageState } from '@/lib/api';
+import { api, APIError, type TriageDecision, type TriageItem, type TriageRegion, type TriageState } from '@/lib/api';
 
 // Screenshot triage: one screenshot at a time; swipe (phone) or arrow keys
 //   ← / swipe left   delete: nothing is added; the file goes to the Recycle Bin 10 minutes later
 //   → / swipe right  keep: the information goes into the knowledge base, not the image
 //   ↑ / swipe up     keep with the image (it matters visually)
+//   Discard button   nothing is added and the file stays where it is (no key or swipe)
 //   Backspace / Z    undo the last decision
 //   ✎ / M            circle what the screenshot is for, then keep it (Esc clears the circle)
 
@@ -16,10 +17,13 @@ const REFILL_AT = 5; // fetch more when this few are left
 const LEAVE_MS = 180;
 
 const ACTIONS: { decision: TriageDecision; key: string; label: string; hint: string }[] = [
-    { decision: 'skip', key: '←', label: 'Delete', hint: 'Not added; to the Recycle Bin in 10 minutes' },
-    { decision: 'keep_image', key: '↑', label: 'Keep + image', hint: 'Information and the image' },
-    { decision: 'keep', key: '→', label: 'Keep', hint: 'Information only' },
+    { decision: 'skip', key: '←', label: 'Delete', hint: 'Not added; to the Recycle Bin in 10 minutes (←)' },
+    { decision: 'ignore', key: '⊘', label: 'Discard', hint: 'Not added; the file stays where it is' },
+    { decision: 'keep_image', key: '↑', label: 'Keep + image', hint: 'Information and the image (↑)' },
+    { decision: 'keep', key: '→', label: 'Keep', hint: 'Information only (→)' },
 ];
+
+const isKeep = (d: TriageDecision) => d === 'keep' || d === 'keep_image';
 
 type Point = [number, number];
 
@@ -51,6 +55,7 @@ export default function TriagePage() {
     const [showFolders, setShowFolders] = useState(false);
     const [message, setMessage] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
+    const [desktopOff, setDesktopOff] = useState(false);
     const start = useRef<{ x: number; y: number; id: number } | null>(null);
     // circling: drawing mode, the stroke (fractions of the image), the image's box in the card
     const [marking, setMarking] = useState(false);
@@ -79,12 +84,26 @@ export default function TriagePage() {
             })
             .catch((e) => {
                 console.error(e);
-                if (!cancelled) setError('Could not reach the Zettlecast server');
+                if (cancelled) return;
+                // 503: the screenshots are on the desktop (two-machine setup), which is off
+                setDesktopOff(e instanceof APIError && e.status === 503);
+                setError(e instanceof APIError && e.status === 503
+                    ? 'The screenshots are on the desktop, which is off.'
+                    : 'Could not reach the Zettlecast server');
             });
         return () => {
             cancelled = true;
         };
     }, [fetches]);
+
+    const wake = async () => {
+        try {
+            const r = await api.wakeDesktop();
+            setMessage(r.message ?? r.status);
+        } catch {
+            setMessage('Wake failed');
+        }
+    };
 
     // while kept screenshots are being read, keep the counts current
     useEffect(() => {
@@ -108,7 +127,7 @@ export default function TriagePage() {
         inFlight.current.add(item.path);
         setLeaving(decision);
         if (items.length - 1 < REFILL_AT && state && state.remaining > items.length) load();
-        const region = decision === 'skip' ? null : regionOf(stroke);
+        const region = isKeep(decision) ? regionOf(stroke) : null;
         setTimeout(() => {
             setItems((list) => list.slice(1));
             setLeaving(null);
@@ -123,7 +142,7 @@ export default function TriagePage() {
             ...s,
             remaining: Math.max(0, s.remaining - 1),
             decided: { ...s.decided, [decision]: (s.decided[decision] ?? 0) + 1 },
-            queue: decision === 'skip' ? s.queue : { ...s.queue, pending: (s.queue.pending ?? 0) + 1 },
+            queue: isKeep(decision) ? { ...s.queue, pending: (s.queue.pending ?? 0) + 1 } : s.queue,
         });
         api.decideTriage(item.path, decision, region).catch((e) => {
             console.error(e);
@@ -144,7 +163,7 @@ export default function TriagePage() {
                 ...s,
                 remaining: s.remaining + 1,
                 decided: { ...s.decided, [last.decision]: Math.max(0, (s.decided[last.decision] ?? 1) - 1) },
-                queue: last.decision === 'skip' || undone?.note_kept ? s.queue
+                queue: !isKeep(last.decision) || undone?.note_kept ? s.queue
                     : { ...s.queue, pending: Math.max(0, (s.queue.pending ?? 1) - 1) },
             });
             setMessage(undone?.note_kept
@@ -269,6 +288,7 @@ export default function TriagePage() {
     const transform = leaving
         ? leaving === 'keep' ? 'translate(120vw, 0) rotate(18deg)'
             : leaving === 'skip' ? 'translate(-120vw, 0) rotate(-18deg)'
+            : leaving === 'ignore' ? 'translate(0, 120vh)'
             : 'translate(0, -120vh)'
         : drag ? `translate(${drag.dx}px, ${Math.min(drag.dy, 40)}px) rotate(${drag.dx / 20}deg)` : undefined;
     const waiting = state ? (state.queue.pending ?? 0) : 0;
@@ -283,6 +303,7 @@ export default function TriagePage() {
                     {state && (
                         <span className="text-muted">
                             {' '}· kept {state.decided.keep + state.decided.keep_image} · deleted {state.decided.skip}
+                            {state.decided.ignore ? ` · discarded ${state.decided.ignore}` : ''}
                         </span>
                     )}
                 </div>
@@ -317,7 +338,17 @@ export default function TriagePage() {
                 </section>
             )}
 
-            {error && <div className="triage-error" role="alert">{error}</div>}
+            {error && (
+                <div className="triage-error" role="alert">
+                    {error}
+                    {desktopOff && (
+                        <>
+                            {' '}<button className="btn btn-secondary" onClick={wake}>Wake it</button>
+                            {' '}<button className="btn btn-secondary" onClick={load}>Try again</button>
+                        </>
+                    )}
+                </div>
+            )}
 
             <main className="triage-stage">
                 {items[1] && (
@@ -379,7 +410,7 @@ export default function TriagePage() {
                 </button>
                 {ACTIONS.map((a) => (
                     <button key={a.decision} className={`triage-btn btn-${a.decision}`} onClick={() => decide(a.decision)}
-                            disabled={!current} title={`${a.hint} (${a.key})`}>
+                            disabled={!current} title={a.hint}>
                         <span className="triage-key">{a.key}</span>
                         {a.label}
                     </button>

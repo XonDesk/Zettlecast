@@ -85,3 +85,24 @@ def test_missing_state_reads_idle():
 def test_state_file_location(storage):
     runstate.RunState("cli")
     assert Path(storage / "run_state.json").exists()
+
+
+def test_cycle_times_and_averages_carry_over_to_the_next_run():
+    run = runstate.RunState("cli")
+    run.phase("transcribe", 2)
+    run.episode("a", "A")
+    run.stage("asr")
+    run.done("A", "completed", 40.0, count=False)
+    run.episode("b", "B")
+    run.done("B", "completed", 50.0, count=False)
+    state = runstate.read()
+    assert state["cycles"] == [40.0, 50.0] and state["phase_started_at"]
+    assert runstate.read()["phase"] == "transcribe"
+    run.phase("enhance", 1)
+    run.episode("a", "A")
+    run.done("A", "completed", 100.0, 3600)
+    run.phase("graph")
+    run.finish()
+
+    averages = runstate.RunState("cli").state["averages"]  # the next run starts with them
+    assert averages["transcribe"] == 45.0 and averages["enhance"] == 100.0 and "graph" in averages

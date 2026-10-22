@@ -49,7 +49,7 @@ export default function SettingsPage() {
         api.getSettings()
             .then((data) => {
                 setSettings(data);
-                setForm({ ...data, hf_token: '' });
+                setForm({ ...data, hf_token: '', reddit_saved_feed: '' });
             })
             .catch(() => setError('Failed to load settings. Is the API running?'))
             .finally(() => setLoading(false));
@@ -62,10 +62,11 @@ export default function SettingsPage() {
 
         const updates: Partial<Settings> = {};
         (Object.keys(form) as (keyof Settings)[]).forEach((key) => {
-            if (key === 'hf_token') return;
+            if (key === 'hf_token' || key === 'reddit_saved_feed') return;
             if (form[key] !== settings[key]) (updates as Record<string, unknown>)[key] = form[key];
         });
         if (form.hf_token) updates.hf_token = form.hf_token;
+        if (form.reddit_saved_feed) updates.reddit_saved_feed = form.reddit_saved_feed.trim();
 
         if (Object.keys(updates).length === 0) {
             setMessage({ type: 'error', text: 'No changes to save' });
@@ -78,9 +79,13 @@ export default function SettingsPage() {
             setMessage({ type: 'success', text: result.message });
             const fresh = await api.getSettings();
             setSettings(fresh);
-            setForm({ ...fresh, hf_token: '' });
-        } catch {
-            setMessage({ type: 'error', text: 'Failed to save settings' });
+            setForm({ ...fresh, hf_token: '', reddit_saved_feed: '' });
+        } catch (err) {
+            // the only setting the API rejects outright is a feed link of the wrong kind
+            const badFeed = updates.reddit_saved_feed && (err as { status?: number }).status === 400;
+            setMessage({ type: 'error', text: badFeed
+                ? 'Not a Reddit saved feed link: copy the RSS link for your saved links from reddit.com/prefs/feeds'
+                : 'Failed to save settings' });
         } finally {
             setSaving(false);
         }
@@ -166,6 +171,22 @@ export default function SettingsPage() {
                             placeholder={settings.hf_token ? 'Set (leave empty to keep)' : 'hf_... (only needed for gated models)'}
                         />
                     </div>
+                    <div className="setting-item" style={{ gridColumn: 'span 2' }}>
+                        <label className="setting-label">Reddit saved feed</label>
+                        <input
+                            type="password"
+                            className="input"
+                            style={{ width: '100%' }}
+                            value={form.reddit_saved_feed}
+                            onChange={(e) => setForm({ ...form, reddit_saved_feed: e.target.value })}
+                            placeholder={settings.reddit_saved_feed ? 'Set (leave empty to keep)' : 'https://www.reddit.com/user/.../saved.rss?feed=...&user=...'}
+                            autoComplete="off"
+                        />
+                        <span className="text-muted" style={{ fontSize: '0.8rem' }}>
+                            The RSS link for &ldquo;your saved links&rdquo; on reddit.com/prefs/feeds. It opens your saved list
+                            without a password, so keep it private. Used at once (no restart); sync on the Process page.
+                        </span>
+                    </div>
                 </div>
 
                 <button type="submit" className="btn btn-primary" disabled={saving}>
@@ -175,6 +196,8 @@ export default function SettingsPage() {
                     Changes apply after restarting the server.
                 </span>
             </form>
+
+            <CurationRubric />
 
             <div style={{ marginTop: '3rem' }}>
                 <h2 className="card-title mb-4">Storage</h2>
@@ -187,8 +210,8 @@ export default function SettingsPage() {
                 <h2 className="card-title mb-4">Bookmarklet</h2>
                 <div className="card">
                     <p className="text-muted mb-2">
-                        Drag this link to your bookmarks bar, then click it on any page to save it (works on
-                        this computer, where the API runs):{' '}
+                        Drag this link to your bookmarks bar, then click it on any page to save it (opens a
+                        small Zettlecast window at this address; works wherever this page opens):{' '}
                         <a href={bookmarklet} className="btn btn-secondary" onClick={(e) => e.preventDefault()}>📌 Save to Zettlecast</a>
                     </p>
                     <code className="setting-value" style={{
@@ -202,6 +225,66 @@ export default function SettingsPage() {
                         {bookmarklet}
                     </code>
                 </div>
+            </div>
+        </div>
+    );
+}
+
+/** The rules the LLM curates Reddit comments by (saved on its own: no restart needed). */
+function CurationRubric() {
+    const [text, setText] = useState<string | null>(null);
+    const [saved, setSaved] = useState('');
+    const [defaultText, setDefaultText] = useState('');
+    const [note, setNote] = useState('');
+
+    useEffect(() => {
+        api.getRedditRubric()
+            .then((r) => {
+                setText(r.text);
+                setSaved(r.text);
+                setDefaultText(r.default_text);
+            })
+            .catch(() => setNote('Could not load the curation rules'));
+    }, []);
+
+    const save = async (value: string) => {
+        try {
+            await api.saveRedditRubric(value);
+            const now = value || defaultText; // empty: the default again
+            setText(now);
+            setSaved(now);
+            setNote('Saved: used for the next saves curated');
+        } catch {
+            setNote('Failed to save');
+        }
+    };
+
+    if (text === null) return note ? <div className="text-muted" style={{ marginTop: '3rem' }}>{note}</div> : null;
+    return (
+        <div style={{ marginTop: '3rem' }}>
+            <h2 className="card-title mb-4">Reddit comment curation</h2>
+            <p className="text-muted" style={{ fontSize: '0.85rem', marginBottom: '0.5rem' }}>
+                The LLM keeps the comments these rules say are worth keeping, as one-line takeaways (searchable,
+                linked in the graph). The raw comments stay on the note but aren&rsquo;t indexed. Plain words work best;
+                examples of what you&rsquo;d keep or drop help most.
+            </p>
+            <textarea
+                className="input"
+                style={{ width: '100%', minHeight: '18rem', fontFamily: 'inherit', lineHeight: 1.5 }}
+                value={text}
+                onChange={(e) => {
+                    setText(e.target.value);
+                    setNote('');
+                }}
+            />
+            <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', marginTop: '0.5rem' }}>
+                <button className="btn btn-primary" disabled={text === saved} onClick={() => save(text)}>
+                    Save rules
+                </button>
+                <button className="btn" disabled={text === defaultText} onClick={() => save('')}>
+                    Back to the default
+                </button>
+                <span className="text-muted" style={{ fontSize: '0.85rem' }}>{note}</span>
             </div>
         </div>
     );

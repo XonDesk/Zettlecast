@@ -130,7 +130,7 @@ def parse_pdf(file_path: Path) -> ProcessingResult:
 
 # --- Web Scraping ---
 
-def parse_url(url: str) -> ProcessingResult:
+def parse_url(url: str, enrich: bool = True) -> ProcessingResult:
     """
     Extract main content from a URL using trafilatura.
     Enhanced to extract richer metadata and embedded media.
@@ -291,8 +291,9 @@ def parse_url(url: str) -> ProcessingResult:
             ),
         )
         
-        # Enrich with LLM-generated tags and summary
-        note = enrich_note(note)
+        # Enrich with LLM-generated tags and summary (not for text read into another note)
+        if enrich:
+            note = enrich_note(note)
         
         return ProcessingResult(
             status="success",

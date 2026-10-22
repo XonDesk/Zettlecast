@@ -96,8 +96,9 @@ def test_image_call_restarts_text_server_with_projector(server_backend, store, m
     monkeypatch.setattr(settings, "llm_idle_minutes", 0)
     settings.storage_path.mkdir(parents=True)
     (settings.storage_path / ".llama-server.pid").write_text("4242")  # running, text only
-    health = iter([200, 200])
+    health = iter([200, None])  # up, then stopped
     with patch.object(llm, "_health", side_effect=lambda: next(health, 200)), \
+            patch.object(llm, "_serves_images", return_value=False), \
             patch.object(llm, "stop_server") as stop, \
             patch("zettlecast.llm.subprocess.Popen", return_value=MagicMock(pid=77, poll=lambda: None)) as popen:
         llm._ensure_server(vision=True)
@@ -105,6 +106,27 @@ def test_image_call_restarts_text_server_with_projector(server_backend, store, m
     cmd = popen.call_args.args[0]
     assert cmd[cmd.index("--mmproj") + 1] == str(store / "sha256-bbb")
     assert (settings.storage_path / ".llama-server.pid").read_text() == "77 vision"
+
+
+def test_image_call_asks_the_server_whether_it_takes_images(server_backend):
+    props = MagicMock(json=lambda: {"modalities": {"vision": False}})
+    with patch("zettlecast.llm.httpx.get", return_value=props):
+        assert not llm._serves_images()
+    props = MagicMock(json=lambda: {"modalities": {"vision": True}})
+    with patch("zettlecast.llm.httpx.get", return_value=props):
+        assert llm._serves_images()
+
+
+def test_stops_a_server_whose_pid_file_is_gone(server_backend):
+    # a text-only server still up without its pid file got image calls ("image input is not supported")
+    health = iter([200])
+    with patch.object(llm, "_health", side_effect=lambda: next(health, None)), \
+            patch.object(llm, "_port_pid", return_value=555), \
+            patch("zettlecast.llm.subprocess.run") as run:
+        llm.stop_server(only_own=True)  # idle timer / exit: never someone else's
+        run.assert_not_called()
+        llm.stop_server()
+    assert "555" in run.call_args.args[0]
 
 
 def test_idle_and_exit_stop_only_own_server(server_backend, monkeypatch):

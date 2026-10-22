@@ -1,8 +1,9 @@
 'use client';
 
+import Link from 'next/link';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
-import type { Alarm, SystemStatus } from '@/lib/types';
+import type { Alarm, DesktopStatus, SystemStatus } from '@/lib/types';
 import './hmi.css';
 
 const POLL_MS = 2000;
@@ -26,6 +27,68 @@ const PASS2 = [
 ];
 const LLM_STAGES = new Set(['analyse', 'suspects', 'cleanup']);
 const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 } as const;
+const CYCLE_WINDOW = 10; // episodes in the rolling cycle-time average
+
+function clock(seconds: number): string {
+    const s = Math.max(0, Math.round(seconds));
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return h ? `${h}:${pad(m)}:${pad(s % 60)}` : `${m}:${pad(s % 60)}`;
+}
+
+function roughly(seconds: number): string {
+    if (seconds < 90) return `${Math.round(seconds)} s`;
+    const m = Math.round(seconds / 60);
+    return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} min`;
+}
+
+interface Timing {
+    current: number | null; // seconds into the current episode
+    last: number | null;
+    average: number | null; // rolling, this phase
+    samples: number;
+    eta: number | null; // seconds until the run ends (phases still to come estimated from earlier runs)
+    unestimated: string[]; // later phases with no estimate yet (left out of the ETA)
+    estimatedFromHistory: boolean;
+}
+
+/** Cycle times and a rough ETA from the run state (falls back on older runs' published data). */
+function timing(run: SystemStatus['run'], now: number): Timing {
+    const none: Timing = { current: null, last: null, average: null, samples: 0, eta: null, unestimated: [], estimatedFromHistory: false };
+    if (!run.alive) return none;
+    const phase = run.phase as 'transcribe' | 'enhance' | 'graph';
+    // a run started before cycle times were published: its finished pass-2 episodes are in `recent`
+    const cycles = run.cycles ?? (phase === 'enhance'
+        ? (run.recent ?? []).filter((r) => r.status === 'completed' && (!run.started_at || r.finished_at >= run.started_at))
+            .map((r) => r.seconds).reverse()
+        : []);
+    const window = cycles.slice(-CYCLE_WINDOW);
+    const history = run.averages ?? {};
+    const rolling = window.length ? window.reduce((a, b) => a + b, 0) / window.length : null;
+    const average = rolling ?? history[phase] ?? null;
+    const current = run.episode_started_at ? (now - new Date(run.episode_started_at).getTime()) / 1000 : null;
+    const out: Timing = { ...none, current, last: cycles.length ? cycles[cycles.length - 1] : null,
+        average: rolling, samples: window.length, estimatedFromHistory: rolling === null && average !== null };
+
+    if (phase === 'graph') {
+        const took = run.phase_started_at ? (now - new Date(run.phase_started_at).getTime()) / 1000 : 0;
+        out.eta = history.graph !== undefined ? Math.max(0, history.graph - took) : null;
+        return out;
+    }
+    if (!run.phase_total || average === null) return out;
+    const left = Math.max(0, run.phase_total - (run.phase_done ?? 0));
+    const inFlight = run.episode_started_at && left > 0 ? 1 : 0;
+    let eta = inFlight * Math.max(0, average - (current ?? 0)) + (left - inFlight) * average;
+    const later: ('enhance' | 'graph')[] = phase === 'transcribe' ? ['enhance', 'graph'] : ['graph'];
+    for (const p of later) {
+        const per = history[p];
+        if (per === undefined) out.unestimated.push(p === 'graph' ? 'graph rebuild' : 'pass 2');
+        else eta += p === 'graph' ? per : per * run.phase_total;
+    }
+    out.eta = eta;
+    return out;
+}
 
 function since(iso?: string | null, now = Date.now()): string {
     if (!iso) return '—';
@@ -34,6 +97,14 @@ function since(iso?: string | null, now = Date.now()): string {
     const m = Math.floor((s % 3600) / 60);
     const pad = (n: number) => String(n).padStart(2, '0');
     return h ? `${h}:${pad(m)}:${pad(s % 60)}` : `${m}:${pad(s % 60)}`;
+}
+
+/** Seconds per image so far and seconds left (from the run's own pace, server start included). */
+function imagePace(img: SystemStatus['images'], now: number): { per: number | null; left: number | null } {
+    if (!img?.is_running || !img.started_at || !img.processed_count) return { per: null, left: null };
+    const per = (now - new Date(img.started_at).getTime()) / 1000 / img.processed_count;
+    const remaining = Math.max(0, img.total - img.processed_count - img.error_count);
+    return { per, left: img.phase === 'reading' ? remaining * per : null };
 }
 
 function gb(mib?: number | null): string {
@@ -118,18 +189,34 @@ function Unit({ x, y, name, note, state, value, progress }: {
     );
 }
 
-function Mimic({ s, now }: { s: SystemStatus; now: number }) {
+function Mimic({ s, now, eta }: { s: SystemStatus; now: number; eta: string }) {
     const run = s.run;
+    const img = s.images;
+    const reading = !!img?.is_running && img.phase === 'reading';
+    const linking = !!img?.is_running && img.phase === 'linking';
+    const imgQ = s.queues.images.by_status ?? {};
+    const tri = s.triage;
+    const kept = tri ? (tri.decided.keep ?? 0) + (tri.decided.keep_image ?? 0) : null;
+    const imgTankH = 74;
+    const imgLevel = Math.min(1, (imgQ.pending ?? 0) / Math.max(1, s.queues.images.total)) * (imgTankH - 4);
     const q = s.queues.podcast.by_status;
     const total = Math.max(1, s.queues.podcast.total);
-    const pending = q.pending ?? 0;
+    // undefined from an API server started before the count existed: all pending shown as queued
+    const transcribed = s.queues.podcast.transcribed;
+    const toTranscribe = Math.max(0, (q.pending ?? 0) - (transcribed ?? 0));
     const pass1Active = run.alive && run.phase === 'transcribe';
     const pass2Active = run.alive && (run.phase === 'enhance' || run.phase === 'running');
-    const graphActive = run.alive && run.phase === 'graph';
+    const graphActive = (run.alive && run.phase === 'graph') || linking;
     const llmDown = s.alarms.some((a) => a.id === 'llm-down');
     const vramAlarm = s.alarms.find((a) => a.id === 'vram');
     const stageValue = (id: string) => {
-        if (run.stage !== id) return undefined;
+        if (run.stage !== id) {
+            // finished steps of this episode, else the previous episode's time for the step
+            const done = run.stage_times?.[id];
+            if (done !== undefined) return `done ${clock(done)}`;
+            const last = run.last_stages?.[id];
+            return last !== undefined ? `last ${clock(last)}` : undefined;
+        }
         const t = since(run.stage_started_at, now);
         return run.chunks ? `${run.chunk}/${run.chunks} · ${t}` : t;
     };
@@ -139,11 +226,12 @@ function Mimic({ s, now }: { s: SystemStatus; now: number }) {
     };
     const server = s.llm.server;
     const tankH = 90;
-    const level = (pending / total) * (tankH - 4);
-    const phaseCount = run.phase_total ? ` · ${run.phase_done ?? 0}/${run.phase_total}` : '';
+    const level = (toTranscribe / total) * (tankH - 4);
+    const savedLevel = ((transcribed ?? 0) / total) * (tankH - 4);
+    const phaseCount = (run.phase_total ? ` · ${run.phase_done ?? 0}/${run.phase_total}` : '') + (eta ? ` · ETA ${eta}` : '');
 
     return (
-        <svg viewBox="0 0 1180 470" role="img" aria-label="Process diagram: sources, queue, pass 1 transcription, saved transcriptions, pass 2 analysis, knowledge store, graph">
+        <svg viewBox="0 0 1180 545" role="img" aria-label="Process diagram: sources, queue, pass 1 transcription, saved transcriptions, pass 2 analysis, knowledge store, graph; screenshots, sorting, image queue, vision reading; web and documents">
             <defs>
                 <marker id="hmi-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
                     <path d="M0 0 L10 5 L0 10 z" fill="context-stroke" />
@@ -163,8 +251,8 @@ function Mimic({ s, now }: { s: SystemStatus; now: number }) {
             <rect className="tank" x={170} y={40} width={70} height={tankH} rx={6} />
             <rect className="tank-level" x={172} y={40 + tankH - 2 - level} width={66} height={level} rx={4} />
             <text className="label" x={205} y={32} textAnchor="middle">QUEUE</text>
-            <text className="value" x={205} y={150} textAnchor="middle">{pending}</text>
-            <text className="label" x={205} y={165} textAnchor="middle">pending of {s.queues.podcast.total}</text>
+            <text className="value" x={205} y={150} textAnchor="middle">{toTranscribe}</text>
+            <text className="label" x={205} y={165} textAnchor="middle">to transcribe of {s.queues.podcast.total}</text>
             </g>
 
             <g data-group="pass1">
@@ -182,10 +270,12 @@ function Mimic({ s, now }: { s: SystemStatus; now: number }) {
             <path className={`pipe ${pass1Active ? 'flow' : ''}`} d="M789 85 H838" markerEnd="url(#hmi-arrow)" />
             </g>
 
+            {/* transcribed episodes waiting for pass 2 (their .asr.json saved) */}
             <rect className="tank" data-group="pass1" x={840} y={40} width={80} height={tankH} rx={6} />
+            <rect className="tank-level" x={842} y={40 + tankH - 2 - savedLevel} width={76} height={savedLevel} rx={4} />
             <text className="label" x={880} y={32} textAnchor="middle">SAVED ASR</text>
-            <text className="value" x={880} y={82} textAnchor="middle">{s.queues.podcast.total - (q.cancelled ?? 0)}</text>
-            <text className="label" x={880} y={98} textAnchor="middle">.asr.json</text>
+            <text className="value" x={880} y={82} textAnchor="middle">{transcribed ?? '—'}</text>
+            <text className="label" x={880} y={98} textAnchor="middle">for pass 2</text>
 
             {/* LLM server (utility for pass 2) */}
             <g data-group="llm" className={`unit ${server.state === 'ready' ? 'running' : llmDown ? 'fault' : 'idle'}`} transform="translate(975 40)">
@@ -238,28 +328,104 @@ function Mimic({ s, now }: { s: SystemStatus; now: number }) {
             </g>
             </g>
 
-            {/* Row 3: image and web lines into the store */}
-            <g data-group="io">
-            <text className="frame-label" x={30} y={360}>IMAGES</text>
+            {/* Row 3: screenshots -> sorting -> image queue -> vision -> store (linked by one rebuild at the end) */}
+            <g data-group="images">
+            <text className="frame-label" x={30} y={348}>
+                IMAGES{img?.is_running ? ` · ${linking ? 'LINKING' : `READING ${img.processed_count}/${img.total}`}${img.stop_requested ? ' · STOPPING' : ''}` : ''}
+            </text>
             <g className="unit idle" transform="translate(20 370)">
                 <rect className="body" width={110} height={54} />
-                <text className="name" x={8} y={17}>IMAGE QUEUE</text>
-                <text x={8} y={32}>{s.queues.images.by_status?.pending ?? 0} pending</text>
-                <text x={8} y={46}>{s.queues.images.by_status?.failed ?? 0} failed</text>
+                <text className="name" x={8} y={17}>SCREENSHOTS</text>
+                <text x={8} y={32}>{tri ? `${tri.remaining} to sort` : '—'}</text>
+                <text x={8} y={46}>{tri ? `${tri.folders} folder${tri.folders === 1 ? '' : 's'}` : ''}</text>
             </g>
             <path className="pipe" d="M130 397 H158" markerEnd="url(#hmi-arrow)" />
-            <Unit x={160} y={370} name="VISION" note="LLM + OCR" state="idle" />
-            <path className="pipe" d="M270 397 H300 V346 H985 V320" markerEnd="url(#hmi-arrow)" />
+            <g className="unit idle" transform="translate(160 370)">
+                <rect className="body" width={110} height={54} />
+                <text className="name" x={8} y={17}>SORT</text>
+                <text x={8} y={32}>you · swipe / keys</text>
+                <text x={8} y={46}>{tri ? `${kept} kept · ${tri.decided.skip ?? 0} del` : ''}</text>
+            </g>
+            <path className="pipe" d="M215 424 V446" markerEnd="url(#hmi-arrow)" />
+            <text className="label" x={215} y={460} textAnchor="middle">
+                Recycle Bin{tri?.to_recycle ? ` · ${tri.to_recycle} in 10 min` : ''}
+            </text>
+            <path className="pipe" d="M270 397 H298" markerEnd="url(#hmi-arrow)" />
 
-            <text className="frame-label" x={360} y={360}>WEB & DOCUMENTS</text>
-            <Unit x={350} y={370} name="FETCH" note="web · PDF · md" state="idle" />
-            <path className="pipe" d="M460 397 H488" markerEnd="url(#hmi-arrow)" />
-            <Unit x={490} y={370} name="PARSE" note="Trafilatura · Marker" state="idle" />
-            <path className="pipe" d="M600 397 H628" markerEnd="url(#hmi-arrow)" />
-            <Unit x={630} y={370} name="ENRICH" note="LLM tags" state="idle" />
-            <path className="pipe" d="M740 397 H1015 V320" markerEnd="url(#hmi-arrow)" />
+            <rect className="tank" x={300} y={362} width={70} height={imgTankH} rx={6} />
+            <rect className="tank-level" x={302} y={362 + imgTankH - 2 - imgLevel} width={66} height={imgLevel} rx={4} />
+            <text className="value" x={335} y={398} textAnchor="middle">{imgQ.pending ?? 0}</text>
+            <text className="label" x={335} y={412} textAnchor="middle">to read</text>
+            <text className="label" x={335} y={452} textAnchor="middle">
+                IMAGE QUEUE{imgQ.failed ? ` · ${imgQ.failed} failed` : ''}
+            </text>
+
+            <path className={`pipe ${reading ? 'flow' : ''}`} d="M370 397 H398" markerEnd="url(#hmi-arrow)" />
+            <Unit x={400} y={370} name="READ" note="LLM vision · slots"
+                  state={reading ? (s.alarms.some((a) => a.id === 'llm-down') ? 'fault' : 'running') : 'idle'}
+                  value={reading ? `${img!.in_flight.length} at once` : undefined}
+                  progress={img?.is_running && img.total ? img.processed_count / img.total : null} />
+            <path className={`pipe ${reading ? 'flow' : ''}`} d="M510 397 H528" markerEnd="url(#hmi-arrow)" />
+            <Unit x={530} y={370} name="STORE" note="note · embed"
+                  state={reading ? 'running' : 'idle'}
+                  value={img?.is_running ? `${img.processed_count} stored` : undefined} />
+            <path className={`pipe ${reading ? 'flow' : ''}`} d="M640 397 H690 V340 H985 V320" markerEnd="url(#hmi-arrow)" />
+            <text className="label accent" x={700} y={334}>linked by one graph rebuild at the end</text>
+            </g>
+
+            {/* Row 4: web and documents into the store */}
+            <g data-group="io">
+            <text className="frame-label" x={30} y={478}>WEB & DOCUMENTS</text>
+            <Unit x={20} y={486} name="FETCH" note="web · PDF · md" state="idle" />
+            <path className="pipe" d="M130 513 H158" markerEnd="url(#hmi-arrow)" />
+            <Unit x={160} y={486} name="PARSE" note="Trafilatura · Marker" state="idle" />
+            <path className="pipe" d="M270 513 H298" markerEnd="url(#hmi-arrow)" />
+            <Unit x={300} y={486} name="ENRICH" note="LLM tags" state="idle" />
+            <path className="pipe" d="M410 513 H1015 V320" markerEnd="url(#hmi-arrow)" />
             </g>
         </svg>
+    );
+}
+
+/** The worker PC (on the primary): on or off, jobs waiting for it, wake, pause, stay on */
+function DesktopPanel({ d, now, busy, act }: {
+    d: DesktopStatus; now: number; busy: boolean;
+    act: (label: string, fn: () => Promise<{ status: string; message?: string }>) => Promise<void>;
+}) {
+    const label = { offline: 'OFF', waking: 'WAKING', idle: 'ON · IDLE', working: 'ON · WORKING' }[d.state];
+    const waiting = [
+        d.pending.podcasts && `${d.pending.podcasts} episode${d.pending.podcasts > 1 ? 's' : ''}`,
+        d.pending.images && `${d.pending.images} image${d.pending.images > 1 ? 's' : ''}`,
+        d.pending.tags && `${d.pending.tags} note${d.pending.tags > 1 ? 's' : ''} to tag`,
+    ].filter(Boolean).join(' · ');
+    const wakeNote = !d.wake.configured ? 'not set up (DESKTOP_MAC_ADDRESS)'
+        : d.wake.gave_up ? `gave up after ${d.wake.misses} tries`
+        : d.wake.sent_at ? `sent ${since(d.wake.sent_at, now)} ago${d.wake.reason ? ` (${d.wake.reason})` : ''}`
+        : `automatic${d.wake.window ? ` ${d.wake.window}` : ''}`;
+    return (
+        <section className="hmi-panel" data-accent="desktop" aria-label="Desktop (GPU worker)">
+            <h2>Desktop</h2>
+            <div className="hmi-row"><span>State</span><span>{label}{d.host ? ` · ${d.host}` : ''}{d.paused ? ' · PAUSED' : ''}</span></div>
+            <div className="hmi-row"><span>Last seen</span><span>{d.online ? 'now' : d.last_seen_at ? `${since(d.last_seen_at, now)} ago` : 'never'}</span></div>
+            <div className="hmi-row"><span>Waiting for it</span><span>{waiting || 'nothing'}</span></div>
+            <div className="hmi-row"><span>Wake-on-LAN</span><span>{wakeNote}</span></div>
+            <div className="hmi-row"><span>When idle</span>
+                <span>{d.stay_on ? 'stays on' : d.idle_shutdown_minutes > 0 ? `shuts down after ${d.idle_shutdown_minutes} min (nobody signed in)` : 'stays on'}</span>
+            </div>
+            <div className="hmi-buttons">
+                <button className="hmi-btn" disabled={busy || d.online || !d.wake.configured}
+                        title={d.online ? 'The desktop is on' : 'Send Wake-on-LAN now'}
+                        onClick={() => act('Wake', api.wakeDesktop)}>WAKE</button>
+                {d.paused && <button className="hmi-btn" disabled={busy} title="Let the desktop take new jobs again"
+                                     onClick={() => act('Resume', api.resumeRun)}>RESUME</button>}
+                <button className="hmi-btn" disabled={busy}
+                        title={d.stay_on ? 'Let it shut down again when idle' : 'Keep it on when idle (e.g. to work on it remotely)'}
+                        onClick={() => act(d.stay_on ? 'Allow shutdown' : 'Stay on',
+                            async () => { await api.setDesktopStayOn(!d.stay_on); return { status: d.stay_on ? 'may shut down when idle' : 'stays on' }; })}>
+                    {d.stay_on ? 'ALLOW SHUTDOWN' : 'STAY ON'}
+                </button>
+            </div>
+        </section>
     );
 }
 
@@ -341,7 +507,13 @@ export default function ProcessPage() {
     const run = status.run;
     const alarms = [...status.alarms].sort((a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority]);
     const fault = alarms.some((a) => a.id === 'run-died' || a.id === 'llm-down');
-    const plantState = fault ? 'fault' : run.alive ? (run.stop_requested ? 'stopping' : 'running') : 'idle';
+    const img = status.images;
+    const imgRunning = !!img?.is_running;
+    const imgQ = status.queues.images.by_status ?? {};
+    const tri = status.triage;
+    const pace = imagePace(img, now);
+    const stopping = (run.alive && run.stop_requested) || (imgRunning && img!.stop_requested);
+    const plantState = fault ? 'fault' : run.alive || imgRunning ? (stopping ? 'stopping' : 'running') : 'idle';
     const stateLabel = { fault: 'FAULT', stopping: 'STOPPING', running: 'RUNNING', idle: 'IDLE' }[plantState];
     const q = status.queues.podcast.by_status;
     const gpu = status.gpu;
@@ -351,6 +523,9 @@ export default function ProcessPage() {
         starting: 'Starting', running: 'Running', idle: 'Idle' }[run.phase] ?? run.phase;
     const recent = run.recent ?? [];
     const task = status.task;
+    const t = timing(run, now);
+    const desk = status.desktop;
+    const etaAt = t.eta !== null ? new Date(now + t.eta * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
 
     return (
         <div className="hmi">
@@ -358,6 +533,8 @@ export default function ProcessPage() {
                 <span className="hmi-title">PROCESS</span>
                 <span className="hmi-state" data-state={plantState}>{stateLabel}</span>
                 {run.alive && <span className="hmi-muted">{phaseName}{run.source ? ` · ${run.source.toUpperCase()} pid ${run.pid}` : ''}</span>}
+                {run.alive && etaAt && <span className="hmi-muted" title="Rough: average cycle time × episodes left">ETA {etaAt}{t.unestimated.length ? '+' : ''}</span>}
+                {imgRunning && <span className="hmi-muted">Images · {img!.phase === 'linking' ? 'linking' : `reading ${img!.processed_count}/${img!.total}`}</span>}
                 <div className="hmi-header-right">
                     <span className="hmi-alarm-counts" aria-label="Active alarms by priority">
                         {(['high', 'medium', 'low'] as const).map((p) => (
@@ -372,10 +549,11 @@ export default function ProcessPage() {
             </header>
 
             <section className="hmi-mimic" aria-label="Process overview">
-                <Mimic s={status} now={now} />
+                <Mimic s={status} now={now} eta={etaAt ? `${etaAt}${t.unestimated.length ? '+' : ''}` : ''} />
             </section>
 
             <div className="hmi-grid">
+                {desk && <DesktopPanel d={desk} now={now} busy={busy} act={act} />}
                 <section className="hmi-panel" data-accent="run" aria-label="Podcast run">
                     <h2>Podcast run</h2>
                     <div className="hmi-row"><span>State</span><span>{stateLabel}{run.alive ? ` · ${phaseName}` : ''}</span></div>
@@ -387,13 +565,27 @@ export default function ProcessPage() {
                     )}
                     <div className="hmi-row"><span>Episode</span><span title={run.episode_title ?? ''}>{run.episode_title ?? '—'}</span></div>
                     <div className="hmi-row"><span>Step</span><span>{run.stage ? `${run.stage.toUpperCase()} · ${since(run.stage_started_at, now)}` : run.legacy ? 'not reported by this run' : '—'}</span></div>
-                    <div className="hmi-row"><span>Episode time</span><span>{since(run.episode_started_at, now)}</span></div>
+                    <div className="hmi-row"><span>Cycle time</span>
+                        <span>
+                            {run.alive && t.current !== null ? `now ${clock(t.current)}` : '—'}
+                            {t.last !== null && ` · last ${clock(t.last)}`}
+                            {t.average !== null && ` · avg ${clock(t.average)} (${t.samples})`}
+                        </span>
+                    </div>
+                    <div className="hmi-row"><span>ETA</span>
+                        <span title="Average cycle time × episodes left; later passes from the previous run's averages">
+                            {t.eta === null ? (run.alive ? 'after the first episode' : '—')
+                                : `~${roughly(t.eta)} · done ≈ ${etaAt}${t.unestimated.length ? ` + ${t.unestimated.join(', ')}` : ''}`}
+                            {t.estimatedFromHistory && ' · from last run'}
+                        </span>
+                    </div>
                     <div className="hmi-row"><span>This run</span><span>{run.completed ?? 0} done · {run.failed ?? 0} failed</span></div>
                     <div className="hmi-field">
                         <label className="hmi-muted" htmlFor="hmi-limit">Episodes</label>
                         <input id="hmi-limit" className="hmi-input num" type="number" min={1} value={limit}
                                onChange={(e) => setLimit(Math.max(1, Number(e.target.value) || 1))} />
-                        <button className="hmi-btn" disabled={busy || run.alive || !q.pending}
+                        <button className="hmi-btn" disabled={busy || run.alive || imgRunning || !q.pending}
+                                title={imgRunning ? 'Images are being read: stop that first' : undefined}
                                 onClick={() => act('Start', () => api.runPodcasts(limit))}>START</button>
                         {run.stop_requested
                             ? <button className="hmi-btn" disabled={busy || !run.alive} onClick={() => act('Resume', api.resumeRun)}>CANCEL STOP</button>
@@ -408,7 +600,7 @@ export default function ProcessPage() {
 
                 <section className="hmi-panel" data-accent="equipment" aria-label="Equipment">
                     <h2>Equipment</h2>
-                    <div className="hmi-row"><span>GPU</span><span>{gpu?.name ?? 'not found'}</span></div>
+                    <div className="hmi-row"><span>GPU</span><span>{gpu?.name ?? (desk && !desk.online ? 'desktop off' : 'not found')}</span></div>
                     <Analog label="GPU memory" unit="GB" value={gpu?.memory_used_mib ? gpu.memory_used_mib / 1024 : null} max={vramMax}
                             warn={vramMax * status.limits.vram_warn} alarm={vramMax * status.limits.vram_alarm} />
                     <Analog label="GPU load" unit="%" value={gpu?.utilization} max={100} />
@@ -425,7 +617,7 @@ export default function ProcessPage() {
 
                 <section className="hmi-panel" data-accent="queue" aria-label="Queue and maintenance">
                     <h2>Queue & maintenance</h2>
-                    <div className="hmi-row"><span>Podcast queue</span><span>{q.pending ?? 0} pending · {q.processing ?? 0} active · {q.completed ?? 0} done · {q.failed ?? 0} failed</span></div>
+                    <div className="hmi-row"><span>Podcast queue</span><span>{q.pending ?? 0} pending ({status.queues.podcast.transcribed ?? '—'} transcribed) · {q.processing ?? 0} active · {q.completed ?? 0} done · {q.failed ?? 0} failed</span></div>
                     <div className="hmi-buttons">
                         <button className="hmi-btn" disabled={busy || !q.failed} onClick={() => act('Retry failed', api.retryFailedPodcasts)}>RETRY FAILED</button>
                         <button className="hmi-btn" disabled={busy || run.alive || !q.processing} onClick={() => act('Reset stuck', api.resetStuckPodcasts)}>RESET STUCK</button>
@@ -448,9 +640,45 @@ export default function ProcessPage() {
                         <ConfirmButton label="REINDEX" confirmLabel="CONFIRM REINDEX" disabled={busy || run.alive || task.running}
                                        title="Re-embed every note and rebuild the graph (minutes, uses the GPU)"
                                        onConfirm={() => act('Reindex', api.reindex)} />
-                        <button className="hmi-btn" disabled={busy || !(status.queues.images.by_status?.pending)}
-                                onClick={() => act('Run images', () => api.runImages(20))}>RUN IMAGES</button>
                     </div>
+                    {status.reddit && (
+                        <>
+                            <div className="hmi-row"><span>Reddit saves</span>
+                                <span>
+                                    {!status.reddit.configured ? 'no feed (Settings)'
+                                        : status.reddit.progress.running
+                                            ? `syncing ${status.reddit.progress.done}/${status.reddit.progress.total || '?'}`
+                                              + (status.reddit.progress.current ? ` · ${status.reddit.progress.current}` : '')
+                                            : `${status.reddit.imported} imported${status.reddit.partial ? ` (${status.reddit.partial} without comments)` : ''}`
+                                              + (status.reddit.untagged ? ` · ${status.reddit.untagged} untagged` : '')
+                                              + ` · last sync ${status.reddit.last_sync ? new Date(status.reddit.last_sync).toLocaleString() : 'never'}`}
+                                </span>
+                            </div>
+                            <div className="hmi-buttons">
+                                <button className="hmi-btn" disabled={busy || run.alive || task.running || !status.reddit.configured}
+                                        title={run.alive ? 'Not during a run (the LLM tags each save)' : 'Import saves not imported yet'}
+                                        onClick={() => act('Sync Reddit', () => api.syncReddit())}>SYNC REDDIT</button>
+                                <button className="hmi-btn" disabled={busy || run.alive || task.running || !status.reddit.configured}
+                                        title="Import every new save now from the saved feed: no LLM tags (TAG SAVES) and no comments (FETCH COMMENTS) yet"
+                                        onClick={() => act('Quick sync', () => api.syncReddit(false, false, false))}>QUICK SYNC</button>
+                                {!!status.reddit.untagged && (
+                                    <button className="hmi-btn" disabled={busy || run.alive || task.running}
+                                            title="Add LLM tags and summaries to the saves imported without them (no Reddit requests)"
+                                            onClick={() => act('Tag saves', api.tagReddit)}>TAG SAVES</button>
+                                )}
+                                {status.reddit.progress.running && (
+                                    <button className="hmi-btn" disabled={busy}
+                                            title="Stop after the current save; what's imported stays"
+                                            onClick={() => act('Stop Reddit', api.stopReddit)}>STOP SYNC</button>
+                                )}
+                                {status.reddit.partial > 0 && (
+                                    <button className="hmi-btn" disabled={busy || run.alive || task.running}
+                                            title="Add the top comments to saves imported without their thread (about one a minute: Reddit's limit without a login); tags are kept"
+                                            onClick={() => act('Fetch comments', () => api.syncReddit(true, false))}>FETCH COMMENTS</button>
+                                )}
+                            </div>
+                        </>
+                    )}
                     {task.name && (
                         <div className="hmi-row"><span>Task</span>
                             <span>{task.name.toUpperCase()} · {task.running ? `running ${since(task.started_at, now)}` : task.error ? `failed: ${task.error}` : 'finished'}</span>
@@ -462,6 +690,52 @@ export default function ProcessPage() {
             </div>
 
             <div className="hmi-grid">
+                <section className="hmi-panel" data-accent="images" aria-label="Images">
+                    <h2>Images</h2>
+                    <div className="hmi-row"><span>State</span>
+                        <span>
+                            {!imgRunning ? `IDLE${img?.finished_at ? ` · last run ended ${new Date(img.finished_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}`
+                                : img!.phase === 'linking' ? 'LINKING · one graph rebuild for the new notes'
+                                    : `READING · ${img!.in_flight.length} at once${img!.stop_requested ? ' · STOPPING after these' : ''}`}
+                        </span>
+                    </div>
+                    {imgRunning && !!img!.total && (
+                        <>
+                            <div className="hmi-row"><span>Progress</span><span>{img!.processed_count} / {img!.total} read{img!.error_count ? ` · ${img!.error_count} failed` : ''}</span></div>
+                            <div className="hmi-progress"><div style={{ width: `${(100 * img!.processed_count) / img!.total}%` }} /></div>
+                        </>
+                    )}
+                    {imgRunning && (
+                        <div className="hmi-row"><span>Pace</span>
+                            <span title="Since the run started, LLM server start included">
+                                {pace.per === null ? 'after the first image' : `${pace.per.toFixed(1)} s / image`}
+                                {pace.left !== null && ` · ~${roughly(pace.left)} left + linking`}
+                            </span>
+                        </div>
+                    )}
+                    {imgRunning && img!.in_flight.length > 0 && (
+                        <div className="hmi-row"><span>Reading</span><span title={img!.in_flight.join('\n')}>{img!.in_flight.join(' · ')}</span></div>
+                    )}
+                    <div className="hmi-row"><span>Image queue</span><span>{imgQ.pending ?? 0} to read · {imgQ.processing ?? 0} active · {imgQ.completed ?? 0} done · {imgQ.failed ?? 0} failed</span></div>
+                    <div className="hmi-row"><span>Screenshots</span>
+                        <span>
+                            {tri ? `${tri.remaining} to sort · ${(tri.decided.keep ?? 0) + (tri.decided.keep_image ?? 0)} kept · ${tri.decided.skip ?? 0} deleted`
+                                + (tri.to_recycle ? ` (${tri.to_recycle} to the Recycle Bin soon)` : '') : '—'}
+                        </span>
+                    </div>
+                    <div className="hmi-buttons">
+                        <button className="hmi-btn" disabled={busy || imgRunning || run.alive || !imgQ.pending}
+                                title={run.alive ? 'Not during a podcast run (it needs the GPU)' : 'Read every image waiting in the queue'}
+                                onClick={() => act('Read images', api.processTriage)}>START</button>
+                        <button className="hmi-btn" disabled={busy || !imgRunning || img!.stop_requested || img!.phase === 'linking'}
+                                title="Finish the images being read, start no more, link what was stored"
+                                onClick={() => act('Stop images', api.stopImages)}>STOP</button>
+                        <button className="hmi-btn" disabled={busy || imgRunning || !imgQ.failed}
+                                onClick={() => act('Retry failed images', api.retryFailedImages)}>RETRY FAILED</button>
+                        <Link className="hmi-btn" href="/triage">SORT SCREENSHOTS</Link>
+                    </div>
+                </section>
+
                 <section className="hmi-panel" data-accent="alarms" aria-label="Alarms">
                     <h2>Alarms</h2>
                     {alarms.length === 0 ? <span className="hmi-muted">No active alarms.</span> : (

@@ -23,7 +23,25 @@ class VisionModelNotFoundError(Exception):
     """Raised when the vision model can't be used (missing or Ollama down)."""
 
 
-VISION_PROMPT = """Analyse this image and return JSON with:
+VISION_PROMPT = """This is from the user's own camera roll or screenshots: they kept it to remember
+something. Most often a film, show, book, podcast, album, song, video or game to check out; a
+quote or saying they like; an idea; a tip or how-to; a place to visit; a product they want; a
+recipe. Work out what they kept it for and name that thing exactly (a book shown in a podcast
+video is the book; a map pin is the place, not the map app).
+
+Analyse the image and return JSON with:
+- "saved_as": what it was kept as: "media" (something to watch, read, listen to or play),
+  "quote", "idea", "tip", "place", "product", "recipe", "reference" (facts or a document to look
+  up later) or "other" (nothing to keep: a photo of a moment, a conversation)
+- "item": the thing kept, all strings, "" where unknown or not applicable:
+  "name" (the title, place name, product name or dish; for a podcast episode or video, the
+  episode's own title when shown, not just the show; for a quote, its first few words),
+  "by" (author, director, artist, show or channel, brand, or who said the quote; not the person
+  who merely posted or commented about it),
+  "type" (media: book, film, show, podcast, album, song, video, game, article, course;
+  place: restaurant, bar, cafe, shop, park, trail, beach, museum, hotel, city, venue...),
+  "where" (place: address, area, city, country - as precise as the image or your knowledge allows;
+  product: the shop or site), "price" (product: with currency, as shown)
 - "kind": "screenshot" (of an app, website, chat, document or social feed), "photo", or "other"
 - "focus": for a screenshot, the one piece of content it was most likely taken for, copied word
   for word: usually a single post, comment, reply, message or paragraph - the one that is
@@ -33,7 +51,7 @@ VISION_PROMPT = """Analyse this image and return JSON with:
   (then "detected_text" carries it).
 - "context": for a screenshot, one sentence: the app or site, who wrote the focus (name or
   handle) and what it replies to or sits under. Empty otherwise.
-- "title": 4-10 words saying what the focus (or the image) is about, for a note title
+- "title": 4-10 words naming what was kept (the item's name when there is one), for a note title
 - "description": 2-3 specific, factual sentences about the focus content, or for a photo the main
   subject, setting and notable details
 - "detected_text": ALL visible text (signs, documents, UI, captions), preserving line breaks;
@@ -43,9 +61,15 @@ VISION_PROMPT = """Analyse this image and return JSON with:
 - "people": full names of people who matter to the focus content (or shown in the image)
 - "organisations": organisations, companies, products, races or events the focus content names"""
 
+SAVED_AS = ["media", "quote", "idea", "tip", "place", "product", "recipe", "reference", "other"]
+ITEM_FIELDS = ["name", "by", "type", "where", "price"]
+
 VISION_SCHEMA = {
     "type": "object",
     "properties": {
+        "saved_as": {"type": "string", "enum": SAVED_AS},
+        "item": {"type": "object", "properties": {f: {"type": "string"} for f in ITEM_FIELDS},
+                 "required": ITEM_FIELDS},
         "kind": {"type": "string", "enum": ["screenshot", "photo", "other"]},
         "focus": {"type": "string"},
         "context": {"type": "string"},
@@ -56,7 +80,7 @@ VISION_SCHEMA = {
         "people": {"type": "array", "items": {"type": "string"}},
         "organisations": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["kind", "focus", "context", "title", "description", "detected_text", "concepts",
+    "required": ["saved_as", "item", "kind", "focus", "context", "title", "description", "detected_text", "concepts",
                  "people", "organisations"],
 }
 
@@ -118,15 +142,20 @@ class VisionBackend:
                 raise VisionModelNotFoundError(str(e)) from e
 
         concepts = [str(c).lower().strip() for c in result.get("concepts", []) if str(c).strip()]
+        item = result.get("item") if isinstance(result.get("item"), dict) else {}
+        item = {f: str(item[f]).strip() for f in ITEM_FIELDS if str(item.get(f) or "").strip()}
+        saved_as = result.get("saved_as") if result.get("saved_as") in SAVED_AS else "other"
         focus = (result.get("focus") or "").strip()
         if focus:
             # names only from the content the screenshot was taken for, not the ads or the other
             # comments around it (the model lists those too)
-            about = f"{focus} {result.get('context') or ''}".lower()
+            about = f"{focus} {result.get('context') or ''} {item.get('name', '')} {item.get('by', '')}".lower()
             for field in ("people", "organisations"):
                 result[field] = [n for n in result.get(field) or []
                                  if isinstance(n, str) and n.strip().lower() in about]
         return VisionExtraction(
+            saved_as=saved_as,
+            item=item,
             kind=result.get("kind") or "other",
             focus=(result.get("focus") or "").strip(),
             context=(result.get("context") or "").strip(),

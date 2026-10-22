@@ -9,8 +9,9 @@ authors = [
     {name = "Zettlecast Team"}
 ]
 
-# Install with torch from the CUDA 13 wheel index:
-#   uv pip install -e ".[dev]" --extra-index-url https://download.pytorch.org/whl/cu130 --index-strategy unsafe-best-match
+# The GPU machine (standalone, or the worker) installs the [gpu] extra, with torch from the CUDA 13 wheel index:
+#   uv pip install -e ".[gpu,dev]" --extra-index-url https://download.pytorch.org/whl/cu130 --index-strategy unsafe-best-match
+# The primary (Mac, ROLE=primary: API, web UI, search) needs only the base:  uv pip install -e .
 dependencies = [
     # API / CLI
     "fastapi>=0.115.0",
@@ -24,12 +25,9 @@ dependencies = [
     "lancedb>=0.17.0",
     "pyarrow>=15.0.0,<18.0.0",  # <18 required for NeMo/datasets compatibility
 
-    # GPU models
+    # Models: search (embedder, reranker) runs everywhere; speech models are in [gpu]
     "torch>=2.7.0",  # RTX 50-series (sm_120) needs 2.7+; use the cu130 wheels
-    "torchaudio>=2.7.0",
     "sentence-transformers>=5.0.0",  # Qwen3-Reranker CrossEncoder support
-    # NeMo Speech: Nemotron-3-Diarization needs rope attention, newer than the 3.0.0 PyPI release
-    "nemo-toolkit[asr] @ git+https://github.com/NVIDIA-NeMo/Speech@218d0b443441b7d8aa1c832f47df310f186cf0a4",
     "pydub>=0.25.0",
     "jiwer>=3.0",  # transcript verification against published transcripts
     "jellyfish>=1.0",  # Metaphone: is a correction a respelling (same sounds) or other words
@@ -40,7 +38,6 @@ dependencies = [
 
     # Document parsing
     "pypdf>=5.1.0",
-    "marker-pdf>=0.3.0",
     "trafilatura>=2.0.0",
     "beautifulsoup4>=4.12.0",
     "feedparser>=6.0.0",
@@ -53,6 +50,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+gpu = [
+    "torchaudio>=2.7.0",
+    # NeMo Speech: Nemotron-3-Diarization needs rope attention, newer than the 3.0.0 PyPI release
+    "nemo-toolkit[asr] @ git+https://github.com/NVIDIA-NeMo/Speech@218d0b443441b7d8aa1c832f47df310f186cf0a4",
+    "marker-pdf>=0.3.0",  # scanned PDFs (the primary falls back to pypdf's text)
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",

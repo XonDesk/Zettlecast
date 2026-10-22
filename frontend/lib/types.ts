@@ -103,6 +103,7 @@ export interface Settings {
     chunk_size: number;
     storage_path: string;
     hf_token: string;
+    reddit_saved_feed: string; // "***" when set: the link is never sent back
 }
 
 export interface PodcastEpisode {
@@ -167,6 +168,11 @@ export interface RunState {
     started_at?: string;
     phase_total?: number;
     phase_done?: number;
+    phase_started_at?: string | null;
+    cycles?: number[]; // seconds per finished episode of this phase, newest last
+    averages?: Partial<Record<'transcribe' | 'enhance' | 'graph', number>>; // from earlier runs
+    stage_times?: Record<string, number>;
+    last_stages?: Record<string, number>; // step times of the previous episode
     episode_title?: string | null;
     episode_started_at?: string | null;
     stage?: string | null;
@@ -185,8 +191,25 @@ export interface Alarm {
     text: string;
 }
 
+/** The worker PC as the primary sees it (two-machine setup: ROLE=primary) */
+export interface DesktopStatus {
+    state: 'offline' | 'waking' | 'idle' | 'working';
+    online: boolean;
+    worker_id: string | null;
+    host: string | null;
+    last_seen_at: string | null;
+    paused: boolean; // Stop on this page: no new work until Resume
+    stay_on: boolean; // no idle shutdown
+    wake: { configured: boolean; window: string; sent_at: string | null; misses: number; gave_up: boolean; reason: string | null };
+    pending: { podcasts: number; images: number; tags: number; total: number };
+    idle_shutdown_minutes: number;
+}
+
 export interface SystemStatus {
     time: string;
+    role?: 'standalone' | 'primary' | 'worker';
+    desktop?: DesktopStatus; // only on the primary
+    worker_disk?: { free_gb: number; total_gb: number } | null;
     run: RunState;
     queues: {
         podcast: {
@@ -194,6 +217,7 @@ export interface SystemStatus {
             total: number;
             failed: { id: string; title: string; error: string }[];
             workers: { pid: number; title: string }[];
+            transcribed?: number; // pending episodes with a saved transcription (waiting for pass 2)
         };
         images: { total: number; by_status: Record<string, number> };
     };
@@ -215,6 +239,29 @@ export interface SystemStatus {
     database: { notes?: number; chunks?: number; edges?: number; communities?: number; by_source_type?: Record<string, number> };
     disk: { free_gb: number; total_gb: number };
     task: { name: string | null; running: boolean; started_at: string | null; finished_at: string | null; error: string | null };
+    // image run in the API server (absent from an older API server)
+    images?: {
+        is_running: boolean;
+        phase: 'reading' | 'linking' | null;
+        processed_count: number;
+        error_count: number;
+        total: number;
+        in_flight: string[];
+        stop_requested: boolean;
+        started_at: string | null;
+        finished_at: string | null;
+    };
+    // screenshot sorting (cached ~30 s); null when it couldn't be read
+    triage?: { remaining: number; decided: Record<string, number>; folders: number; to_recycle: number } | null;
+    // absent from an API server started before Reddit import existed
+    reddit?: {
+        configured: boolean;
+        imported: number;
+        partial: number; // imported without their thread (sync with refresh to retry)
+        untagged?: number; // imported without LLM tags/summary (tag later)
+        last_sync: string | null;
+        progress: { running: boolean; done: number; total: number; current: string | null };
+    } | null;
     alarms: Alarm[];
     limits: { vram_warn: number; vram_alarm: number };
 }

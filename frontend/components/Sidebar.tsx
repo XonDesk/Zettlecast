@@ -10,8 +10,7 @@ const navItems = [
     { href: '/notes', label: '📚 Notes', icon: '📚' },
     { href: '/podcasts', label: '🎙️ Podcasts', icon: '🎙️' },
     { href: '/images', label: '🖼️ Images', icon: '🖼️' },
-    { href: '/triage', label: '👆 Screenshots', icon: '👆' },
-    { href: '/search', label: '🔍 Search', icon: '🔍' },
+    // { href: '/search', label: '🔍 Search', icon: '🔍' }, // hidden: the graph's search box does passage search now
     { href: '/graph', label: '📊 Graph', icon: '📊' },
     { href: '/process', label: '🏭 Process', icon: '🏭' },
     { href: '/settings', label: '⚙️ Settings', icon: '⚙️' },

@@ -6,6 +6,7 @@ and each gets a decision:
 - keep_image: the same, plus a copy of the image in storage, shown with the note
 - skip: nothing is added, and the screenshot goes to the Recycle Bin RECYCLE_DELAY later (Undo
   until then just cancels it; after that it can be restored from the Recycle Bin)
+- ignore: nothing is added, and the screenshot stays where it is
 
 Kept screenshots are never changed. Decisions are keyed by file content, so a screenshot that is
 moved or renamed isn't asked about again. State: <storage>/image_triage.json.
@@ -16,6 +17,7 @@ import json
 import logging
 import os
 import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -25,7 +27,8 @@ from ..config import settings
 logger = logging.getLogger(__name__)
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic"}
-DECISIONS = ("keep", "keep_image", "skip")
+DECISIONS = ("keep", "keep_image", "skip", "ignore")
+KEEPS = ("keep", "keep_image")  # the decisions that queue the screenshot for the vision pass
 RECYCLE_DELAY = timedelta(minutes=10)  # a discarded screenshot waits this long for an Undo
 
 _lock = threading.Lock()
@@ -52,7 +55,16 @@ def _save(state: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, indent=1), encoding="utf-8")
-    tmp.replace(path)
+    # on Windows the replace fails while anyone has the file open (a reader in another process);
+    # readers are quick, so wait for them rather than lose the decision
+    for attempt in range(40):
+        try:
+            tmp.replace(path)
+            return
+        except PermissionError:
+            if attempt == 39:
+                raise
+            time.sleep(0.025)
 
 
 def file_hash(path: Path) -> str:
@@ -98,7 +110,7 @@ def recycle(path: Path) -> bool:
 
 
 def _sweep(state: dict, now: Optional[datetime] = None) -> bool:
-    """Recycle discarded screenshots whose Undo window has passed. True if anything changed."""
+    """Recycle deleted (skip) screenshots whose Undo window has passed. True if anything changed."""
     now = now or datetime.now()
     changed = False
     for digest, entry in state["decisions"].items():
@@ -118,7 +130,7 @@ def _sweep(state: dict, now: Optional[datetime] = None) -> bool:
         try:
             if recycle(path):
                 entry["recycled"] = now.isoformat(timespec="seconds")
-                logger.info(f"Discarded screenshot sent to the Recycle Bin: {path.name}")
+                logger.info(f"Deleted screenshot sent to the Recycle Bin: {path.name}")
             else:
                 entry["recycle_failed"] = True
         except OSError as e:
@@ -141,7 +153,8 @@ def sweep() -> int:
 
 
 def folders() -> List[str]:
-    return _load()["folders"]
+    with _lock:  # a read during a save would make the save's replace fail
+        return _load()["folders"]
 
 
 def add_folder(folder: str) -> List[str]:
@@ -192,27 +205,34 @@ def pending(limit: int = 20) -> dict:
     with _lock:
         state = _load()
         changed = _sweep(state)
-        files = []
+        stats = {}
         for folder in state["folders"]:
-            files.extend(_images_in(folder))
-        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            for path in _images_in(folder):
+                try:
+                    stats[path] = path.stat()
+                except OSError:
+                    pass  # gone since the listing (recycled, moved by OneDrive)
+        files = sorted(stats, key=lambda p: stats[p].st_mtime, reverse=True)
         decided_keys = {d["key"] for d in state["decisions"].values() if d.get("key")}
         out = []
         undecided = 0
         for path in files:
-            key = _file_key(path)
+            key = f"{path}|{stats[path].st_size}|{int(stats[path].st_mtime)}"  # as _file_key, no second stat
             if key in decided_keys:
                 continue
             # content hash only for files not decided by key (renamed or moved copies)
             cached = state["hashes"].get(key)
             if len(out) < limit or cached:
-                digest = _hash_cached(state, path)
+                try:
+                    digest = _hash_cached(state, path)
+                except OSError:
+                    continue  # gone meanwhile
                 changed |= cached is None
                 if digest in state["decisions"]:
                     continue
             undecided += 1
             if len(out) < limit:
-                st = path.stat()
+                st = stats[path]
                 out.append({"path": str(path), "name": path.name, "folder": path.parent.name,
                             "size_kb": round(st.st_size / 1024),
                             "modified": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds")})
@@ -241,6 +261,53 @@ def clean_region(region: Optional[dict]) -> Optional[dict]:
             "points": points[::step]}
 
 
+def _queue_keep(path: Path, digest: str, keep_image: bool, region: Optional[dict]) -> Optional[str]:
+    """
+    Queue a kept screenshot for the vision pass: here, or on a worker (ROLE=worker) in the
+    primary's queue, as a file on this machine. The job id, or None if it was read already.
+    """
+    from .queue import DuplicateImageError, ImageQueue
+
+    if settings.is_worker:
+        from PIL import Image
+
+        from .. import paths
+        from ..worker import primary
+
+        try:
+            with Image.open(path) as img:
+                width, height = img.size
+        except Exception:
+            width = height = None
+        reply = primary().post("/worker/image/add", {
+            "ref": paths.to_worker_ref(path), "image_hash": digest, "title": path.stem,
+            "collection_name": "Screenshots", "width": width, "height": height,
+            "keep_image": keep_image, "focus_region": region,
+        })
+        if reply.get("status") == "duplicate":
+            logger.info(f"Already in the knowledge base: {path.name}")
+        return reply.get("job_id")
+    queue = ImageQueue()
+    try:
+        job_id = queue.add(path, collection_name="Screenshots")
+        queue.set_options(job_id, keep_image=keep_image, focus_region=region)
+        return job_id
+    except DuplicateImageError:
+        logger.info(f"Already in the knowledge base: {path.name}")
+        return None
+
+
+def _unqueue_keep(job_id: str, digest: Optional[str]) -> bool:
+    """Take a keep out of the queue again; False if it was read already."""
+    if settings.is_worker:
+        from ..worker import primary
+
+        return bool(digest) and bool(primary().post("/worker/image/remove", {"image_hash": digest}).get("removed"))
+    from .queue import ImageQueue
+
+    return ImageQueue().remove_pending(job_id)
+
+
 def decide(path: Path, decision: str, region: Optional[dict] = None) -> dict:
     """
     Record a decision; keeps are queued for the vision pass (keep_image copies the image there).
@@ -248,22 +315,15 @@ def decide(path: Path, decision: str, region: Optional[dict] = None) -> dict:
     """
     if decision not in DECISIONS:
         raise ValueError(f"Unknown decision: {decision}")
-    region = clean_region(region) if decision != "skip" else None
+    region = clean_region(region) if decision in KEEPS else None
     if not path.is_file() or not in_folders(path):
         raise ValueError("Not a screenshot in a triage folder")
     with _lock:
         state = _load()
         digest = _hash_cached(state, path)
         job_id = None
-        if decision != "skip":
-            from .queue import DuplicateImageError, ImageQueue
-
-            queue = ImageQueue()
-            try:
-                job_id = queue.add(path, collection_name="Screenshots")
-                queue.set_options(job_id, keep_image=decision == "keep_image", focus_region=region)
-            except DuplicateImageError:
-                logger.info(f"Already in the knowledge base: {path.name}")
+        if decision in KEEPS:
+            job_id = _queue_keep(path, digest, keep_image=decision == "keep_image", region=region)
         state["decisions"][digest] = {"decision": decision, "path": str(path), "key": _file_key(path),
                                       "job_id": job_id, "at": datetime.now().isoformat(timespec="seconds"),
                                       **({"region": region} if region else {})}
@@ -282,10 +342,7 @@ def undo(path: Path) -> Optional[dict]:
             (h for h, d in state["decisions"].items() if d["path"] == str(path)), None)
         entry = state["decisions"].pop(digest, None) if digest else None
         if entry and entry.get("job_id"):
-            from .queue import ImageQueue
-
-            queue = ImageQueue()
-            if queue.remove_pending(entry["job_id"]):
+            if _unqueue_keep(entry["job_id"], digest):
                 logger.info(f"Taken out of the image queue: {path.name}")
             else:
                 entry["note_kept"] = True  # already processed: the note stays (delete it from the UI)

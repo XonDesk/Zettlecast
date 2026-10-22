@@ -114,7 +114,8 @@ def _split_transcript(text: str, chunk_size: int) -> List[str]:
 # (their fixed wording made every episode "match" every other)
 # Kept in a note but not embedded: transcript verification reports; everything else on a
 # screenshot besides what it was taken for, and image file details
-UNINDEXED_SECTIONS = ("Automatic Corrections", "Needs Review", "Screen Text", "Image Details")
+UNINDEXED_SECTIONS = ("Automatic Corrections", "Needs Review", "Screen Text", "Image Details",
+                      "Thread comments")  # a Reddit thread's raw comments: only the curated takeaways count
 
 
 def _drop_sections(text: str, titles: tuple) -> str:

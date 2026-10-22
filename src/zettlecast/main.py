@@ -15,12 +15,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import httpx
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 
-from . import embeddings, llm
+from . import embeddings, llm, paths, workerstate
 from .config import ENV_FILE, settings
 from .db import db
 from .models import ProcessingResult
@@ -60,7 +62,14 @@ async def lifespan(_app: FastAPI):
     logger.info(f"Storage path: {settings.storage_path}")
     # free the GPU for transcription runs when nobody is searching
     embeddings.start_idle_unloader(settings.model_idle_minutes)
-    _start_recycle_sweeper()
+    if settings.is_primary:
+        # GPU work and the screenshots are on the worker: wake it when jobs wait for it
+        from .wake import start_policy
+
+        start_policy()
+        logger.info(f"Primary: jobs go to the worker (wake-on-LAN {'on' if settings.desktop_mac_address else 'off'})")
+    else:
+        _start_recycle_sweeper()
     yield
     llm.unload(only_own=True)
 
@@ -95,6 +104,10 @@ async def verify_token(request: Request, call_next):
     public_paths = ["/", "/docs", "/openapi.json", "/health"]
     if request.url.path in public_paths:
         return await call_next(request)
+
+    # The worker's API checks the worker token itself (worker_api.py)
+    if request.url.path.startswith("/worker/"):
+        return await call_next(request)
     
     # Check token
     token = request.query_params.get("token") or request.headers.get("Authorization", "").replace("Bearer ", "")
@@ -104,12 +117,95 @@ async def verify_token(request: Request, call_next):
     return await call_next(request)
 
 
+from .worker_api import router as _worker_router  # noqa: E402
+
+app.include_router(_worker_router)
+
+
 # --- Health Check ---
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    return {"status": "healthy", "version": "0.1.0"}
+    return {"status": "healthy", "version": "0.1.0", "role": settings.role}
+
+
+# --- The worker's files, through the primary (ROLE=primary) ---
+
+DESKTOP_OFFLINE = "The desktop is off: wake it from the process page (or wait for it to finish starting)"
+
+
+def _worker_base() -> str:
+    url = workerstate.worker_url()
+    if not url or not workerstate.online():
+        raise HTTPException(status_code=503, detail=DESKTOP_OFFLINE)
+    return url
+
+
+def _worker_headers() -> dict:
+    return {"Authorization": f"Bearer {settings.worker_token}"}
+
+
+async def _worker_json(method: str, path: str, params: Optional[dict] = None, body: Optional[dict] = None):
+    """Call the worker's file server and return its JSON (its errors pass through)."""
+    base = _worker_base()
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.request(method, base + path, params=params, json=body, headers=_worker_headers())
+    except httpx.HTTPError:
+        raise HTTPException(status_code=503, detail=DESKTOP_OFFLINE)
+    if r.status_code >= 400:
+        try:
+            detail = r.json().get("detail") or r.text
+        except ValueError:
+            detail = r.text
+        raise HTTPException(status_code=r.status_code, detail=detail)
+    return r.json()
+
+
+PASSED_HEADERS = ("content-type", "content-length", "content-range", "accept-ranges", "content-disposition",
+                  "cache-control", "etag", "last-modified")
+
+
+async def _worker_file(path: str, params: dict, request: Request) -> StreamingResponse:
+    """Stream a file from the worker, Range requests included (seeking in audio)."""
+    base = _worker_base()
+    headers = _worker_headers()
+    if request.headers.get("range"):
+        headers["Range"] = request.headers["range"]
+    client = httpx.AsyncClient(timeout=httpx.Timeout(60, read=None))
+    try:
+        upstream = await client.send(client.build_request("GET", base + path, params=params, headers=headers),
+                                     stream=True)
+    except httpx.HTTPError:
+        await client.aclose()
+        raise HTTPException(status_code=503, detail=DESKTOP_OFFLINE)
+    if upstream.status_code >= 400:
+        await upstream.aclose()
+        await client.aclose()
+        raise HTTPException(status_code=upstream.status_code, detail="Not found on the desktop")
+
+    async def close() -> None:
+        await upstream.aclose()
+        await client.aclose()
+
+    return StreamingResponse(upstream.aiter_raw(), status_code=upstream.status_code,
+                             headers={k: v for k, v in upstream.headers.items() if k.lower() in PASSED_HEADERS},
+                             background=BackgroundTask(close))
+
+
+def _work_for_worker(what: str) -> dict:
+    """A run asked for on the primary: the worker picks the jobs up (unpaused, woken if off)."""
+    from .wake import wake_now
+
+    workerstate.resume()
+    if workerstate.online():
+        return {"status": "started", "message": f"The desktop picks up the {what} next"}
+    woken = wake_now(reason=f"{what} asked for")
+    if woken["status"] == "sent":
+        return {"status": "waking", "message": f"Waking the desktop: it starts on the {what} once it is up"}
+    return {"status": "queued", "message": f"Queued: the desktop does the {what} when it is next on "
+                                           f"({woken['message']})"}
 
 
 # --- Ingestion Endpoints ---
@@ -236,6 +332,7 @@ async def delete_note(
 @app.get("/notes/{uuid}/source")
 async def get_note_source_file(
     uuid: str,
+    request: Request,
     token: str = Query(...),
 ):
     """Download/view the original source file for a note."""
@@ -252,6 +349,10 @@ async def get_note_source_file(
     # Check if it's a URL
     if note.source_path.startswith(('http://', 'https://')):
         return {"url": note.source_path, "type": "url"}
+
+    # On the worker (podcast audio, screenshots): streamed from there while it is on
+    if paths.is_worker_ref(note.source_path):
+        return await _worker_file("/files", {"ref": note.source_path}, request)
 
     # Check if file exists
     if not source_path.exists():
@@ -396,8 +497,9 @@ def _graph_facets(note: dict, row: dict) -> dict:
         "tags": [str(t) for t in meta.get("tags") or []],
         "people": [str(p) for p in custom.get("people") or [] if p],
         "organisations": [str(o) for o in custom.get("organisations") or [] if o],
-        "source": group.split(":", 1)[-1],  # show name, website host, or type
-        "date": _iso_date(podcast.get("published")) or str(note.get("created_at") or "")[:10] or None,
+        "source": group.split(":", 1)[-1],  # show name, website host, subreddit, or type
+        "date": _iso_date(podcast.get("published")) or _iso_date((custom.get("reddit") or {}).get("created"))
+                or str(note.get("created_at") or "")[:10] or None,
         "duration": meta.get("duration_seconds"),
     }
 
@@ -714,7 +816,14 @@ async def run_podcast_processing(
 ):
     """Start podcast transcription processing in the background."""
     global _processing_state
-    
+
+    if settings.is_primary:
+        from .podcast.queue import TranscriptionQueue
+
+        if TranscriptionQueue().get_pending_count() == 0:
+            return {"status": "no_pending", "message": "No pending episodes to process"}
+        return _work_for_worker("podcasts")
+
     if _processing_state["is_running"]:
         return {
             "status": "already_running",
@@ -732,7 +841,10 @@ async def run_podcast_processing(
             "processed_count": other.get("completed", 0),
             "message": f"A run is already going ({other.get('source')}, pid {other.get('pid')})",
         }
-    
+    if _image_processing_state["is_running"]:
+        # pass 1 stops the LLM server the image run is reading with
+        return {"status": "refused", "message": "Images are being read: stop that first (or let it finish)"}
+
     try:
         from .podcast.queue import TranscriptionQueue
         queue = TranscriptionQueue()
@@ -791,6 +903,10 @@ async def cancel_podcast_episode(episode_id: str, token: str = Query(...)):
         from .podcast.queue import TranscriptionQueue
         queue = TranscriptionQueue()
 
+        if settings.is_primary and workerstate.cancel_episode(episode_id):
+            return {"status": "cancelling", "message": "Cancellation sent to the desktop: it takes effect "
+                                                       "at the next chunk boundary"}
+
         # Check if this is the currently-processing episode
         if _processing_state.get("current_episode_id") == episode_id:
             with _cancel_lock:
@@ -842,6 +958,8 @@ async def system_run_stop(body: StopRequest, token: str = Query(...)):
     """Stop the run (CLI or API): after the current episode, or now (abort)."""
     from . import runstate, system
 
+    if settings.is_primary:
+        return workerstate.request_stop(body.mode)
     if body.mode == "abort":
         if _processing_state["is_running"] and _processing_state["current_episode_id"]:
             global _cancel_episode_id
@@ -858,11 +976,37 @@ async def system_run_stop(body: StopRequest, token: str = Query(...)):
 
 @app.post("/system/run/resume")
 async def system_run_resume(token: str = Query(...)):
-    """Withdraw a stop request that hasn't taken effect yet."""
+    """Withdraw a stop request that hasn't taken effect yet (primary: also lets the worker take new work)."""
     from . import runstate
 
+    if settings.is_primary:
+        return workerstate.resume()
     runstate.clear_stop()
     return {"status": "resumed"}
+
+
+@app.post("/system/wake")
+async def system_wake(token: str = Query(...)):
+    """Wake the worker PC now (Wake-on-LAN), whatever the wake window and earlier misses."""
+    from .wake import wake_now
+
+    if not settings.is_primary:
+        return {"status": "not_primary", "message": "Only the primary wakes a worker"}
+    return await asyncio.to_thread(wake_now, "manual")
+
+
+class DesktopSettings(BaseModel):
+    stay_on: Optional[bool] = None
+
+
+@app.post("/system/desktop")
+async def system_desktop(body: DesktopSettings, token: str = Query(...)):
+    """Keep the worker PC on when idle (stay_on), or let it shut down again."""
+    if not settings.is_primary:
+        raise HTTPException(status_code=400, detail="Only the primary has a worker")
+    if body.stay_on is not None:
+        workerstate.set_stay_on(body.stay_on)
+    return workerstate.status()
 
 
 @app.post("/system/unload")
@@ -896,6 +1040,7 @@ EDITABLE_SETTINGS = {
     "chunk_size": "CHUNK_SIZE",
     "storage_path": "STORAGE_PATH",
     "hf_token": "HF_TOKEN",
+    "reddit_saved_feed": "REDDIT_SAVED_FEED",
 }
 
 
@@ -911,6 +1056,7 @@ class SettingsUpdate(BaseModel):
     chunk_size: Optional[int] = None
     storage_path: Optional[str] = None
     hf_token: Optional[str] = None
+    reddit_saved_feed: Optional[str] = None
 
 
 def update_env_file(updates: dict) -> None:
@@ -937,6 +1083,10 @@ async def get_settings(token: str = Query(...)):
     values = {key: getattr(settings, key) for key in EDITABLE_SETTINGS}
     values["storage_path"] = str(settings.storage_path)
     values["hf_token"] = "***" if settings.hf_token else ""
+    # the feed link is a login to the saved list: never sent back, read fresh (no restart needed)
+    from .reddit import feed_url
+
+    values["reddit_saved_feed"] = "***" if feed_url() else ""
     return values
 
 
@@ -947,7 +1097,15 @@ async def update_settings_endpoint(
 ):
     """Save settings to .env; they take effect after a restart."""
     updates = body.model_dump(exclude_none=True)
-    updates.pop("hf_token", None) if updates.get("hf_token") == "***" else None
+    for secret in ("hf_token", "reddit_saved_feed"):
+        updates.pop(secret, None) if updates.get(secret) == "***" else None
+    if updates.get("reddit_saved_feed"):
+        from .reddit import RedditError, rss_feed
+
+        try:
+            rss_feed(updates["reddit_saved_feed"])
+        except RedditError as e:
+            raise HTTPException(status_code=400, detail=str(e))
     if not updates:
         raise HTTPException(status_code=400, detail="No settings to update")
     update_env_file(updates)
@@ -1129,78 +1287,38 @@ async def retry_failed_images(token: str = Query(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Global image processing state
-_image_processing_state = {
-    "is_running": False,
-    "current_image": None,
-    "processed_count": 0,
-    "error_count": 0,
-    "started_at": None,
-}
+# Image run state, shared with the process page (system.status)
+from .system import image_run as _image_processing_state  # noqa: E402
 
 
 def _run_image_processing_background(limit: int = None):
-    """Background task to run image processing."""
-    global _image_processing_state
+    """
+    Background task to run image processing (image/worker.py): notes stored in the database,
+    linked by one graph rebuild at the end. A stop request (POST /image/stop) lets the images
+    being read finish, starts no more, and still links what was stored.
+    """
+    from .image import worker as image_worker
+    from .image.queue import ImageQueue
+    from .linker import rebuild_graph
 
-    try:
-        from .image.queue import ImageQueue
-        from .image.image_parser import parse_image
-        from datetime import datetime
-        from pathlib import Path as P
-        import time
+    queue = ImageQueue()
 
-        _image_processing_state["is_running"] = True
-        _image_processing_state["started_at"] = datetime.utcnow().isoformat()
-        _image_processing_state["processed_count"] = 0
-        _image_processing_state["error_count"] = 0
+    def store(image, note, seconds):
+        db.upsert_note(note)
+        queue.mark_completed(image.id, seconds)
 
-        queue = ImageQueue()
-        processed = 0
+    image_worker.read_images(queue, store, _image_processing_state, limit=limit, link=rebuild_graph)
 
-        while True:
-            if limit and processed >= limit:
-                break
 
-            item = queue.get_next_pending()
-            if not item:
-                break
-
-            image = item.image
-            _image_processing_state["current_image"] = image.image_title
-
-            queue.mark_started(image.id)
-            start_time = time.time()
-
-            try:
-                # Parse image
-                result = parse_image(P(image.image_path), keep_image=image.keep_image,
-                                     focus_region=image.focus_region)
-
-                if result.status == "success" and result.note:
-                    ingest_note(result.note)
-
-                    processing_time = time.time() - start_time
-                    queue.mark_completed(image.id, processing_time)
-
-                    processed += 1
-                    _image_processing_state["processed_count"] = processed
-                else:
-                    queue.mark_failed(image.id, result.error_message or "Unknown error")
-                    _image_processing_state["error_count"] += 1
-
-            except Exception as e:
-                logger.error(f"Failed to process image {image.id}: {e}")
-                queue.mark_failed(image.id, str(e))
-                _image_processing_state["error_count"] += 1
-
-        _image_processing_state["current_image"] = None
-
-    except Exception as e:
-        logger.error(f"Background image processing error: {e}")
-    finally:
-        _image_processing_state["is_running"] = False
-        _image_processing_state["current_image"] = None
+@app.post("/image/stop")
+async def stop_image_processing(token: str = Query(...)):
+    """Stop the image run: the images being read finish, no more start, what's stored is linked."""
+    if settings.is_primary:
+        return workerstate.stop_images()
+    if not _image_processing_state["is_running"]:
+        return {"status": "not_running"}
+    _image_processing_state["stop_requested"] = True
+    return {"status": "stopping", "message": "Finishing the images being read, then linking them"}
 
 
 class ImageRunRequest(BaseModel):
@@ -1214,8 +1332,12 @@ async def run_image_processing(
     token: str = Query(...),
 ):
     """Start image processing in the background."""
-    global _image_processing_state
+    if settings.is_primary:
+        from .image.queue import ImageQueue
 
+        if ImageQueue().get_pending_count() == 0:
+            return {"status": "no_pending", "message": "No pending images to process"}
+        return _work_for_worker("images")
     if _image_processing_state["is_running"]:
         return {
             "status": "already_running",
@@ -1263,7 +1385,7 @@ class TriageFolderRequest(BaseModel):
 
 class TriageDecisionRequest(BaseModel):
     path: str
-    decision: str  # keep | keep_image | skip
+    decision: str  # keep | keep_image | skip | ignore
     region: Optional[dict] = None  # circled part: {box: [x, y, w, h], points: [[x, y], ...]} (fractions)
 
 
@@ -1271,12 +1393,15 @@ class TriageDecisionRequest(BaseModel):
 async def triage_pending(token: str = Query(...), limit: int = Query(20, ge=1, le=100)):
     """The next undecided screenshots in the triage folders (newest first) and counts."""
     from .image import triage
-
-    result = await asyncio.to_thread(triage.pending, limit)
     from .image.queue import ImageQueue
 
+    if settings.is_primary:  # the screenshots are on the worker
+        result = await _worker_json("GET", "/image/triage", params={"limit": limit})
+        result["processing"] = bool((workerstate.last_beat().get("images") or {}).get("is_running"))
+    else:
+        result = await asyncio.to_thread(triage.pending, limit)
+        result["processing"] = _image_processing_state["is_running"]
     result["queue"] = ImageQueue().get_status_summary()["by_status"]
-    result["processing"] = _image_processing_state["is_running"]
     return result
 
 
@@ -1284,6 +1409,8 @@ async def triage_pending(token: str = Query(...), limit: int = Query(20, ge=1, l
 async def triage_add_folder(body: TriageFolderRequest, token: str = Query(...)):
     from .image import triage
 
+    if settings.is_primary:
+        return await _worker_json("POST", "/image/triage/folders", body=body.model_dump())
     try:
         return {"folders": triage.add_folder(body.path)}
     except ValueError as e:
@@ -1294,14 +1421,18 @@ async def triage_add_folder(body: TriageFolderRequest, token: str = Query(...)):
 async def triage_remove_folder(body: TriageFolderRequest, token: str = Query(...)):
     from .image import triage
 
+    if settings.is_primary:
+        return await _worker_json("DELETE", "/image/triage/folders", body=body.model_dump())
     return {"folders": triage.remove_folder(body.path)}
 
 
 @app.get("/image/triage/file")
-async def triage_file(path: str = Query(...), token: str = Query(...)):
+async def triage_file(request: Request, path: str = Query(...), token: str = Query(...)):
     """A screenshot from a triage folder (nothing outside those folders is served)."""
     from .image import triage
 
+    if settings.is_primary:
+        return await _worker_file("/image/triage/file", {"path": path}, request)
     file = Path(path)
     if file.suffix.lower() not in triage.IMAGE_EXTENSIONS or not file.is_file() or not triage.in_folders(file):
         raise HTTPException(status_code=404, detail="Not a screenshot in a triage folder")
@@ -1313,6 +1444,8 @@ async def triage_file(path: str = Query(...), token: str = Query(...)):
 async def triage_decide(body: TriageDecisionRequest, token: str = Query(...)):
     from .image import triage
 
+    if settings.is_primary:
+        return await _worker_json("POST", "/image/triage/decide", body=body.model_dump())
     try:
         return await asyncio.to_thread(triage.decide, Path(body.path), body.decision, body.region)
     except ValueError as e:
@@ -1324,7 +1457,79 @@ async def triage_undo(body: TriageFolderRequest, token: str = Query(...)):
     """Forget the decision on a screenshot (body.path); a keep not yet processed leaves the queue."""
     from .image import triage
 
+    if settings.is_primary:
+        return await _worker_json("POST", "/image/triage/undo", body=body.model_dump())
     return {"undone": await asyncio.to_thread(triage.undo, Path(body.path))}
+
+
+# --- Reddit saves ---
+
+
+@app.get("/reddit/status")
+async def reddit_status(token: str = Query(...)):
+    """Whether a feed is set, how many saves are imported, last sync, the running sync's progress."""
+    from . import reddit
+
+    return reddit.status()
+
+
+@app.post("/reddit/sync")
+async def reddit_sync(token: str = Query(...), refresh: bool = Query(False), limit: Optional[int] = Query(None, ge=1),
+                      enrich: bool = Query(True), threads: bool = Query(True)):
+    """
+    Import new Reddit saves in the background (a maintenance task: not during a podcast run).
+    enrich=false: no LLM (no tags/summary until a later sync or /reddit/tag).
+    threads=false: notes from the saved feed alone, no comments (refresh=true fetches them later).
+    """
+    from . import reddit, system
+
+    if not reddit.feed_url():
+        return {"status": "refused", "message": "Set your Reddit saved feed link in Settings first"}
+    name = "reddit comments" if refresh else "reddit sync" if enrich and threads else "reddit quick sync"
+    return system.start_task(name, lambda: reddit.sync(limit=limit, refresh=refresh, enrich=enrich, threads=threads))
+
+
+class RubricBody(BaseModel):
+    text: str
+
+
+@app.get("/reddit/rubric")
+async def reddit_rubric(token: str = Query(...)):
+    """The rules comment curation follows (the user's, or the default)."""
+    from . import curation
+
+    text = curation.rubric()
+    return {"text": text, "default": text == curation.DEFAULT_RUBRIC, "default_text": curation.DEFAULT_RUBRIC}
+
+
+@app.post("/reddit/rubric")
+async def reddit_rubric_save(body: RubricBody, token: str = Query(...)):
+    """Store the curation rules (empty: back to the default). Used from the next curated save on."""
+    from . import curation
+
+    curation.save_rubric(body.text)
+    return {"status": "saved", "default": curation.rubric() == curation.DEFAULT_RUBRIC}
+
+
+@app.post("/reddit/tag")
+async def reddit_tag(token: str = Query(...)):
+    """LLM tags + summaries for imported saves that have none (from the database, no Reddit requests)."""
+    from . import reddit, system
+
+    if settings.is_primary:  # the worker tags every note still without tags (tagging.py)
+        return _work_for_worker("tagging")
+    return system.start_task("reddit tagging", reddit.tag_untagged)
+
+
+@app.post("/reddit/stop")
+async def reddit_stop(token: str = Query(...)):
+    """Stop a Reddit sync or tagging after the current save."""
+    from . import reddit
+
+    if not reddit.progress.get("running"):
+        return {"status": "idle", "message": "No Reddit sync is running"}
+    reddit.request_stop()
+    return {"status": "stopping", "message": "Stops after the current save"}
 
 
 @app.post("/image/triage/process")
@@ -1333,6 +1538,10 @@ async def triage_process(background_tasks: BackgroundTasks, token: str = Query(.
     from .image.queue import ImageQueue
     from . import runstate
 
+    if settings.is_primary:
+        if ImageQueue().get_pending_count() == 0:
+            return {"status": "no_pending"}
+        return _work_for_worker("screenshots")
     if runstate.active_run():
         return {"status": "refused", "message": "A podcast run is using the GPU: process after it finishes"}
     if _image_processing_state["is_running"]:

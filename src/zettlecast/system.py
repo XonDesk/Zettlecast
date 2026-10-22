@@ -10,11 +10,12 @@ import shutil
 import subprocess
 import threading
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import httpx
 
-from . import runstate
+from . import paths, runstate
 from .config import settings
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,15 @@ VRAM_ALARM_FRACTION = 0.975
 # Maintenance task run by the API process (reindex), shown on the process page
 _task_lock = threading.Lock()
 task: dict = {"name": None, "running": False, "started_at": None, "finished_at": None, "result": None, "error": None}
+
+# Image run in the API process (main._run_image_processing_background): phase reading | linking,
+# total = images it set out to read, in_flight = titles being read now
+image_run: dict = {"is_running": False, "phase": None, "current_image": None, "processed_count": 0,
+                   "error_count": 0, "total": 0, "in_flight": [], "stop_requested": False,
+                   "started_at": None, "finished_at": None}
+
+TRIAGE_CACHE_SECONDS = 30  # counting undecided screenshots lists every file in the folders
+_triage_cache: dict = {"at": 0.0, "value": None}
 
 
 def gpu() -> Optional[dict]:
@@ -78,12 +88,18 @@ def queues() -> dict:
     q = TranscriptionQueue()
     summary = q.get_status_summary()
     workers = [{"pid": i.worker_pid, "title": i.episode.episode_title or ""} for i in q.items.values()
-               if i.status == "processing" and _worker_alive(i.worker_pid, i.started_at)]
+               if i.status == "processing" and i.worker_pid and _worker_alive(i.worker_pid, i.started_at)]
     failed = [{"id": i.episode.id, "title": i.episode.episode_title or "", "error": (i.error_message or "")[:200]}
               for i in q.items.values() if i.status == "failed"][:10]
+    from .podcast.asr_cache import has_asr
+
+    # pending episodes already through pass 1: they wait for pass 2, not for transcription
+    transcribed = sum(1 for i in q.items.values()
+                      if i.status == "pending" and i.episode.audio_path
+                      and not paths.is_worker_ref(i.episode.audio_path) and has_asr(Path(i.episode.audio_path)))
     images = ImageQueue().get_status_summary()
     return {"podcast": {"by_status": summary["by_status"], "total": summary["total"], "failed": failed,
-                        "workers": workers},
+                        "workers": workers, "transcribed": transcribed},
             "images": images}
 
 
@@ -131,6 +147,9 @@ def alarms(run: dict, gpu_info: Optional[dict], llm: dict, q: dict, disk_free_gb
     by = q["podcast"]["by_status"]
     if by.get("failed"):
         add("failed", "medium", f"{by['failed']} episode(s) failed (Retry failed re-queues them)")
+    image_failed = ((q.get("images") or {}).get("by_status") or {}).get("failed")
+    if image_failed:
+        add("image-failed", "low", f"{image_failed} image(s) failed (Retry failed in Images)")
     if by.get("processing") and not run.get("alive"):
         add("stuck", "medium", f"{by['processing']} episode(s) marked processing with no run (Reset stuck)")
     if disk_free_gb < 5:
@@ -142,7 +161,87 @@ def alarms(run: dict, gpu_info: Optional[dict], llm: dict, q: dict, disk_free_gb
     return out
 
 
+def triage_counts() -> Optional[dict]:
+    """Screenshots still to sort, decisions so far, discards waiting for the Recycle Bin (cached)."""
+    import time
+
+    from .image import triage
+
+    if _triage_cache["value"] is not None and time.monotonic() - _triage_cache["at"] < TRIAGE_CACHE_SECONDS:
+        return _triage_cache["value"]
+    try:
+        p = triage.pending(limit=0)
+        state = triage._load()
+        to_bin = sum(1 for d in state["decisions"].values()
+                     if d["decision"] == "skip" and not d.get("recycled") and not d.get("recycle_failed"))
+        value = {"remaining": p["remaining"], "decided": p["decided"], "folders": len(p["folders"]),
+                 "to_recycle": to_bin}
+    except Exception as e:  # never let it take the process page down
+        logger.debug(f"triage counts unavailable: {e}")
+        value = None
+    _triage_cache.update(at=time.monotonic(), value=value)
+    return value
+
+
+def _reddit() -> Optional[dict]:
+    from . import reddit
+
+    try:
+        return reddit.status()
+    except Exception as e:  # never let it take the process page down
+        logger.debug(f"reddit status unavailable: {e}")
+        return None
+
+
+NO_LLM = {"backend": "desktop off", "model": "", "server": {"installed": False, "pid": None, "vision": False,
+                                                     "health": None, "state": "stopped"},
+          "ollama": {"reachable": False, "loaded": []}}
+
+
+def _primary_status() -> dict:
+    """The process page on the primary: the worker's run, GPU and LLM (from its heartbeat), local rest."""
+    from . import workerstate
+
+    run = runstate.read()
+    beat = workerstate.last_beat()
+    gpu_info = beat.get("gpu")
+    llm = beat.get("llm") or NO_LLM
+    q = queues()
+    desktop = workerstate.status()
+    disk = shutil.disk_usage(settings.storage_path if settings.storage_path.exists() else ".")
+    disk_free_gb = disk.free / 2**30
+    worker_task = beat.get("task") or {}
+    found = alarms(run, gpu_info, llm, q, disk_free_gb)
+    if desktop["wake"]["gave_up"]:
+        found.append({"id": "wake-failed", "priority": "medium",
+                      "text": "The desktop didn't wake for waiting jobs (check Wake-on-LAN; Wake retries)"})
+    if desktop["paused"] and desktop["pending"]["total"]:
+        found.append({"id": "paused", "priority": "low",
+                      "text": f"Paused: {desktop['pending']['total']} job(s) wait for Resume"})
+    return {
+        "time": datetime.now().isoformat(timespec="seconds"),
+        "role": "primary",
+        "run": run,
+        "queues": q,
+        "gpu": gpu_info,
+        "llm": llm,
+        "models": {**loaded_models(), **{f"worker_{k}": v for k, v in (beat.get("models") or {}).items()}},
+        "database": database(),
+        "disk": {"free_gb": round(disk_free_gb, 1), "total_gb": round(disk.total / 2**30, 1)},
+        "worker_disk": beat.get("disk"),
+        "task": dict(worker_task) if worker_task.get("running") or not task["name"] else dict(task),
+        "images": beat.get("images") or {**image_run, "in_flight": []},
+        "triage": beat.get("triage"),
+        "reddit": _reddit(),
+        "desktop": desktop,
+        "alarms": found,
+        "limits": {"vram_warn": VRAM_WARN_FRACTION, "vram_alarm": VRAM_ALARM_FRACTION},
+    }
+
+
 def status() -> dict:
+    if settings.is_primary:
+        return _primary_status()
     run = runstate.read()
     gpu_info = gpu()
     llm = llm_status()
@@ -157,6 +256,7 @@ def status() -> dict:
     disk_free_gb = disk.free / 2**30
     return {
         "time": datetime.now().isoformat(timespec="seconds"),
+        "role": settings.role,
         "run": run,
         "queues": q,
         "gpu": gpu_info,
@@ -165,6 +265,9 @@ def status() -> dict:
         "database": database(),
         "disk": {"free_gb": round(disk_free_gb, 1), "total_gb": round(disk.total / 2**30, 1)},
         "task": dict(task),
+        "images": {**image_run, "in_flight": list(image_run["in_flight"])},
+        "triage": triage_counts(),
+        "reddit": _reddit(),
         "alarms": alarms(run, gpu_info, llm, q, disk_free_gb),
         "limits": {"vram_warn": VRAM_WARN_FRACTION, "vram_alarm": VRAM_ALARM_FRACTION},
     }
@@ -203,8 +306,8 @@ def abort_run() -> dict:
 
 
 def free_gpu() -> dict:
-    """Unload every model this machine runs for Zettlecast (refused during a run)."""
-    if runstate.active_run():
+    """Unload every model this machine runs for Zettlecast (refused during a run on this machine)."""
+    if runstate.active_run() and not settings.is_primary:
         return {"status": "refused", "message": "A run is going: pause or abort it first"}
     from . import embeddings, llm
     from .pipeline import release_acoustic_scorer
@@ -216,8 +319,11 @@ def free_gpu() -> dict:
 
 
 def start_task(name: str, fn) -> dict:
-    """Run a maintenance task in a background thread (one at a time, never during a run)."""
-    if runstate.active_run():
+    """
+    Run a maintenance task in a background thread (one at a time, never during a run on this
+    machine; the primary's runs are on the worker's GPU).
+    """
+    if runstate.active_run() and not settings.is_primary:
         return {"status": "refused", "message": "A run is going: wait for it or pause it first"}
     with _task_lock:
         if task["running"]:
