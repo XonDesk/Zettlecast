@@ -68,7 +68,7 @@ minutes.
 ## Running a step by hand
 
 The worker can be stopped with `Stop-ScheduledTask "Zettlecast worker"`. With the task stopped,
-`.\zc.ps1 worker` runs it in a console instead.
+`python zc.py worker` runs it in a console instead.
 
-On this PC, `.\zc.ps1 podcast run` still works against a local queue, but with `ROLE=worker` the
+On this PC, `python zc.py podcast run` still works against a local queue, but with `ROLE=worker` the
 queue that matters is on the primary. Use the process page instead.

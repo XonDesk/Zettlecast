@@ -79,17 +79,17 @@ frontend/            Next.js UI: app/(main)/ pages share the sidebar (notes, pod
                      screenshots -> sorting -> vision with its controls); app/graph is a full-screen view;
                      app/triage sorts screenshots (swipe / arrow keys; reached from Images and the process page); components/Transcript renders speaker turns
 tests/               pytest suite (LLM and models mocked)
-start.ps1            Start Ollama + API + web UI
-zc.ps1               CLI shortcut
+start.py             Start Ollama (if needed) + API + web UI (any OS)
+zc.py                CLI shortcut (any OS)
 ```
 
 ---
 
 ## Setup & Running
 
-```powershell
-.\start.ps1                                          # API :8000 + web UI :3000
-.\zc.ps1 --help                                      # CLI
+```sh
+python start.py                                          # API :8000 + web UI :3000
+python zc.py --help                                      # CLI
 ```
 
 - On this PC the environment (.venv, .env, models) is already installed. The two-machine setup has

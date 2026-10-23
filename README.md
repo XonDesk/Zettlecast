@@ -45,24 +45,26 @@ uv pip install --python .venv\Scripts\python.exe -e ".[dev]" `
 
 ## Use
 
-```powershell
-.\start.ps1                 # API on http://localhost:8000, web UI on http://localhost:3000
+On Windows, macOS or Linux:
+
+```sh
+python start.py                 # API on http://localhost:8000, web UI on http://localhost:3000
 ```
 
 Or from the CLI:
 
-```powershell
-.\zc.ps1 podcast import https://example.com/feed.xml --limit 5   # download + queue episodes (show notes help name speakers)
-.\zc.ps1 podcast reprocess "Scott Frey"                           # redo analysis/corrections (or --all; --retranscribe redoes speech too)
-.\zc.ps1 podcast verify                                           # compare with transcripts published in the feed
-.\zc.ps1 podcast add D:\Podcasts\SomeShow                         # queue local audio
-.\zc.ps1 podcast run                                              # transcribe, enhance, index
-.\zc.ps1 ingest D:\Papers                                         # PDFs / markdown / images
-.\zc.ps1 add https://example.com/article                          # web page
-.\zc.ps1 search "how to train the gut for long races"
-.\zc.ps1 stats
-.\zc.ps1 graph rebuild
-.\zc.ps1 reindex            # after changing EMBEDDING_MODEL or CHUNK_SIZE
+```sh
+python zc.py podcast import https://example.com/feed.xml --limit 5   # download + queue episodes (show notes help name speakers)
+python zc.py podcast reprocess "Scott Frey"                           # redo analysis/corrections (or --all; --retranscribe redoes speech too)
+python zc.py podcast verify                                           # compare with transcripts published in the feed
+python zc.py podcast add D:\Podcasts\SomeShow                         # queue local audio
+python zc.py podcast run                                              # transcribe, enhance, index
+python zc.py ingest D:\Papers                                         # PDFs / markdown / images
+python zc.py add https://example.com/article                          # web page
+python zc.py search "how to train the gut for long races"
+python zc.py stats
+python zc.py graph rebuild
+python zc.py reindex            # after changing EMBEDDING_MODEL or CHUNK_SIZE
 ```
 
 Audio dropped into `_BRAIN_STORAGE\podcasts\<Show name>\` is picked up
