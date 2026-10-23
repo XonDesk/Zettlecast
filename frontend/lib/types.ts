@@ -268,3 +268,35 @@ export interface SystemStatus {
     limits: { vram_warn: number; vram_alarm: number };
 }
 
+// Today's insight cards (GET /today)
+export interface InsightSide {
+    uuid: string;
+    title: string;
+    source_type: string;
+    community: string | null;
+    date: string | null;
+    text: string; // the passage matching the other note, or the note's summary
+    time: number | null; // where the passage is, in a transcript
+    passage: boolean;
+    image: boolean;
+}
+
+export interface InsightCard {
+    key: string;
+    kind: 'echo' | 'surprise';
+    weight: number;
+    shared: string[];
+    a: InsightSide;
+    b: InsightSide;
+    insight: { relation: 'agrees' | 'contradicts' | 'extends' | 'applies' | 'unrelated'; insight: string;
+               question: string; note_title: string } | null; // null while the LLM prepares it
+    verdict: 'good' | 'rejected' | 'noted' | null;
+    note?: string; // uuid of the note written from it
+}
+
+export interface TodayResponse {
+    date: string;
+    cards: InsightCard[];
+    preparing: number; // cards still waiting for the LLM
+    generating: boolean;
+}

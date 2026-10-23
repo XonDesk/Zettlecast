@@ -7,6 +7,7 @@ import clsx from 'clsx';
 import { api } from '@/lib/api';
 
 const navItems = [
+    { href: '/today', label: '💡 Today', icon: '💡' },
     { href: '/notes', label: '📚 Notes', icon: '📚' },
     { href: '/podcasts', label: '🎙️ Podcasts', icon: '🎙️' },
     { href: '/images', label: '🖼️ Images', icon: '🖼️' },

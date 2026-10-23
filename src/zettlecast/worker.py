@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 POLL_SECONDS = 20  # between claims while there's nothing to do
 RETRY_SECONDS = 30  # after the primary couldn't be reached
-LIMITS = {"podcast": 10, "image": 50, "tag": 25}  # per batch
+LIMITS = {"podcast": 10, "image": 50, "tag": 25, "insight": 20}  # per batch
 
 
 class PrimaryError(RuntimeError):
@@ -397,6 +397,38 @@ def run_tags(batch: List[dict], rubric: Optional[str] = None) -> None:
         task.update(running=False, finished_at=datetime.now().isoformat(timespec="seconds"))
 
 
+# --- Today's insight cards ---
+
+
+def run_insights(batch: List[dict]) -> None:
+    """The LLM's take on the primary's insight cards (insights.generate), each sent back as it's done."""
+    from datetime import datetime
+
+    from . import insights
+    from .llm import LLMError
+
+    task.update(name="preparing insight cards", running=True, started_at=datetime.now().isoformat(timespec="seconds"),
+                finished_at=None, result=None, error=None, done=0, total=len(batch))
+    done = 0
+    try:
+        for n, card in enumerate(batch):
+            if commands["stop"] or commands["abort"] or commands["paused"]:
+                primary().post("/worker/insight/release", {"keys": [c["key"] for c in batch[n:]]})
+                break
+            try:
+                primary().post(f"/worker/insight/{card['key']}", {"insight": insights.generate(card)})
+                done += 1
+                task["done"] = n + 1
+            except LLMError as e:
+                primary().post(f"/worker/insight/{card['key']}", {"error": str(e)})
+                primary().post("/worker/insight/release", {"keys": [c["key"] for c in batch[n + 1:]]})
+                task["error"] = str(e)
+                break
+        task["result"] = {"insights": done}
+    finally:
+        task.update(running=False, finished_at=datetime.now().isoformat(timespec="seconds"))
+
+
 # --- Idle shutdown ---
 
 
@@ -480,6 +512,8 @@ def handle(batch: dict) -> None:
             run_images(batch["items"])
         elif kind == "tag":
             run_tags(batch["items"], batch.get("rubric"))
+        elif kind == "insight":
+            run_insights(batch["items"])
     finally:
         activity.update(busy=False, kind=None)
         from . import runstate

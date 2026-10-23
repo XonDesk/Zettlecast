@@ -87,7 +87,7 @@ def worker_url() -> str:
 
 def heartbeat(data: dict, remote_host: Optional[str] = None) -> dict:
     """Record a heartbeat, renew the worker's leases, and return the commands waiting for it."""
-    from . import tagging
+    from . import insights, tagging
     from .image.queue import ImageQueue
     from .podcast.queue import TranscriptionQueue
 
@@ -114,6 +114,7 @@ def heartbeat(data: dict, remote_host: Optional[str] = None) -> dict:
     TranscriptionQueue().renew(worker_id, lease())
     ImageQueue().renew(worker_id, lease())
     tagging.renew(lease().total_seconds())
+    insights.renew(lease().total_seconds())
     return {**commands, "paused": state["paused"], "shutdown_ok": not state["stay_on"],
             "heartbeat_seconds": settings.worker_heartbeat_seconds}
 
@@ -170,7 +171,7 @@ def stop_requested() -> bool:
 
 def pending_work() -> dict:
     """Jobs waiting for the worker."""
-    from . import tagging
+    from . import insights, tagging
     from .image.queue import ImageQueue
     from .podcast.queue import TranscriptionQueue
 
@@ -179,8 +180,13 @@ def pending_work() -> dict:
     except Exception as e:  # the database mid-rewrite: count it next time
         logger.debug(f"untagged count unavailable: {e}")
         tags = 0
+    try:
+        cards = insights.pending_count()
+    except Exception as e:
+        logger.debug(f"insight count unavailable: {e}")
+        cards = 0
     counts = {"podcasts": TranscriptionQueue().get_pending_count(), "images": ImageQueue().get_pending_count(),
-              "tags": tags}
+              "tags": tags, "insights": cards}
     counts["total"] = sum(counts.values())
     return counts
 

@@ -40,6 +40,8 @@ src/zettlecast/
   identity.py        UUID frontmatter, wikilinks
   models.py          Pydantic models
   reddit.py          Reddit saves -> notes: private saved feed (RSS), thread feeds, paced client
+  insights.py        Today's cards: surprising graph links + echoes (new vs much older), picked ahead; LLM says what
+                     links them (agree/contradict/extend/apply/unrelated); verdicts; notes written from a card
   brief.py           A note at a glance (summary / image description / start; has_image; iso_date): graph + cards
   curation.py        Reddit comment curation: the user's rubric (<storage>/reddit_curation.md, Settings page) -> takeaways
   runstate.py        Run state shared across processes (<storage>/run_state.json) + stop requests; one run at a time;
@@ -217,6 +219,11 @@ GET  /graph?limit=2000                  -> {nodes: [{id,name,source_type,val,com
                                             communities: [{id,label,size}]}
 POST /graph/rebuild                     -> {edges}   (edges + communities)
 
+GET  /today                             today's insight cards (planned on the first call of the day; standalone
+                                        starts the LLM on unprepared ones in the background)
+POST /today/{key}/verdict {verdict: good|rejected}   rejected = the pair is unlinked for good
+POST /today/{key}/note {title, text}    a note of your own in <storage>/notes, [[linked]] to both
+
 GET  /podcast/status | POST /podcast/import {feed_url,limit} | POST /podcast/run {limit}
 GET  /podcast/running | POST /podcast/cancel/{episode_id}
 POST /podcast/retry | POST /podcast/sync | POST /podcast/reset-stuck
@@ -248,6 +255,7 @@ GET  /worker/input/{kind}/{job} | POST /worker/{kind}/{job}/fetched {ref}
 POST /worker/podcast/{job}/started|completed|failed | POST /worker/podcast/release
 POST /worker/image/{job}/completed|failed | POST /worker/image/release|add|remove
 POST /worker/tag/{uuid} | POST /worker/tag/release | POST /worker/link
+POST /worker/insight/{key} {insight|error} | POST /worker/insight/release {keys}
 ```
 
 ### Two machines (ROLE=primary / ROLE=worker)

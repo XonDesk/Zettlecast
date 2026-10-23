@@ -9,6 +9,7 @@ import type {
     Settings,
     SystemStatus,
     DesktopStatus,
+    TodayResponse,
 } from './types';
 
 // Calls go to /zc-api on the web UI's own server, which checks the sign-in and forwards them to
@@ -77,6 +78,13 @@ export const api = {
         }),
 
     getNoteSourceUrl: (uuid: string) => apiUrl(`/notes/${uuid}/source`),
+    // Today's insight cards
+    getToday: () => fetchAPI<TodayResponse>('/today'),
+    decideInsight: (key: string, verdict: 'good' | 'rejected') =>
+        fetchAPI<{ status: string }>(`/today/${key}/verdict`, { method: 'POST', body: JSON.stringify({ verdict }) }),
+    noteFromInsight: (key: string, title: string, text: string) =>
+        fetchAPI<{ status: string; uuid: string }>(`/today/${key}/note`, { method: 'POST', body: JSON.stringify({ title, text }) }),
+
     // small JPEG of a kept screenshot (the original is ~2 MB)
     getNoteThumbUrl: (uuid: string) => apiUrl(`/notes/${uuid}/thumb`),
 

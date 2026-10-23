@@ -32,7 +32,7 @@ from .models import NoteModel
 
 logger = logging.getLogger(__name__)
 
-KINDS = ("podcast", "image", "tag")  # claimed in this order: one GPU job at a time
+KINDS = ("podcast", "image", "tag", "insight")  # claimed in this order: one GPU job at a time
 HELD_FOLDERS = ("podcasts", "uploads")  # the primary deletes its copy of inputs in these once fetched
 
 
@@ -116,6 +116,12 @@ def claim(body: ClaimRequest):
             if notes:
                 return {"kind": kind, "rubric": curation.rubric(),
                         "items": [n.model_dump(mode="json") for n in notes]}
+        elif kind == "insight":
+            from . import insights
+
+            cards = insights.claim(limit or 20, lease.total_seconds())
+            if cards:
+                return {"kind": kind, "items": cards}
     return {"kind": None}
 
 
@@ -343,6 +349,34 @@ def tag_done(uuid: str, body: Tagged):
         return {"status": "stored"}
     tagging.failed(uuid, body.error or "failed")
     return {"status": "failed"}
+
+
+# --- Today's insight cards (insights.py) ---
+
+
+class Keys(BaseModel):
+    keys: List[str]
+
+
+@router.post("/insight/release")
+def insight_release(body: Keys):
+    from . import insights
+
+    insights.release(body.keys)
+    return {"status": "ok"}
+
+
+class InsightResult(BaseModel):
+    insight: Optional[dict] = None
+    error: str = ""
+
+
+@router.post("/insight/{key}")
+def insight_done(key: str, body: InsightResult):
+    from . import insights
+
+    insights.store(key, body.insight, None if body.insight else (body.error or "failed"))
+    return {"status": "stored" if body.insight else "failed"}
 
 
 # --- After a batch ---

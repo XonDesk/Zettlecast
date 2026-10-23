@@ -498,6 +498,55 @@ async def manage_link(
         return {"status": "rejected"}
 
 
+# --- Today's insights (insights.py) ---
+
+
+@app.get("/today")
+def get_today(token: str = Query(...)):
+    """Today's cards: graph connections worth a look, with the LLM's take once it has one."""
+    from . import insights
+
+    result = insights.today()
+    if result["preparing"] and insights.generate_in_background():  # standalone; a primary's worker claims them
+        result["generating"] = True
+    return result
+
+
+class InsightVerdict(BaseModel):
+    verdict: str  # good | rejected
+
+
+@app.post("/today/{key}/verdict")
+def decide_insight(key: str, body: InsightVerdict, token: str = Query(...)):
+    """good: worth the card; rejected: not related (the link leaves the graph for good)."""
+    from . import insights
+
+    if body.verdict not in ("good", "rejected"):
+        raise HTTPException(status_code=400, detail="verdict must be good or rejected")
+    try:
+        insights.decide(key, body.verdict)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="No such card")
+    return {"status": body.verdict}
+
+
+class InsightNote(BaseModel):
+    title: str
+    text: str
+
+
+@app.post("/today/{key}/note")
+def note_from_insight(key: str, body: InsightNote, token: str = Query(...)):
+    """A note of your own from a card, [[linked]] to both notes (in <storage>/notes)."""
+    from . import insights
+
+    try:
+        uuid = insights.write_note(key, body.title, body.text)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="No such card")
+    return {"status": "noted", "uuid": uuid}
+
+
 # --- Graph Data ---
 
 def _graph_facets(note: dict, row: dict) -> dict:
