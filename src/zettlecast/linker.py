@@ -419,6 +419,7 @@ def rebuild_graph() -> int:
     db.add_edges(edges)
     communities = detect_communities(graph, edges, db.get_communities())
     db.replace_communities(communities)
+    db.optimize()
     logger.info(f"Rebuilt graph: {len(graph.notes)} notes, {len(edges)} edges, {len(communities)} communities")
     return len(edges)
 

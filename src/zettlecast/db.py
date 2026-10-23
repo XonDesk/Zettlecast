@@ -11,6 +11,7 @@ Tables:
 """
 
 import json
+import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
@@ -22,6 +23,8 @@ import pyarrow as pa
 from .chunker import create_chunks
 from .config import settings
 from .models import NoteModel
+
+logger = logging.getLogger(__name__)
 
 DIM = settings.embedding_dimensions
 
@@ -352,6 +355,20 @@ class Database:
     def get_all_rejected_pairs(self) -> set:
         rows = self.rejected_edges.search().limit(1_000_000).to_list()
         return {(r["source_uuid"], r["target_uuid"]) for r in rows}
+
+    # --- Maintenance ---
+
+    def optimize(self, keep: timedelta = timedelta(minutes=10)) -> None:
+        """
+        Merge small data files and drop table versions older than `keep`. Every write adds a
+        version and its own files, so without this the tables grow far past their data (1.1 GB
+        for ~200 MB). Recent versions stay: another process (API server, CLI run) may be reading one.
+        """
+        for name in self.db.table_names():
+            try:
+                self.db.open_table(name).optimize(cleanup_older_than=keep)
+            except Exception as e:  # a concurrent write can win; the next rebuild tries again
+                logger.warning(f"Optimizing table {name} failed: {e}")
 
     # --- Stats ---
 
