@@ -24,7 +24,8 @@ from starlette.background import BackgroundTask
 
 from . import embeddings, llm, paths, workerstate
 from .config import ENV_FILE, settings
-from .db import db
+from .brief import has_image, iso_date, note_brief
+from .db import _q, db
 from .models import ProcessingResult
 from .parser import AUDIO_EXTENSIONS, parse_url
 from .pipeline import ingest_note, ingest_path
@@ -366,6 +367,33 @@ async def get_note_source_file(
     )
 
 
+THUMB_MAX = 720  # px, longest side: sharp at the graph's ~240 px preview on a 2x screen, ~50 KB
+
+
+@app.get("/notes/{uuid}/thumb")
+def get_note_thumbnail(uuid: str, token: str = Query(...)):
+    """
+    A small JPEG of a kept screenshot, for the graph's hover preview (originals are ~2 MB). Made
+    once into <storage>/thumbs; an image note's uuid comes from its bytes, so it never goes stale.
+    """
+    from PIL import Image, ImageOps
+
+    note = db.get_note_by_uuid(uuid)
+    if not note or not has_image(note.source_type, note.metadata.custom):
+        raise HTTPException(status_code=404, detail="No image for this note")
+    thumb = settings.storage_path / "thumbs" / f"{uuid}.jpg"
+    if not thumb.exists():
+        source = Path(note.source_path)
+        if paths.is_worker_ref(note.source_path) or not source.exists():
+            raise HTTPException(status_code=404, detail="Image file not here")
+        thumb.parent.mkdir(parents=True, exist_ok=True)
+        with Image.open(source) as image:
+            image = ImageOps.exif_transpose(image).convert("RGB")
+            image.thumbnail((THUMB_MAX, THUMB_MAX))
+            image.save(thumb, "JPEG", quality=80)
+    return FileResponse(thumb, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=604800"})
+
+
 @app.get("/notes/{uuid}/markdown")
 async def get_note_markdown(
     uuid: str,
@@ -472,18 +500,6 @@ async def manage_link(
 
 # --- Graph Data ---
 
-def _iso_date(value) -> Optional[str]:
-    """YYYY-MM-DD from an RSS date ("Wed, 27 Nov 2019 ...") or an ISO one."""
-    if not value:
-        return None
-    from email.utils import parsedate_to_datetime
-
-    try:
-        return parsedate_to_datetime(str(value)).date().isoformat()
-    except (TypeError, ValueError):
-        return str(value)[:10] if re.match(r"\d{4}-\d{2}-\d{2}", str(value)) else None
-
-
 def _graph_facets(note: dict, row: dict) -> dict:
     """What the graph view filters and colours by: topics, people, organisations, source, date."""
     from .linker import source_group
@@ -498,7 +514,7 @@ def _graph_facets(note: dict, row: dict) -> dict:
         "people": [str(p) for p in custom.get("people") or [] if p],
         "organisations": [str(o) for o in custom.get("organisations") or [] if o],
         "source": group.split(":", 1)[-1],  # show name, website host, subreddit, or type
-        "date": _iso_date(podcast.get("published")) or _iso_date((custom.get("reddit") or {}).get("created"))
+        "date": iso_date(podcast.get("published")) or iso_date((custom.get("reddit") or {}).get("created"))
                 or str(note.get("created_at") or "")[:10] or None,
         "duration": meta.get("duration_seconds"),
     }
@@ -543,6 +559,15 @@ async def get_graph_data(
     for link in links:
         for end in (link["source"], link["target"]):
             degree[end] = degree.get(end, 0) + 1
+    # what each note is, sent with the graph so hovering shows it at once; only notes without a
+    # summary or description (untagged Reddit saves...) need their text read
+    customs = {u: json.loads(d.get("metadata_json") or "{}").get("custom") or {} for u, d in details.items()}
+    briefs = {u: note_brief(custom) for u, custom in customs.items()}
+    missing = [u for u, b in briefs.items() if not b]
+    for start in range(0, len(missing), 500):
+        where = "uuid IN (" + ", ".join(_q(u) for u in missing[start:start + 500]) + ")"
+        for r in db.notes.search().where(where).select(["uuid", "metadata_json", "full_text"]).limit(100_000).to_list():
+            briefs[r["uuid"]] = note_brief(json.loads(r["metadata_json"] or "{}").get("custom") or {}, r["full_text"] or "")
     nodes = [
         {
             "id": n["uuid"],
@@ -550,6 +575,8 @@ async def get_graph_data(
             "source_type": n["source_type"],
             "val": 1 + degree.get(n["uuid"], 0),  # node size: more links, bigger node
             "community": community.get(n["uuid"]),
+            "brief": briefs.get(n["uuid"], ""),
+            "image": has_image(n["source_type"], customs.get(n["uuid"], {})),  # /notes/{uuid}/thumb
             **_graph_facets(n, details.get(n["uuid"], {})),
         }
         for n in notes

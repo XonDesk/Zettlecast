@@ -713,6 +713,83 @@ a:hover > .search-result-title,
   pointer-events: none;
 }
 
+/* The hovered note along the bottom, between the note panel (left) and the settings pane (right) */
+.graph-brief {
+  position: absolute;
+  bottom: 1rem;
+  left: 1rem;
+  right: 1rem;
+  z-index: 12;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 0.75rem 1rem;
+  background: rgba(15, 23, 42, 0.94);
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  backdrop-filter: blur(6px);
+  pointer-events: none; /* the graph under it keeps its mouse */
+  display: flex;
+  gap: 0.9rem;
+}
+.graph-brief-body { flex: 1; min-width: 0; }
+/* a screenshot whole (phone screenshots are tall): enough to recognise it */
+.graph-brief-thumb {
+  flex: none;
+  height: 220px;
+  max-width: 40%;
+  object-fit: contain;
+  border-radius: 0.375rem;
+  border: 1px solid var(--color-border);
+  background: #020617;
+}
+.graph-brief.with-panel { left: calc(340px + 2rem); }
+.graph-brief.with-pane { right: calc(330px + 2rem); }
+.graph-brief-meta {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.graph-brief-title {
+  margin-top: 0.15rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.graph-brief-text {
+  margin: 0.35rem 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: #cbd5e1;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.graph-brief-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.45rem; }
+.graph-brief-chips:empty { display: none; }
+.graph-brief-chip {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-muted);
+}
+.graph-panel-thumb {
+  max-width: 100%;
+  max-height: 360px;
+  border-radius: 0.375rem;
+  border: 1px solid var(--color-border);
+}
+.graph-panel-brief { margin: 0; font-size: 0.8125rem; line-height: 1.5; color: #cbd5e1; }
+
+@media (max-width: 700px) {
+  .graph-brief { display: none; } /* no hover on a phone: a tap opens the panel, which has the summary */
+}
+
 .graph-toolbar .btn[aria-pressed='true'] { border-color: #3987e5; color: #f8fafc; }
 
 /* Graph settings pane (slides in from the right) */
@@ -1664,3 +1741,4 @@ a.btn {
 .login-card label { display: flex; flex-direction: column; gap: 0.375rem; font-size: 0.875rem; color: var(--color-text-muted); }
 .login-card .input { font-size: 1rem; } /* 16px: phones don't zoom into the field */
 .login-error { color: var(--color-error); font-size: 0.875rem; }
+

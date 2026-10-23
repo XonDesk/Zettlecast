@@ -40,6 +40,7 @@ src/zettlecast/
   identity.py        UUID frontmatter, wikilinks
   models.py          Pydantic models
   reddit.py          Reddit saves -> notes: private saved feed (RSS), thread feeds, paced client
+  brief.py           A note at a glance (summary / image description / start; has_image; iso_date): graph + cards
   curation.py        Reddit comment curation: the user's rubric (<storage>/reddit_curation.md, Settings page) -> takeaways
   runstate.py        Run state shared across processes (<storage>/run_state.json) + stop requests; one run at a time;
                      cycle times per phase, step times, per-phase averages carried to the next run (HMI ETA)
@@ -207,10 +208,11 @@ GET  /notes?status=&source_type=&limit=&offset=   -> {notes: [{uuid,title,source
 GET  /notes/{uuid}?include_suggestions=true      -> note + metadata + suggestions (graph neighbours)
 GET  /notes/{uuid}/source               original file (audio/pdf/image), or {url} for web notes
 GET  /notes/{uuid}/markdown             note as a markdown download
+GET  /notes/{uuid}/thumb                small JPEG of a screenshot kept with its image (<storage>/thumbs)
 DELETE /notes/{uuid}
 GET  /search?q=&top_k=5&rerank=true     -> {results: [{uuid,title,score,snippet,source_type,timestamp_seconds}]}
 POST /notes/{uuid}/link {target_uuid, action: accept|reject}
-GET  /graph?limit=2000                  -> {nodes: [{id,name,source_type,val,community,tags,people,organisations,source,date,duration}],
+GET  /graph?limit=2000                  -> {nodes: [{id,name,source_type,val,community,brief,image,tags,people,organisations,source,date,duration}],
                                             links: [{source,target,value,kind}],
                                             communities: [{id,label,size}]}
 POST /graph/rebuild                     -> {edges}   (edges + communities)

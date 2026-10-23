@@ -30,20 +30,33 @@ const MIN_POINTS = 2;
 export function densityContours(points: ContourPoint[], bandwidth: number): ContourLayer[] {
     if (points.length === 0) return [];
     const pad = bandwidth * 3;
-    const xs = points.map((p) => p.x);
-    const ys = points.map((p) => p.y);
-    const [x0, y0] = [Math.min(...xs) - pad, Math.min(...ys) - pad];
-    const width = Math.ceil(Math.max(...xs) - x0 + pad);
-    const height = Math.ceil(Math.max(...ys) - y0 + pad);
-    // about 300 cells across whatever the spread (d3 rounds the cell size to a power of two)
-    const cellSize = Math.max(1, Math.round(Math.max(width, height) / 300));
+    const extent = (ps: ContourPoint[]) => {
+        let [minX, minY, maxX, maxY] = [Infinity, Infinity, -Infinity, -Infinity];
+        for (const p of ps) {
+            if (p.x < minX) minX = p.x;
+            if (p.y < minY) minY = p.y;
+            if (p.x > maxX) maxX = p.x;
+            if (p.y > maxY) maxY = p.y;
+        }
+        return { x0: minX - pad, y0: minY - pad, width: Math.ceil(maxX - minX + 2 * pad), height: Math.ceil(maxY - minY + 2 * pad) };
+    };
+    const all = extent(points);
+    // about 300 cells across the whole map (d3 rounds the cell size to a power of two)
+    const cellSize = Math.max(1, Math.round(Math.max(all.width, all.height) / 300));
 
     const groups = new Map<string, ContourPoint[]>();
-    points.forEach((p) => groups.set(p.color, [...(groups.get(p.color) ?? []), p]));
+    points.forEach((p) => {
+        const group = groups.get(p.color);
+        if (group) group.push(p);
+        else groups.set(p.color, [p]);
+    });
 
     const layers: ContourLayer[] = [];
     groups.forEach((members, color) => {
         if (members.length < MIN_POINTS) return;
+        // each group's grid covers only its own notes, at the map's resolution: a community on a
+        // tenth of the map costs a tenth (whole-map grids per group took ~0.4 s per recompute)
+        const { x0, y0, width, height } = extent(members);
         const density = contourDensity<ContourPoint>()
             .x((p) => p.x - x0)
             .y((p) => p.y - y0)

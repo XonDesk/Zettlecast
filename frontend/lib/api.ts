@@ -77,6 +77,8 @@ export const api = {
         }),
 
     getNoteSourceUrl: (uuid: string) => apiUrl(`/notes/${uuid}/source`),
+    // small JPEG of a kept screenshot (the original is ~2 MB)
+    getNoteThumbUrl: (uuid: string) => apiUrl(`/notes/${uuid}/thumb`),
 
     getNoteMarkdownUrl: (uuid: string) => apiUrl(`/notes/${uuid}/markdown`),
 

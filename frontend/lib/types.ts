@@ -71,6 +71,8 @@ export interface GraphNode {
     source: string; // podcast show, website host, or type
     date: string | null; // YYYY-MM-DD: published (podcasts) or added
     duration: number | null; // seconds (audio)
+    brief?: string; // summary, image description or the start of the note
+    image?: boolean; // a screenshot kept with its image: api.getNoteThumbUrl
 }
 
 export interface GraphLink {
@@ -265,3 +267,4 @@ export interface SystemStatus {
     alarms: Alarm[];
     limits: { vram_warn: number; vram_alarm: number };
 }
+

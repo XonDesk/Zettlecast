@@ -4,17 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import Graph from 'graphology';
-import {
-    forceCollide,
-    forceLink,
-    forceManyBody,
-    forceSimulation,
-    forceX,
-    forceY,
-    type Simulation,
-    type SimulationLinkDatum,
-    type SimulationNodeDatum,
-} from 'd3-force';
 import Sigma from 'sigma';
 import type { NodeHoverDrawingFunction } from 'sigma/rendering';
 import { createNodeBorderProgram } from '@sigma/node-border';
@@ -23,6 +12,7 @@ import { compileQuery } from '@/lib/graphQuery';
 import type { GraphData, GraphNode, LinkSuggestion, SearchResult } from '@/lib/types';
 import { formatTimestamp } from '@/lib/utils';
 import { type ContourLayer, type ContourPoint, densityContours, drawContours } from './graphContours';
+import { type LayoutMessage, type LayoutRequest, mulberry32, seedPositions, type SimNode } from './graphForces';
 import GraphPane, {
     type CommunityInsight,
     type Facets,
@@ -58,7 +48,7 @@ const RING_LEGEND = [{ label: 'podcast', color: 'transparent', size: 0 }, RINGS.
 const TYPE_LABELS: Record<string, string> = { audio: 'podcast', pdf: 'PDF', markdown: 'note', web: 'web page', image: 'image', reddit: 'Reddit save' };
 const SETTINGS_KEY = 'zettlecast.graph.settings.v2'; // v2: d3 forces
 const MAX_INSIGHT_CHIPS = 6;
-const CONTOUR_INTERVAL = 150; // ms between contour recomputes while the layout moves
+const CONTOUR_INTERVAL = 1000; // ms between contour recomputes while the layout moves (again when it rests)
 const LAYOUT_KEY = 'zettlecast.graph.layout.v1'; // last settled positions, so reopening skips the pre-layout
 const PRELAYOUT_TICKS = 300;
 const PRELAYOUT_TICKS_CACHED = 40; // most notes start where they were: settle only the new ones in
@@ -176,17 +166,6 @@ function passageText(text: string): string {
     return text.replace(/^\s*\[[\d.]+s(?:\s*-\s*[\d.]+s)?\]\s*/, '');
 }
 
-// Small seeded PRNG so the starting layout (and so the final one) is the same on every load
-function mulberry32(seed: number) {
-    return () => {
-        seed |= 0;
-        seed = (seed + 0x6d2b79f5) | 0;
-        let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-}
-
 function loadSettings(): GraphSettings {
     try {
         const saved = window.localStorage.getItem(SETTINGS_KEY);
@@ -194,91 +173,6 @@ function loadSettings(): GraphSettings {
     } catch {
         return mergeSettings(null);
     }
-}
-
-interface SimNode extends SimulationNodeDatum {
-    id: string;
-    community: number | null;
-    size: number;
-}
-
-interface SimLink extends SimulationLinkDatum<SimNode> {
-    value: number;
-    inside: boolean; // both ends in the same community
-}
-
-/** Pulls each note towards its community's centre (Obsidian has no such force; it's what groups them) */
-function communityForce() {
-    let nodes: SimNode[] = [];
-    let strength = 0;
-    const force = (alpha: number) => {
-        const sums = new Map<number, { x: number; y: number; n: number }>();
-        for (const n of nodes) {
-            if (n.community === null) continue;
-            const c = sums.get(n.community) ?? { x: 0, y: 0, n: 0 };
-            sums.set(n.community, { x: c.x + n.x!, y: c.y + n.y!, n: c.n + 1 });
-        }
-        for (const n of nodes) {
-            const c = n.community === null ? undefined : sums.get(n.community);
-            if (!c || c.n < 2) continue;
-            n.vx! += (c.x / c.n - n.x!) * strength * alpha;
-            n.vy! += (c.y / c.n - n.y!) * strength * alpha;
-        }
-    };
-    force.initialize = (ns: SimNode[]) => {
-        nodes = ns;
-    };
-    force.strength = (k: number) => {
-        strength = k;
-        return force;
-    };
-    return force;
-}
-
-function createSimulation(): Simulation<SimNode, SimLink> {
-    return forceSimulation<SimNode, SimLink>()
-        .force('link', forceLink<SimNode, SimLink>().id((d) => d.id))
-        .force('charge', forceManyBody<SimNode>().distanceMax(600))
-        .force('x', forceX<SimNode>(0))
-        .force('y', forceY<SimNode>(0))
-        .force('collide', forceCollide<SimNode>())
-        .force('community', communityForce())
-        .stop();
-}
-
-/** Apply the pane's forces (and node sizes, for collisions) to the simulation */
-function applyForces(sim: Simulation<SimNode, SimLink>, forces: GraphSettings['forces'], nodeSize: number): void {
-    const links = (sim.force('link') as ReturnType<typeof forceLink<SimNode, SimLink>>);
-    const degree = new Map<string, number>();
-    links.links().forEach((l) => [l.source, l.target].forEach((end) => {
-        const id = typeof end === 'object' ? end.id : String(end);
-        degree.set(id, (degree.get(id) ?? 0) + 1);
-    }));
-    const deg = (end: SimNode | string | number) => degree.get(typeof end === 'object' ? end.id : String(end)) ?? 1;
-    // links across communities weaken as the community pull grows, so groups can separate
-    const across = 1 / (1 + 10 * forces.communityPull);
-    links
-        .distance(forces.distance)
-        // d3's default strength (1 / smaller degree, here its root: hubs hold their notes closer)
-        .strength((l) => (forces.link * (l.inside ? 1 : across) * (0.5 + l.value)) / Math.sqrt(Math.min(deg(l.source), deg(l.target))));
-    (sim.force('charge') as ReturnType<typeof forceManyBody<SimNode>>).strength(-forces.repel);
-    (sim.force('x') as ReturnType<typeof forceX<SimNode>>).strength(forces.center);
-    (sim.force('y') as ReturnType<typeof forceY<SimNode>>).strength(forces.center);
-    (sim.force('collide') as ReturnType<typeof forceCollide<SimNode>>).radius((n) => n.size * nodeSize + 2);
-    (sim.force('community') as ReturnType<typeof communityForce>).strength(forces.communityPull);
-}
-
-/** Start each community around its own point on a circle */
-function seedPositions(nodes: SimNode[]): void {
-    const order = [...new Set(nodes.map((n) => n.community ?? -1))];
-    const random = mulberry32(42);
-    nodes.forEach((n) => {
-        const angle = (2 * Math.PI * order.indexOf(n.community ?? -1)) / Math.max(order.length, 1);
-        n.x = Math.cos(angle) * 300 + (random() - 0.5) * 60;
-        n.y = Math.sin(angle) * 300 + (random() - 0.5) * 60;
-        n.vx = 0;
-        n.vy = 0;
-    });
 }
 
 type LayoutCache = Record<string, [number, number]>;
@@ -291,9 +185,11 @@ function loadLayout(): LayoutCache {
     }
 }
 
-function saveLayout(nodes: Iterable<SimNode>): void {
+function saveLayout(positions: Map<string, [number, number]>): void {
     const out: LayoutCache = {};
-    for (const n of nodes) if (Number.isFinite(n.x) && Number.isFinite(n.y)) out[n.id] = [Math.round(n.x!), Math.round(n.y!)];
+    positions.forEach(([x, y], id) => {
+        if (Number.isFinite(x) && Number.isFinite(y)) out[id] = [Math.round(x), Math.round(y)];
+    });
     try {
         window.localStorage.setItem(LAYOUT_KEY, JSON.stringify(out));
     } catch {
@@ -331,6 +227,8 @@ function nodeAttributes(n: GraphNode) {
     const ring = RINGS[n.source_type];
     return {
         label: n.name,
+        brief: n.brief ?? '', // what the note is: the hover bar and the panel show it
+        image: n.image ?? false,
         sourceType: n.source_type,
         community: n.community,
         tags: n.tags ?? [],
@@ -513,13 +411,21 @@ export default function KnowledgeGraph() {
     const [settings, setSettings] = useState<GraphSettings>(loadSettings);
     const [paneOpen, setPaneOpen] = useState(true);
     const [visibleCount, setVisibleCount] = useState({ nodes: 0, links: 0 });
+    // kept screenshots' thumbnails, loaded once the graph is up so hovering shows them at once
+    // (held here so the browser keeps them decoded)
+    const thumbs = useRef(new Map<string, HTMLImageElement>());
 
     const view = useMemo(() => new Graph({ type: 'undirected' }), []);
     const full = useMemo(() => (data ? buildFullGraph(data) : null), [data]);
-    // layout state per note (position, velocity, pinned while dragged), kept for notes filtered
-    // out so they come back where they were
-    const sim = useMemo(() => createSimulation(), []);
-    const simNodes = useRef(new Map<string, SimNode>());
+    // the force layout runs in a worker (graphLayout.worker.ts); the page keeps the latest position
+    // of every note, filtered out or not, so a note comes back where it was
+    const layout = useRef<Worker | null>(null);
+    const layoutIds = useRef<string[]>([]); // order of the worker's positions
+    const positions = useRef(new Map<string, [number, number]>());
+    const pendingXY = useRef<{ xy: Float32Array | null; frame: number }>({ xy: null, frame: 0 });
+    // the graph whose first layout is done: the view and the renderer wait for it
+    const [laidOut, setLaidOut] = useState<Graph | null>(null);
+    const layoutFor = useRef<Graph | null>(null);
     const drag = useRef({ node: null as string | null, moved: false, fitOnEnd: false });
     // density contours: recomputed (at most every CONTOUR_INTERVAL ms) when the layout or what
     // they show changes, redrawn on every frame for the camera
@@ -581,50 +487,84 @@ export default function KnowledgeGraph() {
         renderer.getCamera().animatedReset({ duration: 400 });
     }, []);
 
-    // --- Live layout (d3-force): runs while it has energy, then rests ---
+    // --- Force layout (graphLayout.worker.ts): runs while it has energy, then rests ---
+
+    const postLayout = useCallback((request: LayoutRequest) => layout.current?.postMessage(request), []);
 
     useEffect(() => {
-        sim.on('tick', () => {
-            const nodes = simNodes.current;
+        const worker = new Worker(new URL('./graphLayout.worker.ts', import.meta.url));
+        layout.current = worker;
+        const pending = pendingXY.current;
+        // positions as they come, applied at most once per frame (each apply makes sigma
+        // re-upload every note and link)
+        const take = () => {
+            const xy = pending.xy;
+            if (!xy) return;
+            pending.xy = null;
+            layoutIds.current.forEach((id, i) => positions.current.set(id, [xy[2 * i], xy[2 * i + 1]]));
+        };
+        const apply = () => {
+            pending.frame = 0;
+            take();
             view.updateEachNodeAttributes((node, a) => {
-                const n = nodes.get(node);
-                return n ? { ...a, x: n.x, y: n.y } : a;
+                const p = positions.current.get(node);
+                return p ? { ...a, x: p[0], y: p[1] } : a;
             }, { attributes: ['x', 'y'] });
             contours.current.dirty = true;
-        });
-        sim.on('end', () => {
-            saveLayout(simNodes.current.values());
-            if (drag.current.fitOnEnd) {
-                drag.current.fitOnEnd = false;
-                fit();
-            }
-        });
-        return () => {
-            sim.stop();
-            sim.on('tick', null).on('end', null);
         };
-    }, [sim, view, fit]);
+        worker.onmessage = (event: MessageEvent<LayoutMessage>) => {
+            const m = event.data;
+            if (m.type === 'positions') {
+                pending.xy = m.xy;
+                if (!pending.frame) pending.frame = requestAnimationFrame(apply);
+            } else if (m.type === 'ready') {
+                take();
+                saveLayout(positions.current);
+                setLaidOut(layoutFor.current);
+            } else if (m.type === 'end') {
+                if (pending.frame) {
+                    cancelAnimationFrame(pending.frame);
+                    apply();
+                }
+                saveLayout(positions.current);
+                // contours for where the notes came to rest, without waiting out the interval
+                contours.current.dirty = true;
+                contours.current.last = 0;
+                sigmaRef.current?.scheduleRender();
+                if (drag.current.fitOnEnd) {
+                    drag.current.fitOnEnd = false;
+                    fit();
+                }
+            }
+        };
+        return () => {
+            cancelAnimationFrame(pending.frame);
+            pending.frame = 0;
+            worker.terminate();
+            layout.current = null;
+        };
+    }, [view, fit]);
 
     // Lay every note out once, before the first frame, so the graph opens settled
     useEffect(() => {
         if (!full) return;
         const nodes = full.mapNodes((id, a) => ({ id, community: a.community ?? null, size: a.size } as SimNode));
         seedPositions(nodes);
-        simNodes.current = new Map(nodes.map((n) => [n.id, n]));
-        const prelayout = createSimulation().nodes(nodes);
-        const byId = simNodes.current;
-        (prelayout.force('link') as ReturnType<typeof forceLink<SimNode, SimLink>>).links(
-            full.mapEdges((_, a, source, target) => ({
-                source, target, value: a.value as number,
-                inside: byId.get(source)!.community !== null && byId.get(source)!.community === byId.get(target)!.community,
-            })),
-        );
-        applyForces(prelayout, settings.forces, settings.display.nodeSize);
         // reopening: most notes have their last positions, so a short settle replaces the full layout
         const known = restorePositions(nodes, (id) => full.neighbors(id));
         const cached = known >= 0.8 * nodes.length;
-        prelayout.alpha(cached ? 0.3 : 1).tick(cached ? PRELAYOUT_TICKS_CACHED : PRELAYOUT_TICKS);
-        saveLayout(nodes);
+        layoutIds.current = nodes.map((n) => n.id);
+        positions.current = new Map(nodes.map((n) => [n.id, [n.x!, n.y!]]));
+        layoutFor.current = full;
+        postLayout({
+            type: 'init',
+            nodes,
+            links: full.mapEdges((_, a, source, target) => ({ source, target, value: a.value as number })),
+            forces: settings.forces,
+            nodeSize: settings.display.nodeSize,
+            alpha: cached ? 0.3 : 1,
+            ticks: cached ? PRELAYOUT_TICKS_CACHED : PRELAYOUT_TICKS,
+        });
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [full]);
 
@@ -633,15 +573,14 @@ export default function KnowledgeGraph() {
     // the selection changes the visible notes only in neighbourhood mode
     const localCentre = settings.filter.local ? selected : null;
     useEffect(() => {
-        if (!full) return;
+        if (!full || laidOut !== full) return;
         const { nodes, edges } = visibleSet(full, settings.filter, localCentre);
-        const layout = simNodes.current;
         const changed = view.order > 0;
         view.forEachNode((node) => !nodes.has(node) && view.dropNode(node));
         nodes.forEach((node) => {
             if (!view.hasNode(node)) {
-                const n = layout.get(node);
-                view.addNode(node, { ...full.getNodeAttributes(node), x: n?.x ?? 0, y: n?.y ?? 0 });
+                const [x, y] = positions.current.get(node) ?? [0, 0];
+                view.addNode(node, { ...full.getNodeAttributes(node), x, y });
             }
         });
         view.forEachEdge((edge) => !edges.has(edge) && view.dropEdge(edge));
@@ -653,33 +592,27 @@ export default function KnowledgeGraph() {
         });
         setVisibleCount({ nodes: view.order, links: view.size });
 
-        sim.nodes(view.mapNodes((node) => layout.get(node)!));
-        (sim.force('link') as ReturnType<typeof forceLink<SimNode, SimLink>>).links(
-            view.mapEdges((_, a, source, target) => ({
-                source, target, value: a.value as number,
-                inside: layout.get(source)!.community !== null && layout.get(source)!.community === layout.get(target)!.community,
-            })),
-        );
-        applyForces(sim, settings.forces, settings.display.nodeSize);
         if (changed) {
             // the remaining notes regroup, then the camera frames them
             drag.current.fitOnEnd = true;
-            sim.alpha(0.5).restart();
-        } else {
-            sim.alpha(0.05).restart();
         }
-        // forces and sizes are applied by their own effect
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [full, view, sim, settings.filter, localCentre]);
+        postLayout({
+            type: 'view',
+            ids: view.nodes(),
+            links: view.mapEdges((_, a, source, target) => ({ source, target, value: a.value as number })),
+            // first show: the pre-layout has placed every note, so nothing moves until asked (a live
+            // settle here ran ~170 steps, each one re-uploading every note and link: seconds of stutter)
+            alpha: changed ? 0.5 : null,
+        });
+    }, [full, laidOut, view, settings.filter, localCentre, postLayout]);
 
     useEffect(() => {
-        applyForces(sim, settings.forces, settings.display.nodeSize);
-        if (sim.nodes().length) sim.alpha(Math.max(sim.alpha(), 0.3)).restart();
-    }, [sim, settings.forces, settings.display.nodeSize]);
+        postLayout({ type: 'forces', forces: settings.forces, nodeSize: settings.display.nodeSize });
+    }, [settings.forces, settings.display.nodeSize, postLayout]);
 
-    // Create the renderer once the data is in
+    // Create the renderer once the first layout is done
     useEffect(() => {
-        if (!full || !containerRef.current) return;
+        if (!full || laidOut !== full || !containerRef.current) return;
         const renderer = new Sigma(view, containerRef.current, {
             nodeProgramClasses: { ring: NodeRingProgram },
             labelColor: { color: '#e2e8f0' },
@@ -723,32 +656,25 @@ export default function KnowledgeGraph() {
 
         // drag a note: it stays under the pointer and the layout follows it
         renderer.on('downNode', ({ node }) => {
-            const n = simNodes.current.get(node);
-            if (!n) return;
+            const p = positions.current.get(node);
+            if (!p) return;
             state.node = node;
             state.moved = false;
-            n.fx = n.x;
-            n.fy = n.y;
-            sim.alphaTarget(0.3).restart();
+            postLayout({ type: 'drag', id: node, x: p[0], y: p[1] });
         });
         renderer.on('moveBody', ({ event }) => {
-            const n = state.node ? simNodes.current.get(state.node) : undefined;
-            if (!n) return;
+            if (!state.node) return;
             const pos = renderer.viewportToGraph(event);
-            n.fx = pos.x;
-            n.fy = pos.y;
+            postLayout({ type: 'drag', id: state.node, x: pos.x, y: pos.y });
             state.moved = true;
             event.preventSigmaDefault();
             event.original.preventDefault();
             event.original.stopPropagation();
         });
         const release = () => {
-            const n = state.node ? simNodes.current.get(state.node) : undefined;
+            if (!state.node) return;
+            postLayout({ type: 'release', id: state.node });
             state.node = null;
-            if (!n) return;
-            n.fx = null;
-            n.fy = null;
-            sim.alphaTarget(0);
         };
         renderer.on('upNode', release);
         renderer.on('upStage', release);
@@ -805,7 +731,7 @@ export default function KnowledgeGraph() {
             renderer.kill();
             sigmaRef.current = null;
         };
-    }, [full, view, sim, communities, router]);
+    }, [full, laidOut, view, postLayout, communities, router]);
 
     // --- Appearance: colours, sizes, highlight ---
 
@@ -836,16 +762,22 @@ export default function KnowledgeGraph() {
 
     useEffect(() => {
         contourInput.current = {
+            ...contourInput.current,
             enabled: settings.display.contours,
             bandwidth: settings.display.contourBandwidth,
-            dim: !!(hovered || selected),
             focusCommunity,
             colorOf,
         };
         contours.current.dirty = true;
         sigmaRef.current?.scheduleRender();
-    }, [settings.display.contours, settings.display.contourBandwidth, hovered, selected, focusCommunity, colorOf,
-        settings.filter, full]);
+    }, [settings.display.contours, settings.display.contourBandwidth, focusCommunity, colorOf, settings.filter, full]);
+
+    // hovering or selecting a note only fades the contours: no recompute
+    const contourDim = !!(hovered || selected);
+    useEffect(() => {
+        contourInput.current.dim = contourDim;
+        sigmaRef.current?.scheduleRender();
+    }, [contourDim]);
 
     useEffect(() => {
         const renderer = sigmaRef.current;
@@ -887,7 +819,17 @@ export default function KnowledgeGraph() {
             }
             return shown;
         });
-    }, [view, full, hovered, selected, focusCommunity, settings, colorOf, hitNodes]);
+    }, [view, full, laidOut, hovered, selected, focusCommunity, settings, colorOf, hitNodes]);
+
+    useEffect(() => {
+        if (!laidOut) return;
+        laidOut.forEachNode((node, a) => {
+            if (!a.image || thumbs.current.has(node)) return;
+            const img = new Image();
+            img.src = api.getNoteThumbUrl(node);
+            thumbs.current.set(node, img);
+        });
+    }, [laidOut]);
 
     // Why the selected note links to each neighbour (shared people/topics, matching passage)
     useEffect(() => {
@@ -970,15 +912,23 @@ export default function KnowledgeGraph() {
 
     // Obsidian's "Animate": scatter the visible notes and watch them find their places
     const animate = () => {
-        seedPositions(sim.nodes());
+        postLayout({ type: 'animate' });
         drag.current.fitOnEnd = true;
         fit();
-        sim.alpha(1).restart();
     };
 
     const selectedAttrs = selected && full?.hasNode(selected) ? full.getNodeAttributes(selected) : null;
     const selectedLinks = links && links.uuid === selected ? links.items : null;
     const selectedCommunity = selectedAttrs ? communities.find((c) => c.id === selectedAttrs.community) : undefined;
+    const hoveredAttrs = hovered && hovered !== selected && full?.hasNode(hovered) ? full.getNodeAttributes(hovered) : null;
+
+    /** "podcast · Lactate threshold · 2024-03-02 · 64 min" */
+    const noteMeta = (a: Record<string, unknown>) => [
+        TYPE_LABELS[a.sourceType as string] ?? a.sourceType,
+        communities.find((c) => c.id === a.community)?.label,
+        typeof a.date === 'string' ? a.date.slice(0, 10) : null,
+        typeof a.duration === 'number' && a.duration > 0 ? `${Math.round(a.duration / 60)} min` : null,
+    ].filter(Boolean).join(' · ');
 
     const legend = (
         <div className="gp-legend">
@@ -1082,7 +1032,7 @@ export default function KnowledgeGraph() {
                     <p>Add some content to see your knowledge graph!</p>
                 </div>
             )}
-            {!error && !data && <div className="graph-loading">Loading graph...</div>}
+            {!error && (!data || laidOut !== full) && <div className="graph-loading">Loading graph...</div>}
 
             <div ref={containerRef} className="graph-canvas" />
 
@@ -1102,7 +1052,27 @@ export default function KnowledgeGraph() {
                 </div>
             )}
 
-            <div className="graph-hint">Drag notes · click to see why they link · double-click to open</div>
+            {hoveredAttrs ? (
+                // the note under the pointer, without leaving the graph (click keeps it in the panel)
+                <div className={`graph-brief${selectedAttrs ? ' with-panel' : ''}${paneOpen ? ' with-pane' : ''}`}>
+                    {hoveredAttrs.image && (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img className="graph-brief-thumb" src={api.getNoteThumbUrl(hovered!)} alt=""
+                             onError={(e) => { e.currentTarget.style.display = 'none'; }} />
+                    )}
+                    <div className="graph-brief-body">
+                        <div className="graph-brief-meta" style={{ color: colorOf(hoveredAttrs) }}>{noteMeta(hoveredAttrs)}</div>
+                        <div className="graph-brief-title">{hoveredAttrs.label}</div>
+                        <p className="graph-brief-text">{hoveredAttrs.brief as string}</p>
+                        <div className="graph-brief-chips">
+                            {[...(hoveredAttrs.people as string[]).slice(0, 3), ...(hoveredAttrs.tags as string[]).slice(0, 5)]
+                                .map((v, i) => <span key={`${i}-${v}`} className="graph-brief-chip">{v}</span>)}
+                        </div>
+                    </div>
+                </div>
+            ) : (
+                <div className="graph-hint">Drag notes · click to see why they link · double-click to open</div>
+            )}
 
             {data && (
                 <GraphPane
@@ -1130,6 +1100,12 @@ export default function KnowledgeGraph() {
                         {selectedCommunity ? ` · ${selectedCommunity.label}` : ''}
                     </div>
                     <h2 className="graph-panel-title">{selectedAttrs.label}</h2>
+                    {selectedAttrs.image && (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img className="graph-panel-thumb" src={api.getNoteThumbUrl(selected!)} alt=""
+                             onError={(e) => { e.currentTarget.style.display = 'none'; }} />
+                    )}
+                    <p className="graph-panel-brief">{selectedAttrs.brief as string}</p>
                     <div className="graph-panel-actions">
                         <Link href={`/notes/${selected}`} className="btn btn-primary">Open note</Link>
                         <button className="btn btn-secondary" onClick={() => setSelected(null)}>Close</button>
