@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from .. import statefile
 from ..config import settings
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,7 @@ def _load() -> dict:
 def _save(state: dict) -> None:
     path = state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
+    tmp = statefile.tmp_path(path)
     tmp.write_text(json.dumps(state, indent=1), encoding="utf-8")
     # on Windows the replace fails while anyone has the file open (a reader in another process);
     # readers are quick, so wait for them rather than lose the decision

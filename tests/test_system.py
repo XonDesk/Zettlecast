@@ -39,3 +39,20 @@ def test_dead_run_stuck_items_failed_and_llm_down():
 def test_low_disk_and_stop_request():
     found = ids(alarms({"phase": "enhance", "alive": True, "stop_requested": True}, None, LLM_UP, queue(), 3))
     assert {("disk", "high"), ("stopping", "low")} <= found
+
+
+def test_ingests_are_tracked_while_they_run():
+    from zettlecast import system
+
+    system.web_run.update(in_flight=[], recent=[])
+    with system.tracking_ingest("web", "example.com") as item:
+        assert [i["title"] for i in system.web_run["in_flight"]] == ["example.com"]
+        item["status"] = "success"
+    assert system.web_run["in_flight"] == []
+    assert [(r["kind"], r["status"]) for r in system.web_run["recent"]] == [("web", "success")]
+    try:
+        with system.tracking_ingest("pdf", "paper.pdf"):
+            raise ValueError("unreadable")
+    except ValueError:
+        pass
+    assert system.web_run["in_flight"] == [] and system.web_run["recent"][-1]["status"] == "failed"

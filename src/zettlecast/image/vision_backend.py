@@ -41,7 +41,10 @@ Analyse the image and return JSON with:
   "type" (media: book, film, show, podcast, album, song, video, game, article, course;
   place: restaurant, bar, cafe, shop, park, trail, beach, museum, hotel, city, venue...),
   "where" (place: address, area, city, country - as precise as the image or your knowledge allows;
-  product: the shop or site), "price" (product: with currency, as shown)
+  product: the shop or site), "price" (product: with currency, as shown),
+  "why" (one sentence: what is said about the thing - why it's recommended, who or what it's good
+  for, any tip that comes with it - written about the thing itself, never about who said it: "Puts
+  taper nerves to rest: running less before an ultra is normal", not "A user recommends it")
 - "kind": "screenshot" (of an app, website, chat, document or social feed), "photo", or "other"
 - "focus": for a screenshot, the one piece of content it was most likely taken for, copied word
   for word: usually a single post, comment, reply, message or paragraph - the one that is
@@ -52,17 +55,23 @@ Analyse the image and return JSON with:
 - "context": for a screenshot, one sentence: the app or site, who wrote the focus (name or
   handle) and what it replies to or sits under. Empty otherwise.
 - "title": 4-10 words naming what was kept (the item's name when there is one), for a note title
-- "description": 2-3 specific, factual sentences about the focus content, or for a photo the main
-  subject, setting and notable details
-- "detected_text": ALL visible text (signs, documents, UI, captions), preserving line breaks;
-  "No text detected." if there is none
+- "description": 2-3 specific sentences on the substance: what the thing, idea or tip is and what
+  is said about it. Never describe the screenshot, the app or who posted it ("A Reddit comment...",
+  "a user suggests..."): "context" has that. For a photo: the main subject, setting and details.
+- "detected_text": the readable text, preserving line breaks; "No text detected." if there is
+  none. For a photo or a document: all of it (signs, labels, captions, pages). For a screenshot:
+  the content, not the app - one block per post, comment or message, blocks separated by a blank
+  line, the author's name or handle alone on the block's first line (add " OP" if marked), each
+  paragraph on one line rather than broken where the screen wraps it. Leave out the status bar
+  (clock, battery, network), buttons and prompts (Reply, Share, Follow, Add a comment, Send
+  message), vote, like, view and comment counts, "17h" / "2 days ago" times, and ads.
 - "concepts": 5-7 lowercase key topics of the focus content (or the image). No names of people or
   organisations.
 - "people": full names of people who matter to the focus content (or shown in the image)
 - "organisations": organisations, companies, products, races or events the focus content names"""
 
 SAVED_AS = ["media", "quote", "idea", "tip", "place", "product", "recipe", "reference", "other"]
-ITEM_FIELDS = ["name", "by", "type", "where", "price"]
+ITEM_FIELDS = ["name", "by", "type", "where", "price", "why"]
 
 VISION_SCHEMA = {
     "type": "object",

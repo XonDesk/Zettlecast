@@ -99,12 +99,66 @@ function since(iso?: string | null, now = Date.now()): string {
     return h ? `${h}:${pad(m)}:${pad(s % 60)}` : `${m}:${pad(s % 60)}`;
 }
 
-/** Seconds per image so far and seconds left (from the run's own pace, server start included). */
-function imagePace(img: SystemStatus['images'], now: number): { per: number | null; left: number | null } {
-    if (!img?.is_running || !img.started_at || !img.processed_count) return { per: null, left: null };
-    const per = (now - new Date(img.started_at).getTime()) / 1000 / img.processed_count;
-    const remaining = Math.max(0, img.total - img.processed_count - img.error_count);
-    return { per, left: img.phase === 'reading' ? remaining * per : null };
+interface Pace {
+    per: number | null; // seconds per item (parallel slots included: items finished per second, inverted)
+    samples: number; // finishes the rolling pace is from (0: since the run started)
+    left: number | null; // seconds until the last item is done
+}
+
+const PACE_WINDOW = 12; // finishes in the rolling pace
+
+/**
+ * Pace from when the last items finished; until there are a few, from the start of the run
+ * (which includes starting the LLM server). The time since the last finish counts towards the next.
+ */
+function paceOf(doneTimes: string[] | undefined, startedAt: string | null | undefined, done: number, total: number,
+                now: number, minSamples = 4): Pace {
+    const times = (doneTimes ?? []).slice(-PACE_WINDOW).map((t) => new Date(t).getTime());
+    let per: number | null = null;
+    let samples = 0;
+    if (times.length >= minSamples) {
+        per = (times[times.length - 1] - times[0]) / 1000 / (times.length - 1);
+        samples = times.length;
+    } else if (done && startedAt) {
+        per = (now - new Date(startedAt).getTime()) / 1000 / done;
+    }
+    if (per === null) return { per, samples, left: null };
+    const sinceLast = times.length ? (now - times[times.length - 1]) / 1000 : 0;
+    return { per, samples, left: Math.max(0, Math.max(0, total - done) * per - Math.min(sinceLast, per)) };
+}
+
+/** The image run: reading pace, then the one graph rebuild (as long as the last one took). */
+function imageTiming(img: SystemStatus['images'], graphAverage: number | undefined, now: number) {
+    const none = { pace: { per: null, samples: 0, left: null } as Pace, link: null as number | null, left: null as number | null };
+    if (!img?.is_running) return none;
+    const link = img.link_seconds ?? graphAverage ?? null;
+    if (img.phase === 'linking') {
+        const took = img.phase_started_at ? (now - new Date(img.phase_started_at).getTime()) / 1000 : 0;
+        return { ...none, link, left: link === null ? null : Math.max(0, link - took) };
+    }
+    const pace = paceOf(img.done_times, img.started_at, img.processed_count + img.error_count, img.total, now);
+    return { pace, link, left: pace.left === null ? null : pace.left + (link ?? 0) };
+}
+
+/** Pages and documents being added: each as long as the recent ones of its kind took. */
+function webTiming(web: SystemStatus['web'], now: number): { left: number | null; average: number | null; samples: number } {
+    const recent = (web?.recent ?? []).filter((r) => r.status === 'success');
+    const avgOf = (rows: typeof recent) => rows.length ? rows.reduce((a, r) => a + r.seconds, 0) / rows.length : null;
+    const inFlight = web?.in_flight ?? [];
+    const average = avgOf(recent);
+    if (!inFlight.length) return { left: null, average, samples: recent.length };
+    let left: number | null = null;
+    for (const item of inFlight) {
+        const avg = avgOf(recent.filter((r) => r.kind === item.kind)) ?? average;
+        if (avg === null) continue;
+        const remaining = Math.max(0, avg - (now - new Date(item.started_at).getTime()) / 1000);
+        left = Math.max(left ?? 0, remaining); // added side by side
+    }
+    return { left, average, samples: recent.length };
+}
+
+function clockAt(now: number, seconds: number | null): string {
+    return seconds === null ? '' : new Date(now + seconds * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
 function gb(mib?: number | null): string {
@@ -198,6 +252,17 @@ function Mimic({ s, now, eta }: { s: SystemStatus; now: number; eta: string }) {
     const tri = s.triage;
     const kept = tri ? (tri.decided.keep ?? 0) + (tri.decided.keep_image ?? 0) : null;
     const imgTankH = 74;
+    const imgEta = clockAt(now, imageTiming(img, run.averages?.graph, now).left);
+    const web = s.web;
+    const webT = webTiming(web, now);
+    const rp = s.reddit?.progress;
+    const redditOn = !!rp?.running;
+    const redditEta = redditOn && rp!.total ? clockAt(now, paceOf(rp!.done_times, null, rp!.done, rp!.total, now, 2).left) : '';
+    const adding = web?.in_flight ?? [];
+    const webLabel = [
+        adding.length ? `ADDING ${adding.length}${webT.left !== null ? ` · ETA ${clockAt(now, webT.left)}` : ''}` : '',
+        redditOn ? `REDDIT ${rp!.phase === 'tag' ? 'TAGGING' : 'SYNC'} ${rp!.done}/${rp!.total || '?'}${redditEta ? ` · ETA ${redditEta}` : ''}` : '',
+    ].filter(Boolean).join(' · ');
     const imgLevel = Math.min(1, (imgQ.pending ?? 0) / Math.max(1, s.queues.images.total)) * (imgTankH - 4);
     const q = s.queues.podcast.by_status;
     const total = Math.max(1, s.queues.podcast.total);
@@ -331,7 +396,7 @@ function Mimic({ s, now, eta }: { s: SystemStatus; now: number; eta: string }) {
             {/* Row 3: screenshots -> sorting -> image queue -> vision -> store (linked by one rebuild at the end) */}
             <g data-group="images">
             <text className="frame-label" x={30} y={348}>
-                IMAGES{img?.is_running ? ` · ${linking ? 'LINKING' : `READING ${img.processed_count}/${img.total}`}${img.stop_requested ? ' · STOPPING' : ''}` : ''}
+                IMAGES{img?.is_running ? ` · ${linking ? 'LINKING' : `READING ${img.processed_count}/${img.total}`}${img.stop_requested ? ' · STOPPING' : ''}${imgEta ? ` · ETA ${imgEta}` : ''}` : ''}
             </text>
             <g className="unit idle" transform="translate(20 370)">
                 <rect className="body" width={110} height={54} />
@@ -375,13 +440,17 @@ function Mimic({ s, now, eta }: { s: SystemStatus; now: number; eta: string }) {
 
             {/* Row 4: web and documents into the store */}
             <g data-group="io">
-            <text className="frame-label" x={30} y={478}>WEB & DOCUMENTS</text>
-            <Unit x={20} y={486} name="FETCH" note="web · PDF · md" state="idle" />
-            <path className="pipe" d="M130 513 H158" markerEnd="url(#hmi-arrow)" />
-            <Unit x={160} y={486} name="PARSE" note="Trafilatura · Marker" state="idle" />
-            <path className="pipe" d="M270 513 H298" markerEnd="url(#hmi-arrow)" />
-            <Unit x={300} y={486} name="ENRICH" note="LLM tags" state="idle" />
-            <path className="pipe" d="M410 513 H1015 V320" markerEnd="url(#hmi-arrow)" />
+            <text className="frame-label" x={30} y={478}>WEB & DOCUMENTS{webLabel ? ` · ${webLabel}` : ''}</text>
+            <Unit x={20} y={486} name="FETCH" note="web · PDF · md"
+                  state={adding.length || (redditOn && rp!.phase !== 'tag') ? 'running' : 'idle'}
+                  value={adding.length ? adding[0].title.slice(0, 16) : redditOn && rp!.phase !== 'tag' ? 'Reddit saves' : undefined} />
+            <path className={`pipe ${adding.length || redditOn ? 'flow' : ''}`} d="M130 513 H158" markerEnd="url(#hmi-arrow)" />
+            <Unit x={160} y={486} name="PARSE" note="Trafilatura · Marker" state={adding.length ? 'running' : 'idle'}
+                  value={webT.average !== null && !adding.length ? `avg ${clock(webT.average)}` : undefined} />
+            <path className={`pipe ${adding.length || redditOn ? 'flow' : ''}`} d="M270 513 H298" markerEnd="url(#hmi-arrow)" />
+            <Unit x={300} y={486} name="ENRICH" note="LLM tags" state={adding.length || redditOn ? 'running' : 'idle'}
+                  progress={redditOn && rp!.total ? rp!.done / rp!.total : null} />
+            <path className={`pipe ${adding.length || redditOn ? 'flow' : ''}`} d="M410 513 H1015 V320" markerEnd="url(#hmi-arrow)" />
             </g>
         </svg>
     );
@@ -511,7 +580,11 @@ export default function ProcessPage() {
     const imgRunning = !!img?.is_running;
     const imgQ = status.queues.images.by_status ?? {};
     const tri = status.triage;
-    const pace = imagePace(img, now);
+    const imgT = imageTiming(img, run.averages?.graph, now);
+    const webT = webTiming(status.web, now);
+    const rp = status.reddit?.progress;
+    const redditPace = rp?.running && rp.total ? paceOf(rp.done_times, null, rp.done, rp.total, now, 2) : null;
+    const lastWeb = status.web?.recent.length ? status.web.recent[status.web.recent.length - 1] : null;
     const stopping = (run.alive && run.stop_requested) || (imgRunning && img!.stop_requested);
     const plantState = fault ? 'fault' : run.alive || imgRunning ? (stopping ? 'stopping' : 'running') : 'idle';
     const stateLabel = { fault: 'FAULT', stopping: 'STOPPING', running: 'RUNNING', idle: 'IDLE' }[plantState];
@@ -647,8 +720,9 @@ export default function ProcessPage() {
                                 <span>
                                     {!status.reddit.configured ? 'no feed (Settings)'
                                         : status.reddit.progress.running
-                                            ? `syncing ${status.reddit.progress.done}/${status.reddit.progress.total || '?'}`
-                                              + (status.reddit.progress.current ? ` · ${status.reddit.progress.current}` : '')
+                                            ? `${rp!.phase === 'tag' ? 'tagging' : 'syncing'} ${rp!.done}/${rp!.total || '?'}`
+                                              + (redditPace?.left != null ? ` · ~${roughly(redditPace.left)} left (done ≈ ${clockAt(now, redditPace.left)})` : '')
+                                              + (rp!.current ? ` · ${rp!.current}` : '')
                                             : `${status.reddit.imported} imported${status.reddit.partial ? ` (${status.reddit.partial} without comments)` : ''}`
                                               + (status.reddit.untagged ? ` · ${status.reddit.untagged} untagged` : '')
                                               + ` · last sync ${status.reddit.last_sync ? new Date(status.reddit.last_sync).toLocaleString() : 'never'}`}
@@ -679,6 +753,17 @@ export default function ProcessPage() {
                             </div>
                         </>
                     )}
+                    <div className="hmi-row"><span>Web & docs</span>
+                        <span title="Pages and files added through the web UI or bookmarklet; each estimated from the recent ones of its kind">
+                            {status.web?.in_flight.length
+                                ? `adding ${status.web.in_flight.map((i) => i.title).join(', ')}`
+                                  + (webT.left !== null ? ` · ~${roughly(webT.left)} left` : ' · no estimate yet')
+                                : lastWeb
+                                    ? `last: ${lastWeb.title} took ${roughly(lastWeb.seconds)}`
+                                      + (webT.average !== null ? ` · avg ${roughly(webT.average)} (${webT.samples})` : '')
+                                    : 'nothing added since the server started'}
+                        </span>
+                    </div>
                     {task.name && (
                         <div className="hmi-row"><span>Task</span>
                             <span>{task.name.toUpperCase()} · {task.running ? `running ${since(task.started_at, now)}` : task.error ? `failed: ${task.error}` : 'finished'}</span>
@@ -705,11 +790,21 @@ export default function ProcessPage() {
                             <div className="hmi-progress"><div style={{ width: `${(100 * img!.processed_count) / img!.total}%` }} /></div>
                         </>
                     )}
-                    {imgRunning && (
+                    {imgRunning && img!.phase !== 'linking' && (
                         <div className="hmi-row"><span>Pace</span>
-                            <span title="Since the run started, LLM server start included">
-                                {pace.per === null ? 'after the first image' : `${pace.per.toFixed(1)} s / image`}
-                                {pace.left !== null && ` · ~${roughly(pace.left)} left + linking`}
+                            <span title={imgT.pace.samples ? `From the last ${imgT.pace.samples} images to finish (read side by side, so per image finished)`
+                                : 'Since the run started, LLM server start included'}>
+                                {imgT.pace.per === null ? 'after the first image'
+                                    : `${imgT.pace.per.toFixed(1)} s / image${imgT.pace.samples ? ` (last ${imgT.pace.samples})` : ' (so far)'}`}
+                            </span>
+                        </div>
+                    )}
+                    {imgRunning && (
+                        <div className="hmi-row"><span>ETA</span>
+                            <span title="Images left × pace, then one graph rebuild as long as the last one took">
+                                {imgT.left === null ? 'after the first image'
+                                    : `~${roughly(imgT.left)} · done ≈ ${clockAt(now, imgT.left)}`
+                                      + (img!.phase === 'linking' ? ' · linking' : imgT.link !== null ? ` · incl. linking ~${roughly(imgT.link)}` : ' + linking')}
                             </span>
                         </div>
                     )}

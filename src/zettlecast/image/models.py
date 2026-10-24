@@ -36,7 +36,7 @@ class VisionExtraction(BaseModel):
     Structured vision data extracted from image by vision model.
     """
     # what the user kept it for (media | quote | idea | tip | place | product | recipe | reference |
-    # other) and the thing itself: name, by, type, where, price (only the ones known)
+    # other) and the thing itself: name, by, type, where, price, why (only the ones known)
     saved_as: str = "other"
     item: Dict[str, str] = Field(default_factory=dict)
     kind: str = "other"  # screenshot | photo | other

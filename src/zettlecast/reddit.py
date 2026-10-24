@@ -38,6 +38,7 @@ from uuid import NAMESPACE_URL, uuid5
 import httpx
 from bs4 import BeautifulSoup
 
+from . import runstate, statefile
 from .config import Settings, settings
 from .identity import compute_content_hash
 from .models import NoteMetadata, NoteModel
@@ -88,7 +89,7 @@ def _load() -> dict:
 def _save(state: dict) -> None:
     path = state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
+    tmp = statefile.tmp_path(path)
     tmp.write_text(json.dumps(state, indent=1, ensure_ascii=False), encoding="utf-8")
     for attempt in range(40):  # a reader may hold the file open for a moment on Windows
         try:
@@ -390,7 +391,8 @@ def sync(limit: Optional[int] = None, refresh: bool = False, articles: bool = Tr
               "failed": 0, "stopped": False}
     _stop.clear()
     try:
-        progress.update(running=True, done=0, total=0, current="reading the saved feed")
+        progress.update(running=True, done=0, total=0, current="reading the saved feed", done_times=[],
+                        phase="sync")
         items = fetch_saved(client, rss_feed(url))
         counts["saved"] = len(items)
         state = _load()
@@ -403,6 +405,8 @@ def sync(limit: Optional[int] = None, refresh: bool = False, articles: bool = Tr
                 counts["stopped"] = True
                 break
             label = _post_title(item) or item["name"]
+            if n > 1:
+                runstate.record_done(progress)
             progress.update(done=n - 1, current=label)
             if on_item:
                 on_item(n, len(todo), label)
@@ -498,11 +502,13 @@ def _tag_untagged(on_item: Optional[Callable[[int, int, str], None]] = None) -> 
     state = _load()
     todo = [(name, entry) for name, entry in state["imported"].items() if _needs_llm(entry)]
     counts = {"tagged": 0, "curated": 0, "failed": 0, "missing": 0, "stopped": False}
-    progress.update(running=True, done=0, total=len(todo), current="tagging saves")
+    progress.update(running=True, done=0, total=len(todo), current="tagging saves", done_times=[], phase="tag")
     for n, (name, entry) in enumerate(todo, 1):
         if _stop.is_set():
             counts["stopped"] = True
             break
+        if n > 1:
+            runstate.record_done(progress)
         progress.update(done=n - 1, current=f"tagging: {entry.get('title', name)}")
         if on_item:
             on_item(n, len(todo), entry.get("title", name))

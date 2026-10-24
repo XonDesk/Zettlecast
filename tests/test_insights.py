@@ -35,6 +35,7 @@ def graph(tmp_path, monkeypatch):
     monkeypatch.setattr("zettlecast.db.db.add_rejected_edge", lambda a, b: rejected.append((a, b)))
     state["rejected"] = rejected
     monkeypatch.setattr("zettlecast.runstate.active_run", lambda: None)
+    monkeypatch.setattr("zettlecast.db.db.get_note_by_uuid", lambda uuid: None)  # cards shown as stored
     return state
 
 
@@ -172,3 +173,46 @@ def test_a_card_found_unrelated_is_replaced_on_the_day(graph):
     assert len(again) == insights.PER_DAY
     assert first[0]["key"] not in {c["key"] for c in again}
     assert [c["key"] for c in again[:4]] == [c["key"] for c in first[1:]]  # the rest stay, in order
+
+
+def test_a_card_shows_each_note_as_it_is_now(monkeypatch):
+    from types import SimpleNamespace
+
+    from zettlecast.models import NoteMetadata
+
+    def stored(uuid, source_type, text, **custom):
+        return SimpleNamespace(uuid=uuid, title=f"Now {uuid}", source_type=source_type, full_text=text,
+                               metadata=NoteMetadata(custom=custom))
+
+    notes = {"pod": stored("pod", "audio", "..."),
+             "shot": stored("shot", "image", "## Kept", description="The Science Of Ultra-Tapering podcast.")}
+    monkeypatch.setattr("zettlecast.db.db.get_note_by_uuid", lambda uuid: notes.get(uuid))
+    chunk = "[10.0s - 20.0s] Mujika: Trust the process if you understand why.\n[20.0s - 30.0s] Koop: And the book?"
+    rows = [{"text": "[0.0s - 9.0s] Koop: Welcome.", "start_char": 0}, {"text": chunk, "start_char": 30}]
+
+    class Chunks:
+        def search(self):
+            return self
+
+        def where(self, _):
+            return self
+
+        def select(self, _):
+            return self
+
+        def limit(self, _):
+            return self
+
+        def to_list(self):
+            return rows
+
+    monkeypatch.setattr("zettlecast.db.Database.chunks", property(lambda self: Chunks()))
+    pod = insights.fresh_side({"uuid": "pod", "title": "Old", "source_type": "audio", "passage": True, "time": 10.0,
+                               "text": "Mujika: Trust the process if you understand"})
+    assert pod["text"] == "Mujika: Trust the process if you understand why.\nKoop: And the book?"  # the whole passage
+    assert pod["title"] == "Now pod" and pod["time"] == 10.0
+    shot = insights.fresh_side({"uuid": "shot", "title": "Old", "source_type": "image", "passage": True, "time": None,
+                                "text": "A Reddit comment recommending a specific podcast episode about tap"})
+    assert shot["text"] == "The Science Of Ultra-Tapering podcast." and shot["passage"] is False  # its summary
+    gone = {"uuid": "deleted", "title": "T", "source_type": "audio", "passage": False, "time": None, "text": "x"}
+    assert insights.fresh_side(gone) == gone

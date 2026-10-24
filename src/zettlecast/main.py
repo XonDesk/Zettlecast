@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, Request, UploadFile
@@ -21,6 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
+from starlette.concurrency import run_in_threadpool
 
 from . import embeddings, llm, paths, workerstate
 from .config import ENV_FILE, settings
@@ -30,6 +32,7 @@ from .models import ProcessingResult
 from .parser import AUDIO_EXTENSIONS, parse_url
 from .pipeline import ingest_note, ingest_path
 from .search import accept_link, get_suggestions_for_note, reject_link, search
+from .system import tracking_ingest
 
 logging.basicConfig(
     level=logging.INFO,
@@ -247,9 +250,17 @@ async def ingest(
                 error=f"URL already exists as '{existing.title}'",
             )
         logger.info(f"Ingesting URL: {url}")
-        result = parse_url(url)
-        if result.status == "success" and result.note:
-            ingest_note(result.note)
+
+        def add_url() -> ProcessingResult:
+            with tracking_ingest("web", urlparse(url).netloc or url) as item:
+                parsed = parse_url(url)
+                if parsed.status == "success" and parsed.note:
+                    ingest_note(parsed.note)
+                item["status"] = parsed.status
+                return parsed
+
+        # in a thread: fetching and the LLM's tags take seconds, and the process page keeps polling
+        result = await run_in_threadpool(add_url)
     else:
         # Keep uploads so the note's source stays viewable; audio goes to the podcast folder
         name = re.sub(r"[^\w.\- ]", "_", Path(file.filename or "upload").name)
@@ -264,7 +275,14 @@ async def ingest(
             target = target_dir / f"{target.stem}_{datetime.now():%Y%m%d%H%M%S}{target.suffix}"
         target.write_bytes(await file.read())
         logger.info(f"Ingesting file: {target}")
-        result = ingest_path(target, podcast_name="Uploads")
+
+        def add_file() -> ProcessingResult:
+            with tracking_ingest(target.suffix.lower().lstrip(".") or "file", target.name) as item:
+                added = ingest_path(target, podcast_name="Uploads")
+                item["status"] = added.status
+                return added
+
+        result = await run_in_threadpool(add_file)
 
     if result.status == "failed":
         return IngestResponse(status="failed", error=result.error_message)

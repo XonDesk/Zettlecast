@@ -40,7 +40,10 @@ ECHO_BONUS = 0.3  # an echo outranks a link that is otherwise as surprising
 NEAR_DUPLICATE = 0.9  # vector similarity: the same thing twice (a repost, two episodes' shared intro)
 RECENT_NOTE_DAYS = 7  # a note shown on a card isn't shown again this soon
 MAX_ATTEMPTS = 3  # LLM tries per card
-RELATIONS = ("agrees", "contradicts", "extends", "applies", "unrelated")
+RELATIONS = ("same_subject", "agrees", "contradicts", "extends", "applies", "unrelated")
+# a transcript or document is said best by the passage that matches; a screenshot or Reddit save by
+# its summary (its chunks mix the kept thing, the description and the screen around it)
+PASSAGE_TYPES = ("audio", "web", "pdf", "markdown")
 
 _lock = threading.RLock()
 _claimed: Dict[str, float] = {}  # key -> lease expiry (monotonic): with the worker
@@ -159,21 +162,52 @@ def candidates(notes: Dict[str, dict], edges: List[dict], exclude: set, now: Opt
     return out
 
 
+def _clean(text: str) -> str:
+    """Plain text: no "[12.3s - 45.6s]" line starts (a passage's time is kept apart), headings or bold marks."""
+    text = re.sub(r"(?m)^\s*\[[\d.]+s(?:\s*-\s*[\d.]+s)?\]\s*", "", text)
+    text = re.sub(r"(?m)^#+ .*$", "", text).replace("**", "")
+    return re.sub(r"\n{2,}", "\n", text).strip()
+
+
 def _side(note: dict, passage: Optional[dict]) -> dict:
     """One note on a card: what it is, and the passage that matches the other note (or its brief)."""
-    if passage:
-        # plain text: no leading "[12.3s - 45.6s]" (the time is kept apart), headings or bold marks
-        text = re.sub(r"^\s*\[[\d.]+s(?:\s*-\s*[\d.]+s)?\]\s*", "", passage["text"])
-        text = re.sub(r"(?m)^#+ .*$", "", text).replace("**", "")
-        text = re.sub(r"\n{2,}", "\n", text).strip()
-    else:
-        text = note["brief"]
+    text = _clean(passage["text"]) if passage else note["brief"]
     return {
         "uuid": note["uuid"], "title": note["title"], "source_type": note["source_type"],
         "community": note["community_label"], "date": note["date"].date().isoformat() if note["date"] else None,
         "text": text, "time": passage.get("time") if passage else None, "passage": bool(passage),
         "image": note["image"],
     }
+
+
+def fresh_side(side: dict) -> dict:
+    """
+    A card's note as it is now (a note re-read since the card was picked shows its new text): a
+    transcript's or document's whole matching passage (the graph keeps only its first 300
+    characters), else the note's summary.
+    """
+    from .brief import note_brief
+    from .db import _q, db
+
+    note = db.get_note_by_uuid(side["uuid"])
+    if note is None:
+        return side
+    out = {**side, "title": note.title}
+    if note.source_type in PASSAGE_TYPES and side["passage"]:
+        probe = max(side["text"].splitlines() or [""], key=len)[:60]
+        rows = (db.chunks.search().where(f"note_uuid = {_q(note.uuid)}").select(["text", "start_char"])
+                .limit(100_000).to_list()) if probe else []
+        chunk = next((r for r in sorted(rows, key=lambda r: r["start_char"]) if probe in r["text"]), None)
+        if chunk:
+            out["text"] = _clean(chunk["text"])
+    else:
+        out.update(text=note_brief(note.metadata.custom or {}, note.full_text) or side["text"], passage=False)
+    return out
+
+
+def fresh(card: dict) -> dict:
+    """A card with both notes as they are now."""
+    return {**card, "a": fresh_side(card["a"]), "b": fresh_side(card["b"])}
 
 
 def _card(c: dict) -> dict:
@@ -285,7 +319,7 @@ def today() -> dict:
             _save(data)
         cards = [data["cards"][k] for k in data["days"][day]]
     alive = set(db.note_titles([u for c in cards for u in (c["a"]["uuid"], c["b"]["uuid"])]))
-    shown = [c for c in cards if c["a"]["uuid"] in alive and c["b"]["uuid"] in alive and not _unrelated(c)]
+    shown = [fresh(c) for c in cards if c["a"]["uuid"] in alive and c["b"]["uuid"] in alive and not _unrelated(c)]
     return {"date": day, "cards": shown, "preparing": sum(1 for c in shown if c["insight"] is None),
             "generating": _generating.is_set()}
 
@@ -356,10 +390,10 @@ SCHEMA = {
 }
 
 SYSTEM = (
-    "You help someone think with their own notes (podcast transcripts, saved Reddit threads, screenshots). "
-    "Given two passages their knowledge graph linked, say plainly what connects them: the shared idea, how one "
-    "sheds light on the other, or where they disagree. Be concrete and specific to these passages, never generic. "
-    "If they only share words and no idea, say relation 'unrelated'."
+    "You help someone see how two of their own notes connect (podcast transcripts, saved Reddit threads, "
+    "screenshots). Be brief and literal: say only what the notes themselves say, in plain words. Never add "
+    "ideas, lessons or advice of your own, and never make a simple note into more than it is: a screenshot "
+    "saved to listen to a podcast is just that. If they only share words and no idea, say 'unrelated'."
 )
 
 
@@ -372,13 +406,15 @@ def prompt(card: dict) -> str:
     shared = f"\nShared names and topics: {', '.join(card['shared'])}" if card.get("shared") else ""
     return (
         f"Note A - {side(card['a'])}\n\nNote B - {side(card['b'])}{shared}\n\n"
-        "relation: does B agree with A, contradict it, extend it (adds something new), or apply it (a case of "
-        "it in practice)? Or are they unrelated?\n"
-        "insight: one or two sentences on what links them, written to the reader (\"you\"), naming the specifics. "
-        "Refer to each note by its subject or speaker (\"Ed Maunder's point on durability\"), never as Note A or B "
-        "or passage A or B: the reader sees the notes, not those labels.\n"
-        "question: one short question worth thinking about, from putting the two together.\n"
-        "note_title: a title for a note of the reader's own about this connection (a claim, max 10 words)."
+        "relation: same_subject (both are about the same thing and that's the link: e.g. one is a podcast, book "
+        "or article saved for later and the other covers that subject), agrees, contradicts, extends (B adds a "
+        "specific point A doesn't make), applies (B is a concrete case of A), or unrelated.\n"
+        "insight: at most two short sentences, under 40 words, written to the reader (\"you\"): what links them, "
+        "naming the specifics. When one note is something saved to watch, read or listen to, say what the other "
+        "note offers on that subject (\"Koopcast #86 with Iñigo Mujika covers tapering too: trust the process if "
+        "you understand why.\"). Refer to notes by their subject or speaker, never as Note A or B.\n"
+        "question: one short, practical question from putting the two together, or \"\" if none comes naturally.\n"
+        "note_title: a title for a note of the reader's own about this connection (max 10 words)."
     )
 
 
@@ -432,7 +468,8 @@ def claim(limit: int, lease_seconds: float) -> List[dict]:
         keys = [k for k in pending(data) if k not in _claimed][:limit]
         for key in keys:
             _claimed[key] = now + lease_seconds
-        return [data["cards"][k] for k in keys]
+        cards = [data["cards"][k] for k in keys]
+    return [fresh(c) for c in cards]
 
 
 def renew(lease_seconds: float) -> None:
@@ -467,7 +504,7 @@ def generate_pending(limit: int = UPCOMING + PER_DAY) -> int:
             if card is None:
                 continue
             try:
-                store(key, generate(card))
+                store(key, generate(fresh(card)))
                 done += 1
             except LLMError as e:
                 logger.warning(f"Insight for {key} failed: {e}")

@@ -41,9 +41,6 @@ export type LayoutRequest =
     // the notes and links the filters leave; alpha to restart the live layout at, or null to leave it resting
     | { type: 'view'; ids: string[]; links: LayoutLink[]; alpha: number | null }
     | { type: 'forces'; forces: Forces; nodeSize: number }
-    // a note held under the pointer (the layout follows it) / let go
-    | { type: 'drag'; id: string; x: number; y: number }
-    | { type: 'release'; id: string }
     // scatter the visible notes and lay them out again
     | { type: 'animate' };
 

@@ -32,10 +32,18 @@ def read(path: Path) -> dict:
         return {}
 
 
+def tmp_path(path: Path) -> Path:
+    """
+    A temporary file of this writer's own, to write and then rename over path: two processes
+    saving at once (the API server and a CLI run) would otherwise rename each other's away.
+    """
+    return path.with_suffix(f"{path.suffix}.{os.getpid()}.{threading.get_ident()}.tmp")
+
+
 def write(path: Path, data: dict) -> None:
     """Write via a temporary file: a reader never sees half a file."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = tmp_path(path)
     tmp.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
     for attempt in range(10):  # a reader may hold the file open for a moment on Windows
         try:

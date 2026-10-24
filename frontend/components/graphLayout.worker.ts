@@ -22,7 +22,7 @@ const FRAME_MS = 16; // one step per frame, as d3's own timer on the page did
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 const sim = createSimulation().alphaMin(LIVE_ALPHA_MIN);
-// layout state per note (position, velocity, pinned while dragged), kept for notes filtered
+// layout state per note (position, velocity), kept for notes filtered
 // out so they come back where they were
 let all: SimNode[] = [];
 const byId = new Map<string, SimNode>();
@@ -102,24 +102,6 @@ scope.onmessage = (event: MessageEvent<LayoutRequest>) => {
             applyForces(sim, forces, nodeSize);
             run(Math.max(sim.alpha(), 0.3));
             break;
-        case 'drag': {
-            const n = byId.get(m.id);
-            if (!n) break;
-            n.fx = m.x;
-            n.fy = m.y;
-            sim.alphaTarget(0.3);
-            run();
-            break;
-        }
-        case 'release': {
-            const n = byId.get(m.id);
-            if (n) {
-                n.fx = null;
-                n.fy = null;
-            }
-            sim.alphaTarget(0);
-            break;
-        }
         case 'animate':
             seedPositions(sim.nodes());
             run(1);

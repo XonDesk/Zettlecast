@@ -443,6 +443,28 @@ class ImageQueue:
 
             self._save_state()
 
+    def reprocess(self, note_uuids: Optional[set] = None) -> int:
+        """
+        Put completed images back to pending so the vision model reads them again (after a prompt
+        change). Their triage options stay; the note keeps its uuid (from the image), so it is
+        replaced in place. note_uuids: only these notes' images; None means every completed one.
+        """
+        from .image_parser import image_note_uuid_from_hash
+
+        count = 0
+        for item in self.items.values():
+            if item.status != "completed":
+                continue
+            if note_uuids is not None and image_note_uuid_from_hash(item.image.image_hash) not in note_uuids:
+                continue
+            item.status = "pending"
+            item.attempts = 0
+            item.error_message = None
+            count += 1
+        if count:
+            self._save_state()
+        return count
+
     def retry_failed(self) -> int:
         """
         Reset failed items to pending for retry.

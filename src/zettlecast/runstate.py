@@ -15,12 +15,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from . import statefile
 from .config import settings
 
 logger = logging.getLogger(__name__)
 
 RECENT = 12  # finished episodes kept for the process page
 CYCLES = 30  # episode times kept per phase (cycle time, ETA)
+DONE_TIMES = 20  # finish times kept by the image run and Reddit sync (their pace and ETA)
+
+
+def record_done(state: dict) -> None:
+    """Note that an item of a run just finished (state["done_times"]: the process page's pace)."""
+    state["done_times"] = (list(state.get("done_times") or []) + [datetime.now().isoformat(timespec="seconds")])[-DONE_TIMES:]
 
 
 def _state_file() -> Path:
@@ -33,7 +40,7 @@ def _control_file() -> Path:
 
 def _write_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
+    tmp = statefile.tmp_path(path)
     tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     for _ in range(5):  # a reader may hold the file open for a moment on Windows
         try:

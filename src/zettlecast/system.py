@@ -9,6 +9,8 @@ import os
 import shutil
 import subprocess
 import threading
+import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -30,10 +32,33 @@ _task_lock = threading.Lock()
 task: dict = {"name": None, "running": False, "started_at": None, "finished_at": None, "result": None, "error": None}
 
 # Image run in the API process (main._run_image_processing_background): phase reading | linking,
-# total = images it set out to read, in_flight = titles being read now
+# total = images it set out to read, in_flight = titles being read now, done_times = when the
+# last ones finished (pace), link_seconds = how long the last run's graph rebuild took
 image_run: dict = {"is_running": False, "phase": None, "current_image": None, "processed_count": 0,
                    "error_count": 0, "total": 0, "in_flight": [], "stop_requested": False,
-                   "started_at": None, "finished_at": None}
+                   "started_at": None, "finished_at": None, "done_times": [], "phase_started_at": None,
+                   "link_seconds": None}
+
+# Web pages and documents being added through the API (quick add, bookmarklet, uploads):
+# in_flight = {title, kind, started_at}, recent = {kind, seconds, status} of the last ones
+WEB_RECENT = 20
+web_run: dict = {"in_flight": [], "recent": []}
+
+
+@contextmanager
+def tracking_ingest(kind: str, title: str):
+    """Show an ingest on the process page while it runs; the caller sets item["status"]."""
+    item = {"title": title, "kind": kind, "started_at": datetime.now().isoformat(timespec="seconds"),
+            "status": "failed"}
+    started = time.time()
+    web_run["in_flight"] = web_run["in_flight"] + [item]
+    try:
+        yield item
+    finally:
+        web_run["in_flight"] = [i for i in web_run["in_flight"] if i is not item]
+        web_run["recent"] = (web_run["recent"] + [{"kind": kind, "title": title, "status": item["status"],
+                                                   "seconds": round(time.time() - started, 1),
+                                                   "finished_at": datetime.now().isoformat(timespec="seconds")}])[-WEB_RECENT:]
 
 TRIAGE_CACHE_SECONDS = 30  # counting undecided screenshots lists every file in the folders
 _triage_cache: dict = {"at": 0.0, "value": None}
@@ -233,6 +258,7 @@ def _primary_status() -> dict:
         "images": beat.get("images") or {**image_run, "in_flight": []},
         "triage": beat.get("triage"),
         "reddit": _reddit(),
+        "web": {"in_flight": list(web_run["in_flight"]), "recent": list(web_run["recent"])},
         "desktop": desktop,
         "alarms": found,
         "limits": {"vram_warn": VRAM_WARN_FRACTION, "vram_alarm": VRAM_ALARM_FRACTION},
@@ -268,6 +294,7 @@ def status() -> dict:
         "images": {**image_run, "in_flight": list(image_run["in_flight"])},
         "triage": triage_counts(),
         "reddit": _reddit(),
+        "web": {"in_flight": list(web_run["in_flight"]), "recent": list(web_run["recent"])},
         "alarms": alarms(run, gpu_info, llm, q, disk_free_gb),
         "limits": {"vram_warn": VRAM_WARN_FRACTION, "vram_alarm": VRAM_ALARM_FRACTION},
     }

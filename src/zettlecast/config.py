@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     ollama_model: str = "qwen3.6:35b-a3b"  # Text + vision, 256K context
     ollama_base_url: str = "http://127.0.0.1:11434"
     llm_num_ctx: int = 32768  # Context window requested from Ollama
+    # Longest answer, in tokens (the longest real ones, transcript cleanup and screenshot text, are
+    # ~2-3K): a model stuck repeating itself otherwise fills llama-server's shared context and
+    # blocks every other request; a cut-off answer fails as invalid JSON instead
+    llm_max_tokens: int = 8192
     llm_timeout_seconds: int = 600
     llm_seed: int | None = 42  # Fixed sampling seed: reprocessing gives the same note (None = random)
     llm_parallel: int = 4  # Transcript chunks in flight at once (llama-server slots)

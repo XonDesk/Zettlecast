@@ -59,6 +59,9 @@ def test_reads_images_in_parallel_and_stores_each_once(monkeypatch):
     assert rebuilds == [8]  # linked once, after all of them
     assert queue.items["4"].status == "failed"
     assert all(i.status == "completed" for k, i in queue.items.items() if k != "4")
+    # the process page's pace and ETA: when each stored image finished, how long linking took
+    assert len(main._image_processing_state["done_times"]) == 8
+    assert main._image_processing_state["link_seconds"] is not None
 
 
 def test_stop_finishes_the_images_being_read_and_still_links_them(monkeypatch):

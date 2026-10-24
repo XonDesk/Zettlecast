@@ -87,7 +87,8 @@ def _ollama_chat(prompt, schema, images, model, system, temperature) -> str:
         "messages": messages,
         "stream": False,
         "think": False,
-        "options": {"num_ctx": settings.llm_num_ctx, "temperature": temperature},
+        "options": {"num_ctx": settings.llm_num_ctx, "temperature": temperature,
+                    "num_predict": settings.llm_max_tokens},
     }
     if settings.llm_seed is not None:
         body["options"]["seed"] = settings.llm_seed
@@ -318,6 +319,7 @@ def _server_chat(prompt, schema, images, system, temperature) -> str:
     body: dict = {
         "messages": messages,
         "temperature": temperature,
+        "max_tokens": settings.llm_max_tokens,
         "chat_template_kwargs": {"enable_thinking": False},
     }
     if settings.llm_seed is not None:

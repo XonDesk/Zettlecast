@@ -681,6 +681,62 @@ def image_run(limit: int):
     click.echo(f"Processed {processed} images")
 
 
+@image.command("reprocess")
+@click.argument("match", required=False)
+@click.option("--all", "all_", is_flag=True, help="Read every processed image again")
+def image_reprocess(match: str, all_: bool):
+    """
+    Queue processed images (note title containing MATCH, or a note's uuid, or --all) to be read
+    again by the vision model, e.g. after a prompt change. Triage choices are kept.
+    """
+    from .db import db
+    from .image.queue import ImageQueue
+
+    if not match and not all_:
+        raise click.UsageError("Give a note title to match, a note uuid, or --all")
+    uuids = None
+    if not all_:
+        rows = db.notes.search().where("source_type = 'image'").select(["uuid", "title"]).limit(1_000_000).to_list()
+        uuids = {r["uuid"] for r in rows if match == r["uuid"] or match.lower() in r["title"].lower()}
+    count = ImageQueue().reprocess(uuids)
+    click.echo(f"Queued {count} image(s) again. Run: zettlecast image run")
+
+
+@image.command("reformat")
+@click.option("--dry-run", is_flag=True, help="Count the notes that would change and show one")
+def image_reformat(dry_run: bool):
+    """
+    Write image notes again from the vision results they store (no vision model), e.g. after a
+    formatter change. Notes whose indexed text is unchanged keep their embeddings.
+    """
+    from .chunker import create_chunks
+    from .db import _row_to_note, db
+    from .image.image_parser import reformat_note
+    from .linker import rebuild_graph
+
+    rows = db.notes.search().where("source_type = 'image'").limit(1_000_000).to_list()
+    changed = [(old, new) for old in map(_row_to_note, rows) if (new := reformat_note(old))]
+    click.echo(f"{len(changed)} of {len(rows)} image notes change")
+    if dry_run:
+        if changed:
+            old, new = changed[0]
+            click.echo(f"\n--- {old.title} ({old.uuid}), before:\n{old.full_text}\n\n--- after:\n{new.full_text}")
+        return
+    embedded = 0
+    with click.progressbar(changed, label="Reformatting") as bar:
+        for old, new in bar:
+            if [c.text for c in create_chunks(old.full_text, old.uuid)] == \
+                    [c.text for c in create_chunks(new.full_text, new.uuid)]:
+                db.update_note_text(new.uuid, new.full_text, new.content_hash)
+            else:
+                db.upsert_note(new)
+                embedded += 1
+    if embedded:
+        click.echo(f"{embedded} re-embedded; rebuilding the graph ...")
+        rebuild_graph()
+    click.echo("Done")
+
+
 @image.command("status")
 def image_status():
     """Show queue status."""

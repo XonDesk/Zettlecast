@@ -426,7 +426,8 @@ export default function KnowledgeGraph() {
     // the graph whose first layout is done: the view and the renderer wait for it
     const [laidOut, setLaidOut] = useState<Graph | null>(null);
     const layoutFor = useRef<Graph | null>(null);
-    const drag = useRef({ node: null as string | null, moved: false, fitOnEnd: false });
+    // frame the notes once the layout comes to rest (after a filter change)
+    const fitOnEnd = useRef(false);
     // density contours: recomputed (at most every CONTOUR_INTERVAL ms) when the layout or what
     // they show changes, redrawn on every frame for the camera
     const contours = useRef({ layers: [] as ContourLayer[], dirty: true, last: 0, timer: 0 });
@@ -459,6 +460,11 @@ export default function KnowledgeGraph() {
         (data?.nodes ?? []).forEach((n) => counts.set(n.source_type, (counts.get(n.source_type) ?? 0) + 1));
         return [...counts.entries()].map(([type, count]) => ({ type, label: TYPE_LABELS[type] ?? type, count }));
     }, [data]);
+
+    // on a phone the pane would cover the whole map: it starts closed there (Graph settings opens it)
+    useEffect(() => {
+        if (window.matchMedia('(max-width: 700px)').matches) setPaneOpen(false);
+    }, []);
 
     useEffect(() => {
         try {
@@ -531,8 +537,8 @@ export default function KnowledgeGraph() {
                 contours.current.dirty = true;
                 contours.current.last = 0;
                 sigmaRef.current?.scheduleRender();
-                if (drag.current.fitOnEnd) {
-                    drag.current.fitOnEnd = false;
+                if (fitOnEnd.current) {
+                    fitOnEnd.current = false;
                     fit();
                 }
             }
@@ -594,7 +600,7 @@ export default function KnowledgeGraph() {
 
         if (changed) {
             // the remaining notes regroup, then the camera frames them
-            drag.current.fitOnEnd = true;
+            fitOnEnd.current = true;
         }
         postLayout({
             type: 'view',
@@ -629,11 +635,12 @@ export default function KnowledgeGraph() {
             zoomToSizeRatioFunction: (ratio) => ratio,
             defaultEdgeColor: '#475569',
             zIndex: true,
-            stagePadding: 160, // room for labels and the toolbar around the outermost notes
+            // room for labels and the toolbar around the outermost notes (on a phone 160 px a side
+            // would leave the map a sliver)
+            stagePadding: containerRef.current.clientWidth < 700 ? 24 : 160,
             defaultDrawNodeHover: drawHover,
         });
         renderer.setCustomBBox(renderer.getBBox());
-        const state = drag.current;
         const c = contours.current;
         const contourCanvas = renderer.createCanvas('contours', {
             beforeLayer: 'edges',
@@ -643,7 +650,7 @@ export default function KnowledgeGraph() {
         renderer.on('enterNode', ({ node }) => setHovered(node));
         renderer.on('leaveNode', () => setHovered(null));
         renderer.on('clickNode', ({ node }) => {
-            if (!state.moved) setSelected(node);
+            setSelected(node);
         });
         renderer.on('doubleClickNode', ({ node, event }) => {
             event.preventSigmaDefault();
@@ -654,30 +661,7 @@ export default function KnowledgeGraph() {
             setFocusCommunity(null);
         });
 
-        // drag a note: it stays under the pointer and the layout follows it
-        renderer.on('downNode', ({ node }) => {
-            const p = positions.current.get(node);
-            if (!p) return;
-            state.node = node;
-            state.moved = false;
-            postLayout({ type: 'drag', id: node, x: p[0], y: p[1] });
-        });
-        renderer.on('moveBody', ({ event }) => {
-            if (!state.node) return;
-            const pos = renderer.viewportToGraph(event);
-            postLayout({ type: 'drag', id: state.node, x: pos.x, y: pos.y });
-            state.moved = true;
-            event.preventSigmaDefault();
-            event.original.preventDefault();
-            event.original.stopPropagation();
-        });
-        const release = () => {
-            if (!state.node) return;
-            postLayout({ type: 'release', id: state.node });
-            state.node = null;
-        };
-        renderer.on('upNode', release);
-        renderer.on('upStage', release);
+        // notes are not draggable: a drag reheats the whole layout, so even a click moved every note
 
         renderer.on('afterRender', () => {
             const input = contourInput.current;
@@ -913,7 +897,7 @@ export default function KnowledgeGraph() {
     // Obsidian's "Animate": scatter the visible notes and watch them find their places
     const animate = () => {
         postLayout({ type: 'animate' });
-        drag.current.fitOnEnd = true;
+        fitOnEnd.current = true;
         fit();
     };
 
@@ -1071,7 +1055,7 @@ export default function KnowledgeGraph() {
                     </div>
                 </div>
             ) : (
-                <div className="graph-hint">Drag notes · click to see why they link · double-click to open</div>
+                <div className="graph-hint">Click to see why notes link · double-click to open</div>
             )}
 
             {data && (

@@ -191,6 +191,11 @@ class Database:
                 for c, v in zip(chunks, vectors)
             ])
 
+    def update_note_text(self, uuid: str, full_text: str, content_hash: str) -> None:
+        """A note's text without re-embedding it: for changes outside its indexed sections."""
+        self.notes.update(where=f"uuid = {_q(uuid)}", values={
+            "full_text": full_text, "content_hash": content_hash, "updated_at": datetime.utcnow().isoformat()})
+
     def get_note_by_uuid(self, uuid: str) -> Optional[NoteModel]:
         rows = self.notes.search().where(f"uuid = {_q(uuid)}").limit(1).to_list()
         return _row_to_note(rows[0]) if rows else None

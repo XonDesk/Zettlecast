@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
+from .. import runstate
 from ..config import settings
 
 logger = logging.getLogger(__name__)
@@ -34,7 +35,8 @@ def read_images(queue, store: Callable, state: dict, limit: Optional[int] = None
         pending = queue.get_pending_count()
         state.update(is_running=True, phase="reading", current_image=None, processed_count=0, error_count=0,
                      total=min(pending, limit) if limit else pending, in_flight=[], stop_requested=False,
-                     started_at=datetime.now().isoformat(timespec="seconds"), finished_at=None)
+                     started_at=datetime.now().isoformat(timespec="seconds"), finished_at=None,
+                     done_times=[], phase_started_at=None)
         processed = submitted = 0
         running = {}  # future -> (image, start time)
         slots = max(settings.llm_parallel, 1)
@@ -51,6 +53,7 @@ def read_images(queue, store: Callable, state: dict, limit: Optional[int] = None
                     store(image, result.note, time.time() - start_time)
                     processed += 1
                     state["processed_count"] = processed
+                    runstate.record_done(state)
                 else:
                     queue.mark_failed(image.id, result.error_message or "Unknown error")
                     state["error_count"] += 1
@@ -79,8 +82,11 @@ def read_images(queue, store: Callable, state: dict, limit: Optional[int] = None
 
         state.update(in_flight=[], current_image=None)
         if processed and link:
-            state.update(phase="linking", current_image="(linking the new notes into the graph)")
+            state.update(phase="linking", current_image="(linking the new notes into the graph)",
+                         phase_started_at=datetime.now().isoformat(timespec="seconds"))
+            started = time.time()
             link()
+            state["link_seconds"] = round(time.time() - started, 1)
         return processed
 
     except Exception as e:

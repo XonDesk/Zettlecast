@@ -252,6 +252,14 @@ export interface SystemStatus {
         stop_requested: boolean;
         started_at: string | null;
         finished_at: string | null;
+        done_times?: string[]; // when the last images finished (pace, ETA)
+        phase_started_at?: string | null; // linking started
+        link_seconds?: number | null; // the last run's graph rebuild
+    };
+    // web pages and documents being added through the API (absent from an older API server)
+    web?: {
+        in_flight: { title: string; kind: string; started_at: string }[];
+        recent: { title: string; kind: string; status: string; seconds: number; finished_at: string }[];
     };
     // screenshot sorting (cached ~30 s); null when it couldn't be read
     triage?: { remaining: number; decided: Record<string, number>; folders: number; to_recycle: number } | null;
@@ -262,7 +270,8 @@ export interface SystemStatus {
         partial: number; // imported without their thread (sync with refresh to retry)
         untagged?: number; // imported without LLM tags/summary (tag later)
         last_sync: string | null;
-        progress: { running: boolean; done: number; total: number; current: string | null };
+        progress: { running: boolean; done: number; total: number; current: string | null;
+                    done_times?: string[]; phase?: 'sync' | 'tag' };
     } | null;
     alarms: Alarm[];
     limits: { vram_warn: number; vram_alarm: number };
@@ -288,7 +297,7 @@ export interface InsightCard {
     shared: string[];
     a: InsightSide;
     b: InsightSide;
-    insight: { relation: 'agrees' | 'contradicts' | 'extends' | 'applies' | 'unrelated'; insight: string;
+    insight: { relation: 'same_subject' | 'agrees' | 'contradicts' | 'extends' | 'applies' | 'unrelated'; insight: string;
                question: string; note_title: string } | null; // null while the LLM prepares it
     verdict: 'good' | 'rejected' | 'noted' | null;
     note?: string; // uuid of the note written from it

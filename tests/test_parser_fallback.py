@@ -43,3 +43,28 @@ def test_parse_url_fallback():
 
 if __name__ == "__main__":
     test_parse_url_fallback()
+
+
+def test_tidy_web_markdown_drops_empty_headings_and_frees_images():
+    from zettlecast.parser import tidy_web_markdown
+
+    text = ("# Title\n\nBy **Carlo M. Cipolla**\n\n## Table of contents\n\n## Part one\n\n"
+            "![Figure 1](https://x.org/f1.gif) The text goes on.\n\n## Book\n\n### Chapter\n\nWords.\n\n## Empty at the end\n")
+    assert tidy_web_markdown(text) == (
+        "# Title\n\nBy **Carlo M. Cipolla**\n\n## Part one\n\n![Figure 1](https://x.org/f1.gif)\n\n"
+        "The text goes on.\n\n## Book\n\n### Chapter\n\nWords.")
+
+
+def test_byline_author():
+    from zettlecast.parser import byline_author
+
+    assert byline_author("# Title\n\nBy **Carlo M. Cipolla**\n\nText") == "Carlo M. Cipolla"
+    assert byline_author("# Title\n\nby the river we sat and talked for hours on end, long into the night") is None
+
+
+def test_images_are_not_embedded():
+    from zettlecast.chunker import create_chunks
+
+    text = "Some paragraph about the basic graph of stupidity and bandits.\n\n![Figure 1 - The basic graph](https://x.org/f1.gif)"
+    indexed = " ".join(c.text for c in create_chunks(text, "n"))
+    assert "Figure 1 - The basic graph" in indexed and "x.org" not in indexed

@@ -17,6 +17,7 @@ from PIL import Image, UnidentifiedImageError
 from ..config import settings
 from ..models import NoteMetadata, NoteModel, ProcessingResult
 from .formatter import format_vision_result, saved_tag, saved_title
+from .models import VisionExtraction
 from .vision_backend import VisionBackend, VisionModelNotFoundError
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,29 @@ def keep_copy(file_path: Path) -> Path:
 
 
 def image_note_uuid(file_path: Path) -> str:
-    return str(uuid5(NAMESPACE_URL, "zettlecast:image:" + hashlib.sha256(file_path.read_bytes()).hexdigest()))
+    return image_note_uuid_from_hash(hashlib.sha256(file_path.read_bytes()).hexdigest())
+
+
+def image_note_uuid_from_hash(image_hash: str) -> str:
+    """The same, from the image's SHA-256 (as the image queue stores it)."""
+    return str(uuid5(NAMESPACE_URL, "zettlecast:image:" + image_hash))
+
+
+def reformat_note(note: NoteModel) -> Optional[NoteModel]:
+    """The image note written again from the vision result it stores (no vision call), after a
+    formatter change; None when the text comes out the same."""
+    custom = note.metadata.custom or {}
+    if "description" not in custom:
+        return None
+    vision = VisionExtraction(
+        **{f: custom[f] for f in ("saved_as", "item", "kind", "focus", "context", "people", "organisations")
+           if f in custom},
+        title=note.title, description=custom["description"], detected_text=custom.get("detected_text", ""))
+    full_text = format_vision_result(vision, custom.get("image_width", 0), custom.get("image_height", 0),
+                                     custom.get("image_format", "unknown"))
+    if full_text == note.full_text:
+        return None
+    return note.model_copy(update={"full_text": full_text, "content_hash": compute_content_hash(full_text)})
 
 
 def parse_image(file_path: Path, keep_image: bool = True, focus_region: Optional[dict] = None) -> ProcessingResult:

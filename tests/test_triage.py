@@ -124,6 +124,44 @@ def test_screenshot_note_indexes_only_its_focus():
     assert "gravel bike" in text  # kept in the note, just not embedded
 
 
+THREAD = """01:35
+r/trailrunning
+Afraid I ran too little during taper
+3 upvotes · 14 comments
+CandidAd9050 · 17h
+As others of said you're going to be fine. If you want more reassurance you should listen to the Science Of Ultra podcast about tapering.
+Reply
+diceclimber OP · 1h
+Thanks for the reference. At first I read this as
+the science of 'ultra-tapering'
+@kevinmom
+2 days ago
+I do short, low intensity runs.
+use.origin Sponsored
+Get Origin for just $1 for 1 year
+Add a comment"""
+
+
+def test_screen_text_reads_like_the_thread():
+    from zettlecast.image.formatter import screen_text
+
+    focus = "As others of said you’re going to be fine. If you want more reassurance you should listen " \
+            "to the Science Of Ultra podcast about tapering."
+    assert screen_text(THREAD, focus) == (
+        "r/trailrunning  \nAfraid I ran too little during taper\n\n"
+        "**CandidAd9050**  \n_(the focus, above)_\n\n"
+        "**diceclimber** (OP)  \nThanks for the reference. At first I read this as the science of 'ultra-tapering'\n\n"
+        "**@kevinmom**  \nI do short, low intensity runs."
+    )
+
+
+def test_screen_text_author_on_its_own_line():
+    from zettlecast.image.formatter import screen_text
+
+    assert screen_text("runner42 OP\nTen days of heat.\n\nfast_feet\nAgreed.") == \
+        "**runner42** (OP)  \nTen days of heat.\n\n**fast_feet**  \nAgreed."
+
+
 def test_image_without_focus_indexes_its_text():
     vision = VisionExtraction(kind="photo", description="A race bib pinned to a shirt.",
                               detected_text="Western States 100 bib 12", concepts=["race bib"])
@@ -233,3 +271,27 @@ def test_save_waits_for_a_reader_holding_the_state_file(tmp_path, monkeypatch):
     threading.Timer(0.2, reader.close).start()
     triage._save({"folders": ["x"], "decisions": {}, "hashes": {}})
     assert triage._load()["folders"] == ["x"]
+
+
+def test_why_its_recommended_is_kept_with_the_thing():
+    podcast = VisionExtraction(saved_as="media", item={"name": "The Science Of Ultra-Tapering", "by": "Science Of Ultra",
+                                                       "type": "podcast", "why": "Running less before an ultra is normal."},
+                               description="", detected_text="")
+    text = format_vision_result(podcast, 10, 10)
+    assert text.startswith("## Kept\n\n**To listen**: The Science Of Ultra-Tapering - Science Of Ultra\n"
+                           "- **Why**: Running less before an ultra is normal.")
+
+
+def test_reprocess_puts_back_only_the_chosen_notes_images(storage):
+    from zettlecast.image.image_parser import image_note_uuid
+
+    triage.add_folder(str(storage))
+    triage.decide(storage / "shot1.png", "keep")
+    triage.decide(storage / "shot0.png", "keep_image")
+    queue = ImageQueue()
+    for job in queue.items.values():
+        queue.mark_completed(job.image.id, 1.0)
+    assert ImageQueue().reprocess({image_note_uuid(storage / "shot1.png")}) == 1
+    pending = [j for j in ImageQueue().items.values() if j.status == "pending"]
+    assert [(j.image.image_title, j.image.keep_image) for j in pending] == [("shot1", False)]  # triage choice kept
+    assert ImageQueue().reprocess() == 1  # the rest

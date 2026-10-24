@@ -4,6 +4,7 @@ PDF parsing, web scraping, markdown and image ingestion.
 """
 
 import logging
+import re
 from pathlib import Path
 from typing import Tuple
 from urllib.parse import urlparse
@@ -130,6 +131,37 @@ def parse_pdf(file_path: Path) -> ProcessingResult:
 
 # --- Web Scraping ---
 
+IMAGE_MD = re.compile(r"!\[[^\]\n]*\]\([^)\s]+\)")
+BYLINE = re.compile(r"(?im)^by:?\s+\**([^*\n]{3,60}?)\**\s*$")
+
+
+def _heading_level(line: str) -> int:
+    match = re.match(r"(#{1,6}) ", line)
+    return len(match.group(1)) if match else 0
+
+
+def tidy_web_markdown(text: str) -> str:
+    """Images on lines of their own (trafilatura glues them to the next paragraph), and no
+    headings left empty by what it drops (a table of contents made of links)."""
+    text = re.sub(rf"[ \t]*({IMAGE_MD.pattern})[ \t]*", r"\n\n\1\n\n", text)
+    lines = [l.rstrip() for l in text.splitlines()]
+    kept: list[str] = []
+    for line in reversed(lines):  # from the end, so a section emptied this way empties its parent
+        level = _heading_level(line)
+        if level:
+            nxt = next((l for l in reversed(kept) if l), "")
+            if not nxt or 0 < _heading_level(nxt) <= level:
+                continue  # nothing under it but the next section of the same or a higher level
+        kept.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(reversed(kept))).strip()
+
+
+def byline_author(text: str) -> str | None:
+    """'By Carlo M. Cipolla' near the top, for pages whose metadata names no author."""
+    match = BYLINE.search("\n".join(text.splitlines()[:12]))
+    return match.group(1).strip() if match else None
+
+
 def parse_url(url: str, enrich: bool = True) -> ProcessingResult:
     """
     Extract main content from a URL using trafilatura.
@@ -184,14 +216,18 @@ def parse_url(url: str, enrich: bool = True) -> ProcessingResult:
                 error_message="Failed to download URL",
             )
         
-        # Extract main content with links preserved
+        # Extract main content with links and the article's figures preserved
         text = trafilatura.extract(
             downloaded,
             include_comments=False,
             include_tables=True,
             include_links=True,  # Preserve hyperlinks in markdown
+            include_images=True,
             output_format="markdown",
+            url=url,  # image paths made absolute
         )
+        if text:
+            text = tidy_web_markdown(text)
         
         # Fallback to BeautifulSoup if trafilatura extraction fails
         if not text:
@@ -283,7 +319,7 @@ def parse_url(url: str, enrich: bool = True) -> ProcessingResult:
             content_hash=compute_content_hash(text),
             metadata=NoteMetadata(
                 source_url=url,
-                author=metadata_dict.author if metadata_dict else None,
+                author=(metadata_dict.author if metadata_dict else None) or byline_author(text),
                 custom={"site_tags": site_tags} if site_tags else {},
                 language=language,
                 word_count=word_count,

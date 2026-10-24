@@ -76,7 +76,8 @@ src/zettlecast/
 frontend/            Next.js UI: app/(main)/ pages share the sidebar (notes, podcasts, images,
                      process, settings; app/(main)/search still exists but is hidden: the graph's search box replaces it);
                      app/(main)/process is the HMI-style control page (ISA-101 look; cycle times + rough ETA; the image line
-                     screenshots -> sorting -> vision with its controls); app/graph is a full-screen view;
+                     screenshots -> sorting -> vision with its controls; images, Reddit sync/tagging and web/doc adds get an
+                     ETA too, from recent finish times: image_run/reddit progress done_times, system.web_run); app/graph is a full-screen view;
                      app/triage sorts screenshots (swipe / arrow keys; reached from Images and the process page); components/Transcript renders speaker turns
 tests/               pytest suite (LLM and models mocked)
 start.py             Start Ollama (if needed) + API + web UI (any OS)
@@ -178,6 +179,7 @@ the same word count and a close spelling is proposed as a new name. Single words
 | `podcast verify [MATCH] [-s N]` | Compare notes with the feed's published transcripts (word/speaker agreement, passages to spot-check) |
 | `podcast status` / `podcast retry` | Queue status / reset failed |
 | `image add PATH` / `image run` / `image status` / `image retry` | Image pipeline |
+| `image reformat [--dry-run]` | Rewrite image notes from their stored vision results (no model), after a formatter change |
 | `worker [--once] [--no-file-server]` | Worker (`ROLE=worker`): do the primary's jobs; started at boot by Task Scheduler |
 | `wake` | Primary: Wake-on-LAN to the worker now |
 | `migrate-paths --desktop-root PATH [--dry-run]` | Primary, once after copying the storage folder: repoint paths |
@@ -236,7 +238,7 @@ POST|DELETE /image/triage/folders {path} | GET /image/triage/file?path= (only in
 POST /image/triage/decide {path, decision: keep|keep_image|skip} | POST /image/triage/undo {path}
 POST /image/triage/process              read every kept screenshot (vision model; refused during a podcast run)
 
-GET  /system/status                     run state (any process), queues, GPU, LLM server, Ollama, DB, disk, alarms
+GET  /system/status                     run state (any process), queues, GPU, LLM server, Ollama, DB, disk, alarms, image run, web adds
 POST /system/run/stop {mode: after_episode|abort} | POST /system/run/resume
 POST /system/unload (free the GPU; not during a run) | POST /system/reindex (background task)
 
@@ -339,7 +341,7 @@ reads `LLM_PARALLEL` images at once and links the new notes with one graph rebui
 (linking per note rebuilds the graph each time: ~10 s of CPU against ~2 s to read an image). **Circling** (✎ / M on the triage page) saves the stroke and its box (fractions of
 the image) with the decision; the vision call then gets the screenshot with the mark drawn on it
 plus a padded, enlarged crop of the circle, and reads the circled content as the focus (it
-overrides the model's own pick). The rest of the screen goes in `## Screen Text` and file details in
+overrides the model's own pick). The rest of the screen goes in `## Screen Text` (`formatter.screen_text`: one block per post with the author in bold, the app's buttons, counts, times, status bar and ads dropped, the focus not repeated) and file details in
 `## Image Details` (both in `chunker.UNINDEXED_SECTIONS`). People / organisations must appear in
 the focus or context (ads and neighbouring comments are dropped).
 
@@ -383,7 +385,7 @@ note (`chunker.UNINDEXED_SECTIONS`) are not chunked or embedded.
 
 Graph view (`frontend/components/Graph.tsx`, Obsidian-like): a live d3-force simulation (centre, repel,
 link force/distance, collision, plus a community pull towards each community's centre; links across
-communities weaken as it grows), laid out 300 ticks before the first frame; notes can be dragged.
+communities weaken as it grows), laid out 300 ticks before the first frame; notes are not draggable (a drag reheated the layout and moved every note on a click).
 Fill = community: picked per graph so linked communities (neighbours on the map) differ most
 (`autoCommunityColors`: 12 hues, then golden-angle ones; any changeable in the pane, Reset colours drops
 the picks; communities also named on the map), ring = source type. Node sizes are in layout units (`itemSizesReference: 'positions'`), so the collision

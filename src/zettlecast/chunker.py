@@ -119,9 +119,11 @@ UNINDEXED_SECTIONS = ("Automatic Corrections", "Needs Review", "Screen Text", "I
 
 
 def _drop_sections(text: str, titles: tuple) -> str:
-    """Remove '## <title>' sections (heading to the next '## ') from markdown."""
+    """Remove '## <title>' sections (heading to the next '## ') from markdown, and images
+    (only their alt text is content: the URL would match every page of the same site)."""
     parts = re.split(r"(?m)^(?=## )", text)
-    return "".join(p for p in parts if not any(p.startswith(f"## {t}") for t in titles))
+    text = "".join(p for p in parts if not any(p.startswith(f"## {t}") for t in titles))
+    return re.sub(r"!\[([^\]\n]*)\]\([^)\s]+\)", r"\1", text)
 
 
 def create_chunks(text: str, base_chunk_id: str) -> List[ChunkModel]:

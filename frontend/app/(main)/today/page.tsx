@@ -11,7 +11,9 @@ import type { InsightCard, InsightSide, TodayResponse } from '@/lib/types';
 const SWIPE_PX = 90;
 const POLL_MS = 8000; // while the LLM prepares today's cards
 const TYPE_LABELS: Record<string, string> = { audio: 'Podcast', image: 'Screenshot', reddit: 'Reddit save', web: 'Web page', pdf: 'PDF', markdown: 'Note' };
-const RELATIONS: Record<string, string> = { agrees: 'Agree', contradicts: 'Contradict', extends: 'Builds on it', applies: 'In practice' };
+const RELATIONS: Record<string, string> = {
+    same_subject: 'Same subject', agrees: 'Agree', contradicts: 'Contradict', extends: 'Builds on it', applies: 'In practice',
+};
 
 type Action = 'rejected' | 'good' | 'note';
 
@@ -95,7 +97,7 @@ export default function TodayPage() {
             setDrag(null);
             setWriting({
                 title: card.insight?.note_title ?? '',
-                text: card.insight ? `${card.insight.insight}\n\n${card.insight.question}` : '',
+                text: card.insight ? [card.insight.insight, card.insight.question].filter(Boolean).join('\n\n') : '',
             });
             return;
         }
@@ -210,7 +212,7 @@ export default function TodayPage() {
                     {card.insight ? (
                         <div className="today-insight">
                             <p>{card.insight.insight}</p>
-                            <p className="today-question">{card.insight.question}</p>
+                            {card.insight.question && <p className="today-question">{card.insight.question}</p>}
                         </div>
                     ) : (
                         <p className="today-insight today-preparing text-muted">
