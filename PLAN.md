@@ -1,6 +1,6 @@
 # Plan: a light primary (Mac only stores, serves and coordinates)
 
-Status (2026-11-04): **steps 1-3 done** (1 and 3 deployed to the PC; 2 and 3 live on the Mac after its restart). Next: step 4. Branch: `mac-primary-setup` (then one branch per step or one
+Status (2026-11-04): **steps 1-3 and 10 done** (the Mac runs in containers since 12:18). Next: step 4. Branch: `mac-primary-setup` (then one branch per step or one
 feature branch, see Deploying).
 
 ## Goal
@@ -143,7 +143,9 @@ Decided 2026-11-04: containerize the primary only; the worker stays native (Dock
 sign-in, can't see Windows sessions or run `shutdown /s` for the idle shutdown, and reads `D:`/OneDrive media
 and multi-GB models slowly through WSL2).
 
-- After step 6 (no heavy work left on the Mac). A Linux container has no MPS: the query model runs on the CPU,
+- Done early (2026-11-04), so the Mac's restarts need no sudo; measured in the container: search
+  0.4-0.6 s, API 2.3 GB with `MODEL_DTYPE=float16`.
+- Planned after step 6 (no heavy work left on the Mac). A Linux container has no MPS: the query model runs on the CPU,
   ~250 ms a query (measured; try float32, bf16 on CPU is slow).
 - Two services next to Home Assistant in the existing OrbStack compose (`~/MacContainers`): `zettlecast-api`
   (Python 3.12 slim, `uv pip install .` without `[gpu]`, CPU torch wheels) and `zettlecast-web` (Node 24,

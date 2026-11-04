@@ -71,7 +71,30 @@ MODEL_IDLE_MINUTES=5        # memory back for the Mac's other services soon afte
 `frontend/.env.local` holds the same sign-in settings as on the PC: `ZC_API_TOKEN` (= `API_TOKEN`),
 `ZC_SESSION_SECRET`, `ZC_LOGIN_USER` and `ZC_LOGIN_HASH`.
 
-## 4. Start at boot
+## 4. Run it: containers (this Mac) or launchd
+
+**In OrbStack containers (how this Mac runs it since 2026-11-04).** Keep the checkout outside
+`~/Documents` (launchd-started processes can't read it): `~/Zettlecast`. The two services are in
+`~/MacContainers/docker-compose.macos.yaml` (`zettlecast-api`, `zettlecast-web`), started at sign-in
+with the rest of that stack.
+
+```bash
+./deploy/macos/install-wake-helper.sh      # once: native Wake-on-LAN sender (LaunchAgent, no sudo)
+cd ~/MacContainers && docker compose -f docker-compose.macos.yaml up -d --build zettlecast-api zettlecast-web
+docker logs -f zettlecast-api
+```
+
+- Updates: `git pull` in `~/Zettlecast`, then the same `up -d --build`. No sudo.
+- The API runs as your user with `~/_BRAIN_STORAGE` mounted at the same path (notes refer to their
+  files by absolute path), the Hugging Face cache at `/hf`, and `.env` mounted (Settings writes it).
+- No Apple GPU in a Linux container: the query model runs on the CPU in float16 (`MODEL_DTYPE`):
+  searches take ~0.4-0.6 s, the API ~2.3 GB. bfloat16 is ~80x slower there; float32 needs ~1 GB more.
+- A container's broadcasts don't reach the LAN: with `WAKE_SENDER=helper` (set in the image) the API
+  writes wake requests to `<storage>/wake_requests/`, and `com.zettlecast.wake` sends them
+  (`~/Library/Logs/Zettlecast/wake.log`).
+
+**With launchd instead** (native: Apple GPU search ~0.1 s, but starting and restarting needs sudo):
+
 
 ```bash
 ./deploy/macos/install.sh            # asks for your password (sudo)

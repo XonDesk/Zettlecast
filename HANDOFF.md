@@ -65,6 +65,17 @@ on a branch and note them here.
   log redacts `token=` and skips successful `/system/status` / `/podcast/status` polls. Token rotated.
 - `tests/conftest.py` forces `ROLE=standalone`: the primary's `.env` made 11 tests fail.
 
+## Containers (2026-11-04)
+
+The Mac runs Zettlecast in OrbStack (`zettlecast-api`, `zettlecast-web` in
+`~/MacContainers/docker-compose.macos.yaml`), from the checkout at `~/Zettlecast`; the launchd
+daemons are uninstalled and `~/Documents/Zettlecast` is the old checkout. Deploy a change: push,
+`git pull` in `~/Zettlecast` and on the PC, `up -d --build` on the Mac, and on the PC
+`C:\Users\XonDe\restart-worker.ps1` (stopping the task alone leaves the worker running).
+Wake-on-LAN: the native `com.zettlecast.wake` LaunchAgent (a container's broadcasts don't reach the LAN).
+Checked: the PC reaches the API, heartbeat times in local time (TZ), files owned by the Mac user,
+a wake request from the container sent by the helper.
+
 ## Open issues seen on the first real run (not fixed)
 
 - Reddit image/link posts with only a title (41-108 chars) fail the LLM pass every time ("no usable answer"):
