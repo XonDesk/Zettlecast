@@ -49,7 +49,7 @@ def search(
     if not candidates:
         return []
 
-    if rerank_results:
+    if rerank_results and settings.use_reranker:
         ranked = rerank(query, [c["text"] for c in candidates])
         scored = [(candidates[i], score) for i, score in ranked if score >= settings.search_min_score]
     else:

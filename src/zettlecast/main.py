@@ -90,6 +90,8 @@ async def lifespan(_app: FastAPI):
         from .wake import start_policy
 
         start_policy()
+        if not settings.model_idle_minutes:  # kept loaded: load it now, not on the first search
+            threading.Thread(target=lambda: embeddings.embed_query("warm up"), name="embedder-load", daemon=True).start()
         logger.info(f"Primary: jobs go to the worker (wake-on-LAN {'on' if settings.desktop_mac_address else 'off'})")
     else:
         _start_recycle_sweeper()

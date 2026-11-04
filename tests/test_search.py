@@ -31,6 +31,21 @@ def test_one_long_note_does_not_crowd_out_the_rest():
     assert seen["n"] == search.MAX_CHUNKS_PER_NOTE + 1
 
 
+def test_the_primary_ranks_by_similarity_without_the_reranker(monkeypatch):
+    from zettlecast.config import settings
+
+    monkeypatch.setattr(settings, "role", "primary")
+    assert not settings.use_reranker
+    with patch.object(search.db, "search_chunks", return_value=chunks()), \
+         patch.object(search.db, "note_titles", return_value={"a": ("A", "audio"), "b": ("B", "audio")}), \
+         patch.object(search, "embed_query", return_value=np.zeros(4)), \
+         patch.object(search, "rerank", side_effect=AssertionError("reranked on the primary")):
+        results = search.search("q", top_k=5)
+    assert [r.uuid for r in results] == ["a", "b"] and results[0].score == 0.9
+    monkeypatch.setattr(settings, "rerank", True)  # RERANK=true still turns it on
+    assert settings.use_reranker
+
+
 def test_link_reason_names_what_links_two_notes():
     import json
 

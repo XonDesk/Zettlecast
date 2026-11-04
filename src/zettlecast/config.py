@@ -5,6 +5,7 @@ Pydantic Settings for all configurable options.
 
 import secrets
 from pathlib import Path
+from typing import Optional
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -46,6 +47,7 @@ class Settings(BaseSettings):
     rerank_top_k: int = 50  # Chunk candidates to rerank
     return_top_k: int = 5  # Final results to return
     search_min_score: float = 0.05  # Drop reranked results below this relevance (0..1)
+    rerank: Optional[bool] = None  # rerank search hits (default: yes, except on the primary: ~17 s on an M1)
     model_idle_minutes: float = 5  # API server unloads the search models after this long unused (0 = keep)
     hf_token: str = Field(default="", validation_alias="HF_TOKEN")
 
@@ -151,6 +153,10 @@ class Settings(BaseSettings):
     @property
     def is_worker(self) -> bool:
         return self.role == "worker"
+
+    @property
+    def use_reranker(self) -> bool:
+        return self.rerank if self.rerank is not None else not self.is_primary
 
     def ensure_directories(self) -> None:
         """Create storage directories if they don't exist."""
