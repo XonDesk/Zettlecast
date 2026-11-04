@@ -17,3 +17,4 @@ def _no_llama_server(monkeypatch):
     monkeypatch.setattr(settings, "llm_backend", "ollama")
     # the machine's .env may say primary or worker (deploy/); tests that need a role set it themselves
     monkeypatch.setattr(settings, "role", "standalone")
+    monkeypatch.setattr(settings, "wake_min_jobs", 1)

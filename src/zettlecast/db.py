@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 DIM = settings.embedding_dimensions
 # metadata.custom flag: stored on the primary without an index; the worker sends one (tagging.py)
 INDEX_PENDING = "index_pending"
+# the primary compacts the tables in the background after this many stored notes (the graph job's
+# store_graph does it once per session anyway; a burst of writes in between kept 1.6 GB of versions)
+COMPACT_AFTER_WRITES = 100
 
 NOTES_SCHEMA = pa.schema([
     ("uuid", pa.string()),
@@ -256,20 +259,15 @@ class Database:
         if norm > 0:
             note_vector = note_vector / norm
 
-        self.delete_note(note.uuid, keep_edges=True)
-
-        self.notes.add([_note_row(note, note_vector)])
-        if chunks:
-            self.chunks.add([
-                {
-                    "chunk_id": c["chunk_id"],
-                    "note_uuid": note.uuid,
-                    "text": c["text"],
-                    "start_char": c["start_char"],
-                    "vector": v.tolist(),
-                }
-                for c, v in zip(chunks, vectors)
-            ])
+        # one version per table (a delete and an add were two each): the note row replaced, its
+        # chunks updated, added and the ones it no longer has deleted; its edges are kept
+        self._replace_note_row(note, note_vector)
+        rows = [{"chunk_id": c["chunk_id"], "note_uuid": note.uuid, "text": c["text"], "start_char": c["start_char"],
+                 "vector": v.tolist()} for c, v in zip(chunks, vectors)]
+        (self.chunks.merge_insert("chunk_id").when_matched_update_all().when_not_matched_insert_all()
+         .when_not_matched_by_source_delete(f"note_uuid = {_q(note.uuid)}")
+         .execute(rows or pa.Table.from_pylist([], schema=self.chunks.schema)))
+        self._wrote()
         if settings.is_primary:  # the worker rebuilds the graph once its session's work is done
             from . import graphstate
 
@@ -289,8 +287,31 @@ class Database:
         note.metadata.custom[INDEX_PENDING] = True
         old = self.notes.search().where(f"uuid = {_q(note.uuid)}").select(["vector"]).limit(1).to_list()
         vector = np.asarray(old[0]["vector"], np.float32) if old else np.zeros(DIM, np.float32)
-        self.notes.delete(f"uuid = {_q(note.uuid)}")
-        self.notes.add([_note_row(note, vector)])
+        self._replace_note_row(note, vector)
+        self._wrote()
+
+    def _replace_note_row(self, note: NoteModel, vector) -> None:
+        (self.notes.merge_insert("uuid").when_matched_update_all().when_not_matched_insert_all()
+         .execute([_note_row(note, vector)]))
+
+    def _wrote(self) -> None:
+        """Count a stored note; on the primary, compact in the background every COMPACT_AFTER_WRITES."""
+        if not settings.is_primary:
+            return  # a standalone install's runs and rebuilds compact as before
+        self._writes = getattr(self, "_writes", 0) + 1
+        if self._writes < COMPACT_AFTER_WRITES or getattr(self, "_compacting", False):
+            return
+        self._writes, self._compacting = 0, True
+
+        def compact() -> None:
+            try:
+                self.optimize()
+            finally:
+                self._compacting = False
+
+        import threading
+
+        threading.Thread(target=compact, name="db-compact", daemon=True).start()
 
     def update_note_text(self, uuid: str, full_text: str, content_hash: str) -> None:
         """A note's text without re-embedding it: for changes outside its indexed sections."""

@@ -75,3 +75,33 @@ def test_ingest_on_the_primary_does_not_link_a_waiting_note(monkeypatch):
     monkeypatch.setattr(pipeline.db, "upsert_note", lambda n, index=None: False)
     monkeypatch.setattr(pipeline, "update_edges_for_note", lambda uuid: pytest.fail("linked without an index"))
     pipeline.ingest_note(note())
+
+
+# --- Fewer versions per stored note (plan step 8) ---
+
+
+def test_a_stored_note_costs_one_version_per_table_and_drops_chunks_it_no_longer_has(tmp_path, vectors):
+    db = Database(tmp_path / "db")
+    db.upsert_note(note(text="First passage about heat. " * 80))  # several chunks
+    many = db.chunks.count_rows()
+    assert many > 1
+    notes_v, chunks_v = len(db.notes.list_versions()), len(db.chunks.list_versions())
+    db.upsert_note(note(text="Now one short passage."))
+    assert len(db.notes.list_versions()) == notes_v + 1 and len(db.chunks.list_versions()) == chunks_v + 1
+    assert db.chunks.count_rows() == 1 and db.notes.count_rows() == 1
+    assert db.get_note_by_uuid("n1").full_text == "Now one short passage."
+
+
+def test_the_primary_compacts_in_the_background_after_many_writes(tmp_path, monkeypatch, vectors):
+    import zettlecast.db as dbm
+
+    db = Database(tmp_path / "db")
+    monkeypatch.setattr(settings, "role", "primary")
+    monkeypatch.setattr(dbm, "COMPACT_AFTER_WRITES", 3)
+    compacted = []
+    monkeypatch.setattr(db, "optimize", lambda: compacted.append(1))
+    for i in range(7):
+        db.upsert_note(note(uuid=f"n{i}"))  # waiting notes count too
+    import time
+    time.sleep(0.2)
+    assert len(compacted) == 2
