@@ -43,6 +43,25 @@ for _noisy in ("nemo_logger", "nemo", "lightning", "pytorch_lightning", "httpx",
 logger = logging.getLogger(__name__)
 
 
+class _AccessLogFilter(logging.Filter):
+    """Access log: no API token (a ?token= still works, e.g. the bookmarklet) and none of the process
+    page's status polls (every 2 s while it is open) unless they fail."""
+    POLLS = ("/system/status", "/podcast/status")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) == 5:  # uvicorn: client, method, path, http version, status
+            client, method, path, version, code = args
+            if method == "GET" and path.split("?")[0] in self.POLLS and int(code) < 400:
+                return False
+            if "token=" in path:
+                record.args = (client, method, re.sub(r"token=[^&]*", "token=***", path), version, code)
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_AccessLogFilter())
+
+
 def _start_recycle_sweeper() -> None:
     """Discarded screenshots go to the Recycle Bin once their Undo window passes, page open or not."""
     def loop() -> None:
@@ -223,7 +242,6 @@ class IngestResponse(BaseModel):
 
 @app.post("/ingest", response_model=IngestResponse)
 async def ingest(
-    token: str = Query(...),
     url: Optional[str] = Query(None, description="URL to ingest"),
     file: Optional[UploadFile] = File(None, description="File to ingest"),
 ):
@@ -294,7 +312,6 @@ async def ingest(
 
 @app.get("/notes")
 async def list_notes(
-    token: str = Query(...),
     status: Optional[str] = Query(None, description="Filter by status"),
     source_type: Optional[str] = Query(None, description="Filter by source type"),
     limit: int = Query(50, ge=1, le=2000),
@@ -308,7 +325,6 @@ async def list_notes(
 @app.get("/notes/{uuid}")
 async def get_note(
     uuid: str,
-    token: str = Query(...),
     include_suggestions: bool = Query(True),
 ):
     """Get a single note by UUID with optional suggestions."""
@@ -336,7 +352,7 @@ async def get_note(
 
 
 @app.get("/notes/{uuid}/references")
-async def get_note_references(uuid: str, token: str = Query(...)):
+async def get_note_references(uuid: str):
     """What a note links to (URLs) and mentions (names to look up); nothing is fetched."""
     note = db.get_note_by_uuid(uuid)
     if not note:
@@ -345,7 +361,7 @@ async def get_note_references(uuid: str, token: str = Query(...)):
 
 
 @app.get("/references/lookup")
-async def lookup_reference(q: str = Query(..., min_length=1), token: str = Query(...)):
+async def lookup_reference(q: str = Query(..., min_length=1)):
     """Wikipedia pages for a mentioned name."""
     try:
         return {"candidates": await run_in_threadpool(references.lookup, q)}
@@ -358,7 +374,7 @@ class FetchReferenceRequest(BaseModel):
 
 
 @app.post("/notes/{uuid}/references/fetch", response_model=IngestResponse)
-async def fetch_reference(uuid: str, body: FetchReferenceRequest, token: str = Query(...)):
+async def fetch_reference(uuid: str, body: FetchReferenceRequest):
     """The page a note links to (or a looked-up name's page) as a note linked to it."""
     source = db.get_note_by_uuid(uuid)
     if not source:
@@ -381,7 +397,6 @@ async def fetch_reference(uuid: str, body: FetchReferenceRequest, token: str = Q
 @app.delete("/notes/{uuid}")
 async def delete_note(
     uuid: str,
-    token: str = Query(...),
 ):
     """Delete a note by UUID."""
     if not db.get_note_by_uuid(uuid):
@@ -395,7 +410,6 @@ async def delete_note(
 async def get_note_source_file(
     uuid: str,
     request: Request,
-    token: str = Query(...),
 ):
     """Download/view the original source file for a note."""
     note = db.get_note_by_uuid(uuid)
@@ -432,7 +446,7 @@ THUMB_MAX = 720  # px, longest side: sharp at the graph's ~240 px preview on a 2
 
 
 @app.get("/notes/{uuid}/thumb")
-def get_note_thumbnail(uuid: str, token: str = Query(...)):
+def get_note_thumbnail(uuid: str):
     """
     A small JPEG of a kept screenshot, for the graph's hover preview (originals are ~2 MB). Made
     once into <storage>/thumbs; an image note's uuid comes from its bytes, so it never goes stale.
@@ -458,7 +472,6 @@ def get_note_thumbnail(uuid: str, token: str = Query(...)):
 @app.get("/notes/{uuid}/markdown")
 async def get_note_markdown(
     uuid: str,
-    token: str = Query(...),
 ):
     """Download note as markdown file."""
     note = db.get_note_by_uuid(uuid)
@@ -517,7 +530,6 @@ class SearchRequest(BaseModel):
 @app.get("/search")
 async def search_notes(
     q: str = Query(..., description="Search query"),
-    token: str = Query(...),
     top_k: int = Query(5, ge=1, le=50),
     rerank: bool = Query(True),
 ):
@@ -545,7 +557,6 @@ class LinkAction(BaseModel):
 async def manage_link(
     uuid: str,
     body: LinkAction,
-    token: str = Query(...),
 ):
     """Accept or reject a link suggestion."""
     if body.action not in ["accept", "reject"]:
@@ -563,7 +574,7 @@ async def manage_link(
 
 
 @app.get("/today")
-def get_today(token: str = Query(...)):
+def get_today():
     """Today's cards: graph connections worth a look, with the LLM's take once it has one."""
     from . import insights
 
@@ -578,7 +589,7 @@ class InsightVerdict(BaseModel):
 
 
 @app.post("/today/{key}/verdict")
-def decide_insight(key: str, body: InsightVerdict, token: str = Query(...)):
+def decide_insight(key: str, body: InsightVerdict):
     """good: worth the card; rejected: not related (the link leaves the graph for good)."""
     from . import insights
 
@@ -597,7 +608,7 @@ class InsightNote(BaseModel):
 
 
 @app.post("/today/{key}/note")
-def note_from_insight(key: str, body: InsightNote, token: str = Query(...)):
+def note_from_insight(key: str, body: InsightNote):
     """A note of your own from a card, [[linked]] to both notes (in <storage>/notes)."""
     from . import insights
 
@@ -632,7 +643,6 @@ def _graph_facets(note: dict, row: dict) -> dict:
 
 @app.get("/graph")
 async def get_graph_data(
-    token: str = Query(...),
     limit: int = Query(2000, ge=1, le=10000),
 ):
     """
@@ -704,7 +714,7 @@ async def get_graph_data(
 
 
 @app.post("/graph/rebuild")
-async def rebuild_graph_endpoint(token: str = Query(...)):
+async def rebuild_graph_endpoint():
     """Recompute all graph edges."""
     from .linker import rebuild_graph
 
@@ -719,7 +729,7 @@ class PodcastImportRequest(BaseModel):
 
 
 @app.get("/podcast/status")
-async def get_podcast_status(token: str = Query(...)):
+async def get_podcast_status():
     """Get podcast queue status summary."""
     try:
         from .podcast.queue import TranscriptionQueue
@@ -764,7 +774,6 @@ async def get_podcast_status(token: str = Query(...)):
 @app.post("/podcast/import")
 async def import_podcast_feed(
     body: PodcastImportRequest,
-    token: str = Query(...),
 ):
     """Import episodes from an RSS feed URL."""
     try:
@@ -787,7 +796,7 @@ async def import_podcast_feed(
 
 
 @app.post("/podcast/retry")
-async def retry_failed_podcasts(token: str = Query(...)):
+async def retry_failed_podcasts():
     """Retry all failed episodes marked for review."""
     try:
         from .podcast.queue import TranscriptionQueue
@@ -808,7 +817,7 @@ async def retry_failed_podcasts(token: str = Query(...)):
 
 
 @app.post("/podcast/sync")
-async def sync_podcast_queue(token: str = Query(...)):
+async def sync_podcast_queue():
     """Sync queue with storage - finds unprocessed podcasts."""
     try:
         from .podcast.queue import TranscriptionQueue
@@ -829,7 +838,7 @@ async def sync_podcast_queue(token: str = Query(...)):
 
 
 @app.post("/podcast/reset-stuck")
-async def reset_stuck_podcasts(token: str = Query(...)):
+async def reset_stuck_podcasts():
     """Reset stuck processing items to pending."""
     try:
         from .podcast.queue import TranscriptionQueue
@@ -949,7 +958,6 @@ class PodcastRunRequest(BaseModel):
 async def run_podcast_processing(
     body: PodcastRunRequest,
     background_tasks: BackgroundTasks,
-    token: str = Query(...),
 ):
     """Start podcast transcription processing in the background."""
     global _processing_state
@@ -1013,7 +1021,7 @@ async def run_podcast_processing(
 
 
 @app.get("/podcast/running")
-async def get_podcast_running_status(token: str = Query(...)):
+async def get_podcast_running_status():
     """Get the current running status of podcast processing."""
     return {
         "is_running": _processing_state["is_running"],
@@ -1032,7 +1040,7 @@ async def get_podcast_running_status(token: str = Query(...)):
 
 
 @app.post("/podcast/cancel/{episode_id}")
-async def cancel_podcast_episode(episode_id: str, token: str = Query(...)):
+async def cancel_podcast_episode(episode_id: str):
     """Cancel a specific episode - remove from pending or stop current processing."""
     global _cancel_episode_id
 
@@ -1079,7 +1087,7 @@ async def cancel_podcast_episode(episode_id: str, token: str = Query(...)):
 
 
 @app.get("/system/status")
-async def system_status(token: str = Query(...)):
+async def system_status():
     """Everything the process page shows: run, queues, GPU, LLM server, database, disk, alarms."""
     from . import system
 
@@ -1091,7 +1099,7 @@ class StopRequest(BaseModel):
 
 
 @app.post("/system/run/stop")
-async def system_run_stop(body: StopRequest, token: str = Query(...)):
+async def system_run_stop(body: StopRequest):
     """Stop the run (CLI or API): after the current episode, or now (abort)."""
     from . import runstate, system
 
@@ -1112,7 +1120,7 @@ async def system_run_stop(body: StopRequest, token: str = Query(...)):
 
 
 @app.post("/system/run/resume")
-async def system_run_resume(token: str = Query(...)):
+async def system_run_resume():
     """Withdraw a stop request that hasn't taken effect yet (primary: also lets the worker take new work)."""
     from . import runstate
 
@@ -1123,7 +1131,7 @@ async def system_run_resume(token: str = Query(...)):
 
 
 @app.post("/system/wake")
-async def system_wake(token: str = Query(...)):
+async def system_wake():
     """Wake the worker PC now (Wake-on-LAN), whatever the wake window and earlier misses."""
     from .wake import wake_now
 
@@ -1137,7 +1145,7 @@ class DesktopSettings(BaseModel):
 
 
 @app.post("/system/desktop")
-async def system_desktop(body: DesktopSettings, token: str = Query(...)):
+async def system_desktop(body: DesktopSettings):
     """Keep the worker PC on when idle (stay_on), or let it shut down again."""
     if not settings.is_primary:
         raise HTTPException(status_code=400, detail="Only the primary has a worker")
@@ -1147,7 +1155,7 @@ async def system_desktop(body: DesktopSettings, token: str = Query(...)):
 
 
 @app.post("/system/unload")
-async def system_unload(token: str = Query(...)):
+async def system_unload():
     """Free the GPU: stop the LLM server, unload Ollama and this process's models (not during a run)."""
     from . import system
 
@@ -1155,7 +1163,7 @@ async def system_unload(token: str = Query(...)):
 
 
 @app.post("/system/reindex")
-async def system_reindex(token: str = Query(...)):
+async def system_reindex():
     """Re-read every transcript note, re-embed it and rebuild the graph (background task)."""
     from . import system
     from .pipeline import reindex_all
@@ -1215,7 +1223,7 @@ def update_env_file(updates: dict) -> None:
 
 
 @app.get("/settings")
-async def get_settings(token: str = Query(...)):
+async def get_settings():
     """Get current application settings."""
     values = {key: getattr(settings, key) for key in EDITABLE_SETTINGS}
     values["storage_path"] = str(settings.storage_path)
@@ -1230,7 +1238,6 @@ async def get_settings(token: str = Query(...)):
 @app.post("/settings")
 async def update_settings_endpoint(
     body: SettingsUpdate,
-    token: str = Query(...),
 ):
     """Save settings to .env; they take effect after a restart."""
     updates = body.model_dump(exclude_none=True)
@@ -1256,7 +1263,7 @@ async def update_settings_endpoint(
 # --- Image Processing Endpoints ---
 
 @app.get("/image/status")
-async def get_image_status(token: str = Query(...)):
+async def get_image_status():
     """Get image queue status summary."""
     try:
         from .image.queue import ImageQueue
@@ -1303,7 +1310,6 @@ class ImageScanRequest(BaseModel):
 @app.post("/image/scan")
 async def scan_images(
     body: ImageScanRequest,
-    token: str = Query(...),
 ):
     """Scan directory to preview images without adding to queue."""
     try:
@@ -1355,7 +1361,6 @@ class ImageAddRequest(BaseModel):
 @app.post("/image/add")
 async def add_images(
     body: ImageAddRequest,
-    token: str = Query(...),
 ):
     """Add image(s) to processing queue."""
     try:
@@ -1404,7 +1409,7 @@ async def add_images(
 
 
 @app.post("/image/retry")
-async def retry_failed_images(token: str = Query(...)):
+async def retry_failed_images():
     """Retry all failed images."""
     try:
         from .image.queue import ImageQueue
@@ -1448,7 +1453,7 @@ def _run_image_processing_background(limit: int = None):
 
 
 @app.post("/image/stop")
-async def stop_image_processing(token: str = Query(...)):
+async def stop_image_processing():
     """Stop the image run: the images being read finish, no more start, what's stored is linked."""
     if settings.is_primary:
         return workerstate.stop_images()
@@ -1466,7 +1471,6 @@ class ImageRunRequest(BaseModel):
 async def run_image_processing(
     body: ImageRunRequest,
     background_tasks: BackgroundTasks,
-    token: str = Query(...),
 ):
     """Start image processing in the background."""
     if settings.is_primary:
@@ -1527,7 +1531,7 @@ class TriageDecisionRequest(BaseModel):
 
 
 @app.get("/image/triage")
-async def triage_pending(token: str = Query(...), limit: int = Query(20, ge=1, le=100)):
+async def triage_pending(limit: int = Query(20, ge=1, le=100)):
     """The next undecided screenshots in the triage folders (newest first) and counts."""
     from .image import triage
     from .image.queue import ImageQueue
@@ -1543,7 +1547,7 @@ async def triage_pending(token: str = Query(...), limit: int = Query(20, ge=1, l
 
 
 @app.post("/image/triage/folders")
-async def triage_add_folder(body: TriageFolderRequest, token: str = Query(...)):
+async def triage_add_folder(body: TriageFolderRequest):
     from .image import triage
 
     if settings.is_primary:
@@ -1555,7 +1559,7 @@ async def triage_add_folder(body: TriageFolderRequest, token: str = Query(...)):
 
 
 @app.delete("/image/triage/folders")
-async def triage_remove_folder(body: TriageFolderRequest, token: str = Query(...)):
+async def triage_remove_folder(body: TriageFolderRequest):
     from .image import triage
 
     if settings.is_primary:
@@ -1564,7 +1568,7 @@ async def triage_remove_folder(body: TriageFolderRequest, token: str = Query(...
 
 
 @app.get("/image/triage/file")
-async def triage_file(request: Request, path: str = Query(...), token: str = Query(...)):
+async def triage_file(request: Request, path: str = Query(...)):
     """A screenshot from a triage folder (nothing outside those folders is served)."""
     from .image import triage
 
@@ -1578,7 +1582,7 @@ async def triage_file(request: Request, path: str = Query(...), token: str = Que
 
 
 @app.post("/image/triage/decide")
-async def triage_decide(body: TriageDecisionRequest, token: str = Query(...)):
+async def triage_decide(body: TriageDecisionRequest):
     from .image import triage
 
     if settings.is_primary:
@@ -1590,7 +1594,7 @@ async def triage_decide(body: TriageDecisionRequest, token: str = Query(...)):
 
 
 @app.post("/image/triage/undo")
-async def triage_undo(body: TriageFolderRequest, token: str = Query(...)):
+async def triage_undo(body: TriageFolderRequest):
     """Forget the decision on a screenshot (body.path); a keep not yet processed leaves the queue."""
     from .image import triage
 
@@ -1603,7 +1607,7 @@ async def triage_undo(body: TriageFolderRequest, token: str = Query(...)):
 
 
 @app.get("/reddit/status")
-async def reddit_status(token: str = Query(...)):
+async def reddit_status():
     """Whether a feed is set, how many saves are imported, last sync, the running sync's progress."""
     from . import reddit
 
@@ -1611,7 +1615,7 @@ async def reddit_status(token: str = Query(...)):
 
 
 @app.post("/reddit/sync")
-async def reddit_sync(token: str = Query(...), refresh: bool = Query(False), limit: Optional[int] = Query(None, ge=1),
+async def reddit_sync(refresh: bool = Query(False), limit: Optional[int] = Query(None, ge=1),
                       enrich: bool = Query(True), threads: bool = Query(True)):
     """
     Import new Reddit saves in the background (a maintenance task: not during a podcast run).
@@ -1631,7 +1635,7 @@ class RubricBody(BaseModel):
 
 
 @app.get("/reddit/rubric")
-async def reddit_rubric(token: str = Query(...)):
+async def reddit_rubric():
     """The rules comment curation follows (the user's, or the default)."""
     from . import curation
 
@@ -1640,7 +1644,7 @@ async def reddit_rubric(token: str = Query(...)):
 
 
 @app.post("/reddit/rubric")
-async def reddit_rubric_save(body: RubricBody, token: str = Query(...)):
+async def reddit_rubric_save(body: RubricBody):
     """Store the curation rules (empty: back to the default). Used from the next curated save on."""
     from . import curation
 
@@ -1649,7 +1653,7 @@ async def reddit_rubric_save(body: RubricBody, token: str = Query(...)):
 
 
 @app.post("/reddit/tag")
-async def reddit_tag(token: str = Query(...)):
+async def reddit_tag():
     """LLM tags + summaries for imported saves that have none (from the database, no Reddit requests)."""
     from . import reddit, system
 
@@ -1659,7 +1663,7 @@ async def reddit_tag(token: str = Query(...)):
 
 
 @app.post("/reddit/stop")
-async def reddit_stop(token: str = Query(...)):
+async def reddit_stop():
     """Stop a Reddit sync or tagging after the current save."""
     from . import reddit
 
@@ -1670,7 +1674,7 @@ async def reddit_stop(token: str = Query(...)):
 
 
 @app.post("/image/triage/process")
-async def triage_process(background_tasks: BackgroundTasks, token: str = Query(...)):
+async def triage_process(background_tasks: BackgroundTasks):
     """Read every kept screenshot into the knowledge base (vision model; not during a podcast run)."""
     from .image.queue import ImageQueue
     from . import runstate
@@ -1691,7 +1695,7 @@ async def triage_process(background_tasks: BackgroundTasks, token: str = Query(.
 
 
 @app.get("/image/running")
-async def get_image_running_status(token: str = Query(...)):
+async def get_image_running_status():
     """Get the current running status of image processing."""
     return {
         "is_running": _image_processing_state["is_running"],

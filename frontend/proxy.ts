@@ -18,8 +18,11 @@ export async function proxy(request: NextRequest) {
         if (!signedIn) return NextResponse.json({ detail: 'Not signed in' }, { status: 401 });
         const target = new URL(pathname.slice('/zc-api'.length) || '/', process.env.ZC_API_URL || 'http://127.0.0.1:8000');
         target.search = search;
-        target.searchParams.set('token', process.env.ZC_API_TOKEN ?? '');
-        return NextResponse.rewrite(target);
+        target.searchParams.delete('token');
+        // a header, not ?token=: query strings end up in access logs
+        const headers = new Headers(request.headers);
+        headers.set('Authorization', `Bearer ${process.env.ZC_API_TOKEN ?? ''}`);
+        return NextResponse.rewrite(target, { request: { headers } });
     }
 
     if (!signedIn) {
