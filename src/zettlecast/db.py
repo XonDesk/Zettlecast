@@ -95,6 +95,50 @@ def _row_to_note(row: dict) -> NoteModel:
     )
 
 
+
+def _chunks_and_vectors(note: NoteModel):
+    """A note's chunks ({chunk_id, text, start_char}) and their embeddings, as upsert_note stores them."""
+    from .embeddings import embed_documents
+
+    chunks = create_chunks(note.full_text, note.uuid)
+    # Prefix each chunk with the title so short chunks keep their context
+    vectors = embed_documents([f"{note.title}\n\n{c.text}" for c in chunks])
+    return [{"chunk_id": c.chunk_id, "text": c.text, "start_char": c.start_char} for c in chunks], vectors
+
+
+def index_payload(note: NoteModel) -> dict:
+    """
+    What upsert_note needs to store a note without embedding it (the worker computes it on its GPU
+    and sends it with the note): chunks, float32 vectors (base64) and a hash of the text they're from.
+    """
+    import base64
+
+    from .identity import compute_content_hash
+
+    chunks, vectors = _chunks_and_vectors(note)
+    return {"chunks": chunks, "dim": DIM, "text_hash": compute_content_hash(note.full_text),
+            "vectors": base64.b64encode(np.ascontiguousarray(vectors, np.float32).tobytes()).decode("ascii")}
+
+
+def _from_payload(note: NoteModel, index: dict):
+    """The chunks and vectors of an index_payload, or (None, None) when they don't fit this note."""
+    import base64
+
+    from .identity import compute_content_hash
+
+    chunks = index.get("chunks") or []
+    try:
+        vectors = np.frombuffer(base64.b64decode(index.get("vectors") or ""), np.float32)
+        vectors = vectors.reshape(len(chunks), DIM) if chunks else np.zeros((0, DIM), np.float32)
+    except ValueError:
+        vectors = None
+    if (vectors is None or index.get("dim") != DIM or index.get("text_hash") != compute_content_hash(note.full_text)
+            or any(not str(c.get("chunk_id", "")).startswith(note.uuid) for c in chunks)):
+        logger.warning(f"Index sent for {note.title} doesn't match the note: embedding it here")
+        return None, None
+    return chunks, vectors
+
+
 class Database:
     """Database wrapper for LanceDB operations."""
 
@@ -152,13 +196,14 @@ class Database:
 
     # --- Notes ---
 
-    def upsert_note(self, note: NoteModel) -> None:
-        """Insert or replace a note: chunk it, embed the chunks, store both."""
-        from .embeddings import embed_documents
-
-        chunks = create_chunks(note.full_text, note.uuid)
-        # Prefix each chunk with the title so short chunks keep their context
-        vectors = embed_documents([f"{note.title}\n\n{c.text}" for c in chunks])
+    def upsert_note(self, note: NoteModel, index: Optional[dict] = None) -> None:
+        """
+        Insert or replace a note: chunk it, embed the chunks, store both. With index (from
+        index_payload on the worker) the chunks and vectors are stored as sent, nothing embedded here.
+        """
+        chunks, vectors = _from_payload(note, index) if index else (None, None)
+        if chunks is None:
+            chunks, vectors = _chunks_and_vectors(note)
         note_vector = vectors.mean(axis=0) if len(vectors) else np.zeros(DIM, np.float32)
         norm = np.linalg.norm(note_vector)
         if norm > 0:
@@ -182,10 +227,10 @@ class Database:
         if chunks:
             self.chunks.add([
                 {
-                    "chunk_id": c.chunk_id,
+                    "chunk_id": c["chunk_id"],
                     "note_uuid": note.uuid,
-                    "text": c.text,
-                    "start_char": c.start_char,
+                    "text": c["text"],
+                    "start_char": c["start_char"],
                     "vector": v.tolist(),
                 }
                 for c, v in zip(chunks, vectors)

@@ -205,6 +205,22 @@ def transcript_for_primary(markdown: str) -> str:
     return f"---\n{serialize_frontmatter(meta).strip()}\n---\n{body}"
 
 
+def transcript_index(filename: str, markdown: str) -> Optional[dict]:
+    """The index of a transcript note as the primary will read it (parsed from the same markdown)."""
+    import tempfile
+
+    from .db import index_payload
+    from .parser import parse_markdown
+
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / filename
+        path.write_text(markdown, encoding="utf-8")
+        parsed = parse_markdown(path)
+    if parsed.status != "success" or not parsed.note:
+        return None  # the primary embeds it itself
+    return index_payload(parsed.note)
+
+
 class RemoteTranscriptionQueue:
     """The episodes this worker claimed, with the queue methods the pipeline calls, reported to the primary."""
 
@@ -226,12 +242,14 @@ class RemoteTranscriptionQueue:
         primary().post(f"/worker/podcast/{job_id}/failed", {"cancelled": True})
 
     def mark_completed(self, job_id: str, result, note_path: Path) -> None:
-        """Send the note: the primary writes it to its transcripts, indexes and links it."""
+        """Send the note with its chunks and vectors: the primary writes it to its transcripts and stores them."""
         self.items[job_id].status = "completed"
+        markdown = transcript_for_primary(Path(note_path).read_text(encoding="utf-8"))
         primary().post(f"/worker/podcast/{job_id}/completed", {
             "filename": Path(note_path).name,
-            "markdown": transcript_for_primary(Path(note_path).read_text(encoding="utf-8")),
+            "markdown": markdown,
             "processing_time_seconds": float(getattr(result, "processing_time_seconds", 0) or 0),
+            "index": transcript_index(Path(note_path).name, markdown),
         }, timeout=600)
 
     def release(self, job_ids) -> int:
@@ -343,8 +361,11 @@ def run_images(batch: List[dict]) -> None:
     queue = RemoteImageQueue(items)
 
     def store(image, note, seconds):
-        primary().post(f"/worker/image/{image.id}/completed", {**image_for_primary(note), "seconds": seconds},
-                       timeout=300)
+        from .db import index_payload
+
+        index = index_payload(note)
+        primary().post(f"/worker/image/{image.id}/completed",
+                       {**image_for_primary(note), "seconds": seconds, "index": index}, timeout=300)
         queue.items[image.id].status = "completed"
 
     logger.info(f"Image batch: {len(items)} image(s)")
@@ -364,6 +385,7 @@ def run_tags(batch: List[dict], rubric: Optional[str] = None) -> None:
     from datetime import datetime
 
     from . import curation, tagging
+    from .db import index_payload
 
     if rubric is not None and rubric.strip() != curation.rubric().strip():
         curation.save_rubric(rubric)  # the user's curation rules live on the primary
@@ -386,7 +408,8 @@ def run_tags(batch: List[dict], rubric: Optional[str] = None) -> None:
                     break
                 continue
             failures_in_a_row = 0
-            primary().post(f"/worker/tag/{note.uuid}", {"note": done.model_dump(mode="json")}, timeout=300)
+            primary().post(f"/worker/tag/{note.uuid}",
+                           {"note": done.model_dump(mode="json"), "index": index_payload(done)}, timeout=300)
             stored += 1
             task["done"] = n + 1
         if stored:

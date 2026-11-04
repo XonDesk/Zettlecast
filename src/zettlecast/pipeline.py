@@ -278,15 +278,20 @@ def _seed_glossaries(episodes: List[PodcastEpisode], results: Dict[str, Transcri
         logger.info(f"{show}: {len(names)} publisher-confirmed speaker names added to the glossary")
 
 
-def store_transcript(note_path: Path, check_cancel: Callable[[str], None] = lambda stage: None):
-    """Index a transcript note written by save_result and link it into the graph."""
+def store_transcript(note_path: Path, check_cancel: Callable[[str], None] = lambda stage: None,
+                     index: Optional[dict] = None, link: bool = True):
+    """
+    Index a transcript note written by save_result and link it into the graph. index: its chunks
+    and vectors from the worker; link=False when one rebuild links the whole batch.
+    """
     parsed = parse_file(note_path)
     if parsed.status != "success" or not parsed.note:
         raise RuntimeError(f"Could not read back transcript note: {parsed.error_message}")
     check_cancel("index")
-    db.upsert_note(parsed.note)
-    check_cancel("link")
-    update_edges_for_note(parsed.note.uuid)
+    db.upsert_note(parsed.note, index=index)
+    if link:
+        check_cancel("link")
+        update_edges_for_note(parsed.note.uuid)
     return parsed.note
 
 

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
+from zettlecast import db as db_module
 from zettlecast import main, migrate, paths, statefile, tagging, wake, worker, workerstate
 from zettlecast.config import settings
 from zettlecast.image.queue import ImageQueue
@@ -142,15 +143,38 @@ def test_worker_api_needs_the_worker_token(primary):
     assert anonymous.post(f"/worker/claim?token={settings.api_token}", json={"worker_id": "w"}).status_code == 401
 
 
+def fake_vectors(monkeypatch):
+    """The worker's embedder: one recognisable vector per text, no model loaded."""
+    import numpy as np
+
+    def embed(texts):
+        vectors = np.zeros((len(texts), db_module.DIM), np.float32)
+        vectors[:, 0] = 1.0
+        return vectors
+
+    monkeypatch.setattr("zettlecast.embeddings.embed_documents", embed)
+
+
+def test_index_that_doesnt_fit_the_note_is_not_used(monkeypatch):
+    fake_vectors(monkeypatch)
+    note = NoteModel(uuid="n1", title="t", source_type="web", source_path="https://x",
+                     full_text="Heat training raises plasma volume. " * 10, content_hash="h")
+    index = db_module.index_payload(note)
+    assert db_module._from_payload(note, index)[0] is not None
+    changed = note.model_copy(update={"full_text": note.full_text + " More."})
+    assert db_module._from_payload(changed, index) == (None, None)  # text changed since: embed it again
+    assert db_module._from_payload(note, {**index, "dim": 3}) == (None, None)
+
+
 def test_podcast_round_trip(primary, tmp_path, monkeypatch):
     """Claim a held upload, fetch it, send the note: stored, completed, primary's copy gone."""
     audio = held_audio(tmp_path, "upload.mp3", show="Uploads")
     original = audio.read_bytes()
     job = TranscriptionQueue().add(audio, podcast_name="Uploads")
     stored = []
-    monkeypatch.setattr("zettlecast.pipeline.store_transcript",
-                        lambda path: stored.append(path.read_text(encoding="utf-8")) or SimpleNamespace(
-                            uuid=job, title="Upload"))
+    monkeypatch.setattr("zettlecast.db.db.upsert_note", lambda note, index=None: stored.append((note, index)))
+    monkeypatch.setattr("zettlecast.pipeline.update_edges_for_note", lambda uuid: pytest.fail("linked per note"))
+    fake_vectors(monkeypatch)
 
     batch = worker.primary().post("/worker/claim", {"worker_id": "w1"})
     assert batch["kind"] == "podcast"
@@ -173,8 +197,13 @@ def test_podcast_round_trip(primary, tmp_path, monkeypatch):
     queue.items[job] = SimpleNamespace(status="pending")
     queue.mark_completed(job, SimpleNamespace(processing_time_seconds=12.5), note)
 
-    assert "source: desktop:podcasts/Uploads/upload.mp3" in stored[0]
-    assert (tmp_path / "transcripts" / "Upload_1234abcd.md").exists()
+    saved = tmp_path / "transcripts" / "Upload_1234abcd.md"
+    assert "source: desktop:podcasts/Uploads/upload.mp3" in saved.read_text(encoding="utf-8")
+    # the primary read the note back itself and takes the worker's vectors as they are
+    [(stored_note, index)] = stored
+    monkeypatch.setattr("zettlecast.embeddings.embed_documents", lambda texts: pytest.fail("embedded on the primary"))
+    chunks, vectors = db_module._from_payload(stored_note, index)
+    assert chunks and vectors.shape == (len(chunks), db_module.DIM) and vectors[0][0] == 1.0
     item = TranscriptionQueue().items[job]
     assert item.status == "completed" and item.worker_id is None
 
@@ -204,7 +233,7 @@ def test_paused_primary_hands_out_nothing(primary, tmp_path):
 
 def test_triage_keep_and_image_result(primary, tmp_path, monkeypatch):
     stored = []
-    monkeypatch.setattr("zettlecast.db.db.upsert_note", lambda note: stored.append(note))
+    monkeypatch.setattr("zettlecast.db.db.upsert_note", lambda note, index=None: stored.append(note))
     reply = worker.primary().post("/worker/image/add", {
         "ref": "desktop:C:/Shots/a.png", "image_hash": "a" * 64, "title": "a", "keep_image": True})
     job = reply["job_id"]
@@ -290,6 +319,19 @@ def test_title_only_saves_dont_look_like_the_llm_being_down(monkeypatch):
                          content_hash="h", metadata=NoteMetadata(custom={"reddit": {}}))
         done, error = tagging.llm_pass(note)
         assert done is not None and error == ""
+
+
+def test_a_tagged_note_comes_back_with_its_vectors(primary, monkeypatch):
+    fake_vectors(monkeypatch)
+    note = NoteModel(uuid="t1", title="Heat", source_type="web", source_path="https://x",
+                     full_text="Heat training raises plasma volume. " * 10, content_hash="h")
+    monkeypatch.setattr("zettlecast.db.db.get_note_by_uuid", lambda uuid: note)
+    stored = []
+    monkeypatch.setattr("zettlecast.db.db.upsert_note", lambda n, index=None: stored.append(index))
+    worker.primary().post("/worker/tag/t1", {"note": note.model_dump(mode="json"),
+                                             "index": db_module.index_payload(note)})
+    [index] = stored
+    assert db_module._from_payload(note, index)[0] is not None
 
 
 def test_tag_failures_are_counted_then_given_up(tmp_path, monkeypatch):

@@ -187,11 +187,12 @@ class EpisodeDone(BaseModel):
     filename: str
     markdown: str
     processing_time_seconds: float = 0.0
+    index: Optional[dict] = None  # db.index_payload of the note: chunks + vectors made on the worker
 
 
 @router.post("/podcast/{job_id}/completed")
 def podcast_completed(job_id: str, body: EpisodeDone):
-    """Store a transcript note made on the worker: written to transcripts/, indexed, linked."""
+    """Store a transcript note made on the worker: written to transcripts/, indexed (linked by the batch's /worker/link)."""
     from .pipeline import store_transcript
     from .podcast.queue import TranscriptionQueue
 
@@ -201,7 +202,7 @@ def podcast_completed(job_id: str, body: EpisodeDone):
     path = settings.transcripts_path / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body.markdown, encoding="utf-8")
-    note = store_transcript(path)
+    note = store_transcript(path, index=body.index, link=False)
     TranscriptionQueue().mark_completed(
         job_id, SimpleNamespace(processing_time_seconds=body.processing_time_seconds), path)
     logger.info(f"Transcript from the worker stored: {note.title}")
@@ -244,6 +245,7 @@ class ImageDone(BaseModel):
     seconds: float = 0.0
     image_name: Optional[str] = None  # a kept copy of the image (keep with image), base64 below
     image_b64: Optional[str] = None
+    index: Optional[dict] = None
 
 
 @router.post("/image/{job_id}/completed")
@@ -259,7 +261,7 @@ def image_completed(job_id: str, body: ImageDone):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(base64.b64decode(body.image_b64))
         note.source_path = str(target)
-    db.upsert_note(note)
+    db.upsert_note(note, index=body.index)
     ImageQueue().mark_completed(job_id, body.seconds)
     return {"status": "stored", "uuid": note.uuid}
 
@@ -334,6 +336,7 @@ def tag_release(body: Uuids):
 
 class Tagged(BaseModel):
     note: Optional[dict] = None
+    index: Optional[dict] = None
     error: str = ""
 
 
@@ -345,7 +348,7 @@ def tag_done(uuid: str, body: Tagged):
         note = NoteModel.model_validate(body.note)
         if note.uuid != uuid:
             raise HTTPException(status_code=400, detail="Note uuid doesn't match")
-        tagging.store(note)
+        tagging.store(note, body.index)
         return {"status": "stored"}
     tagging.failed(uuid, body.error or "failed")
     return {"status": "failed"}

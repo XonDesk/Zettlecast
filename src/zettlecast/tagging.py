@@ -127,14 +127,14 @@ def release(uuids: List[str]) -> None:
             _claimed.pop(uuid, None)
 
 
-def store(note: NoteModel) -> None:
-    """A note back from the worker's LLM pass: stored (re-embedded; linked by the batch's rebuild)."""
+def store(note: NoteModel, index: Optional[dict] = None) -> None:
+    """A note back from the worker's LLM pass: stored with the vectors it sent (linked by the batch's rebuild)."""
     from .db import db
 
     if db.get_note_by_uuid(note.uuid) is None:
         logger.info(f"Tagged note was deleted meanwhile: {note.title}")
     else:
-        db.upsert_note(note)
+        db.upsert_note(note, index=index)
         if note.source_type == "reddit":
             from .reddit import mark_tagged
 
