@@ -67,6 +67,9 @@ minutes.
 
 ## Running a step by hand
 
+Restart it after an update with `.\deploy\windows\restart-worker.ps1`: `Stop-ScheduledTask` alone leaves
+the worker's processes running, and a start right after a stop can be ignored.
+
 The worker can be stopped with `Stop-ScheduledTask "Zettlecast worker"`. With the task stopped,
 `python zc.py worker` runs it in a console instead.
 
