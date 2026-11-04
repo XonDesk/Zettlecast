@@ -52,10 +52,14 @@ src/zettlecast/
   system.py          Process page status (run, queues, GPU, LLM server, DB, disk, alarms) and controls
   statefile.py       JSON state with merge-on-save (queues: writers never undo each other's changes)
   paths.py           "desktop:<path>" references to files on the worker
-  worker_api.py      Primary: /worker/* (heartbeat, claim, inputs, results, link), WORKER_TOKEN
+  worker_api.py      Primary: /worker/* (heartbeat, claim, inputs, results, graph input as Arrow), WORKER_TOKEN
   workerstate.py     Primary: the worker's last heartbeat, commands for it, pause / stay on (worker_state.json)
-  wake.py            Primary: Wake-on-LAN + the policy (jobs waiting, worker offline, WAKE_WINDOW, give up after 3)
-  tagging.py         LLM tags the primary couldn't do: found in the DB (no summary / uncurated save), done by the worker
+  wake.py            Primary: Wake-on-LAN + the policy (WAKE_MIN_JOBS waiting, worker offline, WAKE_WINDOW, give up
+                     after 3); WAKE_SENDER=helper (a container): requests for the native helper (deploy/macos)
+  tagging.py         LLM tags and indexes the primary couldn't do: found in the DB (no summary / uncurated save /
+                     INDEX_PENDING), done by the worker
+  ingestqueue.py     Primary: pages, PDFs, markdown and fetched links queued for the worker, with placeholder notes
+  graphstate.py      Primary: graph out of date (versioned); the worker's "graph" job, claimed last
   worker.py          Worker: claim -> fetch inputs -> pipeline -> send results; heartbeat; idle shutdown
   worker_files.py    Worker: file server for the primary (audio with Range, screenshot triage)
   migrate.py         `migrate-paths`: desktop paths in copied data -> the primary's copies or desktop: refs
@@ -270,24 +274,32 @@ POST /worker/insight/{key} {insight|error} | POST /worker/insight/release {keys}
 
 `ROLE=standalone` (default) is everything on one PC, as above. Split:
 
-- **Primary** (Mac mini, always on): API (0.0.0.0, for the worker), web UI, LanceDB, notes, both queues,
-  Reddit sync, graph rebuilds, search (embedder/reranker on MPS float16). It never loads an LLM
-  (`llm.chat` raises, `enrich_note` returns the note as is): notes are stored at once and
-  `tagging.py` finds the ones still without summary for the worker. GPU endpoints (`/podcast/run`,
-  `/image/run`, `/image/triage/process`, `/reddit/tag`) unpause the worker and wake it. Triage and a
-  `desktop:` note source are forwarded to the worker's file server (503 "desktop is off" when it isn't
-  heard from in 30 s). Process page: `system.status()` uses the worker's heartbeat; Stop pauses the
-  worker (no new claims until Resume).
-- **Worker** (GPU PC, normally off): `zettlecast worker` claims one kind per batch (podcasts first,
-  10 at a time, so the two passes still load the LLM once; then images; then tags), downloads inputs
-  the primary holds (uploads, feed downloads) into its own storage and tells the primary to use that
-  copy (`desktop:...`; the primary deletes its own), runs the same pipeline with `RemoteTranscriptionQueue`
-  / `RemoteImageQueue` (results posted to the primary, which stores, embeds and links them; one `/worker/link`
-  rebuild per batch). Keeps the audio, `.asr.json`, glossaries, lookups and its own transcript copies (known
-  speakers). Claims are **leases** renewed by the heartbeat; a worker id is new per start, so a crashed
-  worker's jobs go back to pending after `WORKER_LEASE_MINUTES`. Idle `WORKER_IDLE_SHUTDOWN_MINUTES` with no
-  Windows session signed in (WTS API; console or RDP) and not "stay on": `shutdown /s /t 120` (cancelled if
-  someone signs in).
+- **Primary** (Mac mini, always on; OrbStack containers, `deploy/macos`): API (host network, for the
+  worker), web UI, LanceDB, notes, the queues, Reddit feed fetching, search. **No heavy work**: no LLM
+  (`llm.chat` raises, `enrich_note` returns the note as is), **no embedding of notes** (`db.upsert_note`
+  without a fitting index stores the note waiting: `INDEX_PENDING`, a new one with no chunks and a zero
+  vector, a changed one keeping its old index), **no parsing** (`/ingest` and fetched references queue the
+  page or file in `ingestqueue.py` with a placeholder note), **no graph computation** (`graphstate.py` marks
+  it out of date), **no reranker** (`RERANK` off: vector search only; the query model on the CPU in float16,
+  `MODEL_DTYPE`, ~0.4 s a search). GPU endpoints (`/podcast/run`, `/image/run`, `/image/triage/process`,
+  `/reddit/tag`) unpause the worker and wake it; queued work wakes it once `WAKE_MIN_JOBS` (5 on the Mac)
+  items wait. Triage and a `desktop:` note source are forwarded to the worker's file server (`WORKER_URL`,
+  required behind OrbStack's NAT; 503 "desktop is off" when it isn't heard from in 30 s). Process page:
+  `system.status()` uses the worker's heartbeat; Stop pauses the worker (no new claims until Resume).
+- **Worker** (GPU PC, normally off): `zettlecast worker` claims one kind per batch, in order podcasts (10
+  at a time, so the two passes still load the LLM once), images, pages and files to add, notes to tag or
+  index, Today's cards, and last the graph (only when nothing else waits: one rebuild per session). It sends
+  the kinds it knows with each claim. Every note goes back with its index (`db.index_payload`: chunks,
+  float32 vectors, a hash of the text), which the primary stores as sent; a transcript's is made from the
+  markdown as the primary reads it back. The graph job streams notes and chunks from the primary as Arrow,
+  runs `linker.compute_graph` and sends the edges and communities back (`store_graph` there). Inputs the
+  primary holds: podcast and image uploads are downloaded into the worker's storage and the primary uses that
+  copy (`desktop:...`, deleting its own); a queued PDF or markdown file is downloaded to a temp folder and
+  the primary keeps it. Keeps the audio, `.asr.json`, glossaries, lookups and its own transcript copies
+  (known speakers). Claims are **leases** renewed by the heartbeat; a worker id is new per start, so a
+  crashed worker's jobs go back to pending after `WORKER_LEASE_MINUTES`. Idle `WORKER_IDLE_SHUTDOWN_MINUTES`
+  with no Windows session signed in (WTS API; console or RDP) and not "stay on": `shutdown /s /t 120`
+  (cancelled if someone signs in). Restart it with `deploy/windows/restart-worker.ps1`.
 - Queue files are written by several threads on the primary: `statefile.save` merges three ways (as
   loaded / now / on disk), so a long feed import doesn't undo the worker's results.
 

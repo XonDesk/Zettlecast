@@ -1,12 +1,14 @@
 # The Mac mini as the primary
 
 The always-on Mac runs the API, the web UI and the database, and holds the notes and the job
-queues (`ROLE=primary`). It never does GPU work. Podcasts, images and LLM tagging go to the
+queues (`ROLE=primary`). It does no heavy work: no LLM, no embedding of notes, no parsing of pages and
+files, no graph rebuilds and no reranking. All of that waits for the PC; what you add is listed at once
+("waiting for the desktop") and becomes searchable after the PC's next session. Podcasts, images and LLM tagging go to the
 Windows PC (the **worker**, see `deploy/windows/README.md`), which the Mac wakes with Wake-on-LAN
 when jobs are waiting.
 
-Search runs on the Mac. The embedder and reranker (about 1.2 GB each in float16) run on Apple's
-GPU (MPS) and are unloaded after `MODEL_IDLE_MINUTES` without a search.
+Search runs on the Mac: vector search with the query model only (no reranker). In the container it
+runs on the CPU in float16, ~0.4-0.6 s a search; kept loaded (`MODEL_IDLE_MINUTES=0`).
 
 From outside the house, connect to the router's WireGuard VPN and open `http://<mac LAN address>:3000`.
 
@@ -112,13 +114,17 @@ Both services start at boot, signed in or not, and restart if they stop.
 
 The **process page** has a **Desktop** panel showing:
 
-- whether the PC is on, and what is waiting for it
-- the last wake-up
+- whether the PC is on, and what is waiting for it (and whether the graph needs a rebuild)
+- the last wake-up: automatic once 5 items wait (`WAKE_MIN_JOBS`); once on, the PC does everything
+  waiting, then rebuilds the graph once, then shuts down when idle
 - **WAKE**, **STAY ON** (no idle shutdown) and **RESUME** (after a Stop)
 
 Things to know while the PC is off:
 
-- Notes, search and the graph all work.
-- New pages, PDFs and Reddit saves are stored at once and get their LLM tags later.
+- Notes, search, the graph and Today all work, with what the PC has processed so far.
+- New pages, PDFs, fetched links and Reddit saves are listed at once with **waiting for the desktop**:
+  not searchable or in the graph until the PC has read, tagged and indexed them. A note that changed
+  (a save's comments came in) stays searchable with its earlier version meanwhile.
 - Uploaded audio and images wait in the queue.
+- A page the PC couldn't read after three tries says **couldn't be added** and why.
 - Audio playback and screenshot triage say the desktop is off and offer to wake it.
