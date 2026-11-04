@@ -15,9 +15,10 @@ export default function SaveUrl({ url }: { url: string }) {
         api.ingest(url)
             .then((r) => {
                 if (r.status === 'success') setMessage(`Saved: ${r.title ?? url}`);
+                else if (r.status === 'queued') setMessage('Saved. The desktop adds it the next time it runs.');
                 else if (r.status === 'duplicate') setMessage(`Already saved: ${r.title ?? url}`);
                 else setMessage(`Not saved: ${r.error ?? r.status}`);
-                if (r.status === 'success' || r.status === 'duplicate') {
+                if (r.status === 'success' || r.status === 'queued' || r.status === 'duplicate') {
                     setTimeout(() => window.close(), CLOSE_AFTER_MS); // a window the bookmarklet opened
                 }
             })

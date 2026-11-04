@@ -8,6 +8,7 @@ export interface Note {
     created_at: string;
     tags?: string[];
     waiting?: boolean; // stored on the primary, not indexed yet: not searchable or linked until the desktop runs
+    add_failed?: boolean; // the desktop couldn't read this page or file (the note says why)
 }
 
 export interface NoteDetail extends Note {
@@ -215,7 +216,7 @@ export interface DesktopStatus {
     paused: boolean; // Stop on this page: no new work until Resume
     stay_on: boolean; // no idle shutdown
     wake: { configured: boolean; window: string; sent_at: string | null; misses: number; gave_up: boolean; reason: string | null };
-    pending: { podcasts: number; images: number; tags: number; total: number };
+    pending: { podcasts: number; images: number; ingest: number; tags: number; insights: number; total: number };
     idle_shutdown_minutes: number;
 }
 

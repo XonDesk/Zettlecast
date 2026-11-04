@@ -111,6 +111,14 @@ export default function NotesPage() {
                                         </span>
                                     </>
                                 )}
+                                {note.add_failed && (
+                                    <>
+                                        {' '}
+                                        <span className="badge badge-failed" title="Open the note to see why">
+                                            couldn&apos;t be added
+                                        </span>
+                                    </>
+                                )}
                                 {' · '}
                                 {note.source_type}
                                 {' · '}

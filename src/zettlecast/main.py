@@ -270,6 +270,11 @@ async def ingest(
                 error=f"URL already exists as '{existing.title}'",
             )
         logger.info(f"Ingesting URL: {url}")
+        if settings.is_primary:  # the worker reads it (ingestqueue): listed now, searchable after
+            from .ingestqueue import IngestQueue
+
+            item = IngestQueue().add_url(url)
+            return IngestResponse(status="queued", uuid=item["placeholder"], title=item["title"])
 
         def add_url() -> ProcessingResult:
             with tracking_ingest("web", urlparse(url).netloc or url) as item:
@@ -295,6 +300,13 @@ async def ingest(
             target = target_dir / f"{target.stem}_{datetime.now():%Y%m%d%H%M%S}{target.suffix}"
         target.write_bytes(await file.read())
         logger.info(f"Ingesting file: {target}")
+        from .ingestqueue import FILE_TYPES
+
+        if settings.is_primary and target.suffix.lower() in FILE_TYPES:  # read by the worker, kept here
+            from .ingestqueue import IngestQueue
+
+            item = IngestQueue().add_file(target)
+            return IngestResponse(status="queued", uuid=item["placeholder"], title=item["title"])
 
         def add_file() -> ProcessingResult:
             with tracking_ingest(target.suffix.lower().lstrip(".") or "file", target.name) as item:

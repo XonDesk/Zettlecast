@@ -228,7 +228,7 @@ def lookup(query: str, client: Optional[httpx.Client] = None) -> List[dict]:
     return candidates
 
 
-def _add_referrer(note: NoteModel, source: NoteModel) -> None:
+def add_referrer(note: NoteModel, source: NoteModel) -> None:
     """source as one more note a stored page is referenced from (a link edge)."""
     from .linker import update_edges_for_note
 
@@ -237,7 +237,18 @@ def _add_referrer(note: NoteModel, source: NoteModel) -> None:
         return
     note.metadata.custom["referenced_by"] = referenced_by + [source.uuid]
     db.update_note_metadata(note.uuid, note.metadata.model_dump())
-    update_edges_for_note(note.uuid)
+    if not settings.is_primary:  # the primary leaves linking to the worker's batch
+        update_edges_for_note(note.uuid)
+
+
+def referenced_note(note: NoteModel, source_uuid: str, source_title: str) -> NoteModel:
+    """A fetched page as the note it becomes: the referrer named in its text, a link edge to it."""
+    # plain text, not a [[wikilink]]: that resolves by title and would link any note of the same
+    # name; the edge comes from referenced_by
+    note.full_text = f"{note.full_text.rstrip()}\n\nReferenced from {source_title.strip()}\n"
+    note.content_hash = compute_content_hash(note.full_text)
+    note.metadata.custom["referenced_by"] = [source_uuid]
+    return note
 
 
 def fetch(source: NoteModel, url: str) -> ProcessingResult:
@@ -250,16 +261,16 @@ def fetch(source: NoteModel, url: str) -> ProcessingResult:
     existing_uuid = stored_urls().get(normalise_url(url))
     existing = db.get_note_by_uuid(existing_uuid) if existing_uuid else None
     if existing:
-        _add_referrer(existing, source)
+        add_referrer(existing, source)
         return ProcessingResult(status="duplicate", uuid=existing.uuid, title=existing.title)
+    if settings.is_primary:  # the worker reads it (ingestqueue)
+        from .ingestqueue import IngestQueue
+
+        item = IngestQueue().add_url(url, referenced_by=source)
+        return ProcessingResult(status="queued", uuid=item["placeholder"], title=item["title"])
     result = parse_url(url)
     if result.status != "success" or not result.note:
         return result
-    note = result.note
-    # plain text, not a [[wikilink]]: that resolves by title and would link any note of the same
-    # name; the edge comes from referenced_by
-    note.full_text = f"{note.full_text.rstrip()}\n\nReferenced from {source.title.strip()}\n"
-    note.content_hash = compute_content_hash(note.full_text)
-    note.metadata.custom["referenced_by"] = [source.uuid]
+    note = referenced_note(result.note, source.uuid, source.title)
     ingest_note(note)
     return ProcessingResult(status="success", uuid=note.uuid, title=note.title, note=note)

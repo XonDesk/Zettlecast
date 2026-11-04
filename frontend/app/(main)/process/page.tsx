@@ -465,7 +465,8 @@ function DesktopPanel({ d, now, busy, act }: {
     const waiting = [
         d.pending.podcasts && `${d.pending.podcasts} episode${d.pending.podcasts > 1 ? 's' : ''}`,
         d.pending.images && `${d.pending.images} image${d.pending.images > 1 ? 's' : ''}`,
-        d.pending.tags && `${d.pending.tags} note${d.pending.tags > 1 ? 's' : ''} to tag`,
+        d.pending.ingest && `${d.pending.ingest} page${d.pending.ingest > 1 ? 's' : ''} or file${d.pending.ingest > 1 ? 's' : ''} to add`,
+        d.pending.tags && `${d.pending.tags} note${d.pending.tags > 1 ? 's' : ''} to tag or index`,
     ].filter(Boolean).join(' · ');
     const wakeNote = !d.wake.configured ? 'not set up (DESKTOP_MAC_ADDRESS)'
         : d.wake.gave_up ? `gave up after ${d.wake.misses} tries`

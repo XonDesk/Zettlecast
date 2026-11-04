@@ -4,13 +4,14 @@ The primary's API for the worker (ROLE=primary): /worker/*, authorised by WORKER
 The primary owns the queues and the database; the worker only talks to it here:
 
     heartbeat       run state etc. in, commands out; renews the leases of what it holds
-    claim           a batch of one kind: podcast episodes, images, or notes to tag
+    claim           a batch of one kind: podcast episodes, images, pages / files to add, or notes to tag
     input           download an input the primary holds (an upload, a feed download)
     fetched         the worker has it now: the job refers to the worker's copy ("desktop:..."),
                     the primary's copy is deleted
     started / completed / failed / release   job results; a completed episode or image is
                     stored (embedded, linked) here
     image/add, image/remove                  screenshot triage on the worker queues keeps here
+    ingest          a page or file read on the worker (ingestqueue.py): stored in its placeholder's place
     tag             a note back from the LLM pass
     link            one graph rebuild after a batch
 """
@@ -32,7 +33,7 @@ from .models import NoteModel
 
 logger = logging.getLogger(__name__)
 
-KINDS = ("podcast", "image", "tag", "insight")  # claimed in this order: one GPU job at a time
+KINDS = ("podcast", "image", "ingest", "tag", "insight")  # claimed in this order: one GPU job at a time
 HELD_FOLDERS = ("podcasts", "uploads")  # the primary deletes its copy of inputs in these once fetched
 
 
@@ -109,6 +110,12 @@ def claim(body: ClaimRequest):
                     "rel": None if paths.is_worker_ref(i.image.image_path)
                     else _held_rel(i.image.image_path, "uploads/images"),
                 } for i in items]}
+        elif kind == "ingest":
+            from .ingestqueue import IngestQueue
+
+            items = IngestQueue().claim(body.worker_id, lease, limit or 20)
+            if items:
+                return {"kind": kind, "items": items}
         elif kind == "tag":
             from . import curation, tagging
 
@@ -138,6 +145,11 @@ def _held_path(kind: str, job_id: str) -> str:
     elif kind == "image":
         item = ImageQueue().items.get(job_id)
         path = item.image.image_path if item else None
+    elif kind == "ingest":  # an uploaded file: downloaded, but the primary keeps it (no /fetched)
+        from .ingestqueue import IngestQueue
+
+        item = IngestQueue().items.get(job_id)
+        path = item["path"] if item and item["kind"] == "file" else None
     else:
         raise HTTPException(status_code=404, detail="Unknown kind")
     if not path or paths.is_worker_ref(path):
@@ -317,6 +329,37 @@ def image_remove(body: ImageHash):
 
     removed = ImageQueue().remove_by_hash(body.image_hash)
     return {"removed": bool(removed), "processed": removed is False}
+
+
+# --- Pages and files added on the primary (ingestqueue.py) ---
+
+
+class Ingested(BaseModel):
+    note: Optional[dict] = None
+    index: Optional[dict] = None
+    error: str = ""
+    seconds: float = 0.0
+
+
+@router.post("/ingest/release")
+def ingest_release(body: JobIds):
+    from .ingestqueue import IngestQueue
+
+    return {"released": IngestQueue().release(body.job_ids)}
+
+
+@router.post("/ingest/{job_id}")
+def ingest_done(job_id: str, body: Ingested):
+    from .ingestqueue import IngestQueue
+
+    queue = IngestQueue()
+    if job_id not in queue.items:
+        raise HTTPException(status_code=404, detail="Unknown job")
+    if body.note:
+        item = queue.complete(job_id, NoteModel.model_validate(body.note), body.index, body.seconds)
+    else:
+        item = queue.fail(job_id, body.error)
+    return {"status": item["status"], "uuid": item["note"]}
 
 
 # --- Tags ---

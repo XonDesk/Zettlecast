@@ -89,6 +89,7 @@ def heartbeat(data: dict, remote_host: Optional[str] = None) -> dict:
     """Record a heartbeat, renew the worker's leases, and return the commands waiting for it."""
     from . import insights, tagging
     from .image.queue import ImageQueue
+    from .ingestqueue import IngestQueue
     from .podcast.queue import TranscriptionQueue
 
     worker_id = data.get("worker_id") or "worker"
@@ -114,6 +115,7 @@ def heartbeat(data: dict, remote_host: Optional[str] = None) -> dict:
     TranscriptionQueue().renew(worker_id, lease())
     ImageQueue().renew(worker_id, lease())
     tagging.renew(lease().total_seconds())
+    IngestQueue().renew(worker_id, lease())
     insights.renew(lease().total_seconds())
     return {**commands, "paused": state["paused"], "shutdown_ok": not state["stay_on"],
             "heartbeat_seconds": settings.worker_heartbeat_seconds}
@@ -185,8 +187,10 @@ def pending_work() -> dict:
     except Exception as e:
         logger.debug(f"insight count unavailable: {e}")
         cards = 0
+    from .ingestqueue import IngestQueue
+
     counts = {"podcasts": TranscriptionQueue().get_pending_count(), "images": ImageQueue().get_pending_count(),
-              "tags": tags, "insights": cards}
+              "ingest": IngestQueue().pending_count(), "tags": tags, "insights": cards}
     counts["total"] = sum(counts.values())
     return counts
 

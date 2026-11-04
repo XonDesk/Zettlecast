@@ -40,7 +40,8 @@ logger = logging.getLogger(__name__)
 
 POLL_SECONDS = 20  # between claims while there's nothing to do
 RETRY_SECONDS = 30  # after the primary couldn't be reached
-LIMITS = {"podcast": 10, "image": 50, "tag": 25, "insight": 20}  # per batch
+LIMITS = {"podcast": 10, "image": 50, "ingest": 20, "tag": 25, "insight": 20}  # per batch
+KINDS = list(LIMITS)  # what this worker can do: the primary hands out nothing else
 
 
 class PrimaryError(RuntimeError):
@@ -378,6 +379,57 @@ def run_images(batch: List[dict]) -> None:
             primary().post("/worker/image/release", {"job_ids": left})
 
 
+# --- Pages and files added on the primary (ingestqueue.py) ---
+
+
+def ingest_note(item: dict) -> NoteModel:
+    """Read one queued page or file as the note it becomes (LLM tags included), under its placeholder's uuid."""
+    import tempfile
+
+    from .parser import parse_file, parse_url
+
+    if item["kind"] == "url":
+        result = parse_url(item["url"])
+    else:
+        with tempfile.TemporaryDirectory() as folder:
+            local = Path(folder) / paths.name(item["path"])
+            primary().download(f"/worker/input/ingest/{item['id']}", local)
+            result = parse_file(local)  # LLM tags included
+    if result.status != "success" or not result.note:
+        raise RuntimeError(result.error_message or f"Could not read it ({result.status})")
+    note = result.note
+    if item.get("referenced_by"):
+        from .references import referenced_note
+
+        note = referenced_note(note, item["referenced_by"], item.get("referenced_by_title") or "")
+    note.uuid = item["placeholder"]
+    return note
+
+
+def run_ingest(batch: List[dict]) -> None:
+    from .db import index_payload
+
+    stored = 0
+    for n, item in enumerate(batch):
+        if commands["stop"] or commands["abort"] or commands["paused"]:
+            primary().post("/worker/ingest/release", {"job_ids": [i["id"] for i in batch[n:]]})
+            break
+        started = time.monotonic()
+        try:
+            note = ingest_note(item)
+            payload = {"note": note.model_dump(mode="json"), "index": index_payload(note)}
+        except Exception as e:
+            logger.warning(f"Could not add {item.get('url') or item.get('path')}: {e}")
+            primary().post(f"/worker/ingest/{item['id']}", {"error": str(e)[:500]})
+            continue
+        primary().post(f"/worker/ingest/{item['id']}", {**payload, "seconds": time.monotonic() - started},
+                       timeout=300)
+        stored += 1
+        logger.info(f"Added for the primary: {note.title}")
+    if stored:
+        primary().post("/worker/link", timeout=3600)
+
+
 # --- Notes to tag ---
 
 
@@ -537,6 +589,8 @@ def handle(batch: dict) -> None:
             run_podcasts(batch["items"])
         elif kind == "image":
             run_images(batch["items"])
+        elif kind == "ingest":
+            run_ingest(batch["items"])
         elif kind == "tag":
             run_tags(batch["items"], batch.get("rubric"))
         elif kind == "insight":
@@ -573,7 +627,7 @@ def run(file_server: bool = True, once: bool = False) -> None:
             last_sweep = time.monotonic()
         try:
             batch = {"kind": None} if commands["paused"] else primary().post(
-                "/worker/claim", {"worker_id": worker_id, "limits": LIMITS}, tries=1)
+                "/worker/claim", {"worker_id": worker_id, "kinds": KINDS, "limits": LIMITS}, tries=1)
         except PrimaryError as e:
             logger.warning(f"Primary not reachable: {e}")
             batch = {"kind": None}

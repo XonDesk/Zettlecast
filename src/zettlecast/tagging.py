@@ -54,8 +54,11 @@ def _save_failures(data: dict) -> None:
 
 def needs_llm(source_type: str, metadata: dict, text: str) -> bool:
     """Whether a stored note still waits for the LLM pass it would have had at ingest."""
-    if source_type not in TAGGED_TYPES:
-        return False
+    from .ingestqueue import ERROR, PLACEHOLDER
+
+    custom = metadata.get("custom") or {}
+    if source_type not in TAGGED_TYPES or PLACEHOLDER in custom or ERROR in custom:
+        return False  # a placeholder: the worker reads the page or file itself (ingestqueue)
     if source_type == "reddit":
         from .reddit import needs_llm as reddit_needs_llm
 

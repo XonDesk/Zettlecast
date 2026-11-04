@@ -124,6 +124,22 @@ export default function NoteDetailPage() {
                             </span>
                         </>
                     )}
+                    {note.metadata?.custom?.ingest_pending ? (
+                        <>
+                            {' '}
+                            <span className="badge badge-waiting" title="The desktop reads this page or file the next time it runs">
+                                waiting for the desktop
+                            </span>
+                        </>
+                    ) : null}
+                    {typeof note.metadata?.custom?.ingest_error === 'string' && (
+                        <>
+                            {' '}
+                            <span className="badge badge-failed">
+                                couldn&apos;t be added: {String(note.metadata.custom.ingest_error)}
+                            </span>
+                        </>
+                    )}
                     {' \u00B7 '}
                     {note.source_type}
                     {' \u00B7 '}

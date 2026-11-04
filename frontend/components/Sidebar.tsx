@@ -110,6 +110,10 @@ export default function Sidebar() {
             if (result.status === 'success') {
                 setMessage({ type: 'success', text: `Added: ${result.title || 'Untitled'}` });
                 setUrl('');
+            } else if (result.status === 'queued') {
+                // the desktop reads it: listed now, searchable once it has run
+                setMessage({ type: 'success', text: 'Saved. The desktop adds it the next time it runs.' });
+                setUrl('');
             } else if (result.status === 'duplicate') {
                 setMessage({ type: 'error', text: result.error || 'Already exists' });
             } else {

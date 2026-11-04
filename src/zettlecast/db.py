@@ -250,6 +250,10 @@ class Database:
             ])
         return True
 
+    def store_placeholder(self, note: NoteModel) -> None:
+        """A note row only (zero vector, no chunks): a page or file the worker hasn't read yet (ingestqueue)."""
+        self.notes.add([_note_row(note, np.zeros(DIM, np.float32))])
+
     def _store_waiting(self, note: NoteModel) -> None:
         """
         The primary's store without an index: the note row only, marked for the worker. A note stored
@@ -317,6 +321,7 @@ class Database:
         listed = []
         for r in rows[offset:offset + limit]:
             meta = json.loads(r["metadata_json"])
+            custom = meta.get("custom") or {}
             listed.append({
                 "uuid": r["uuid"],
                 "title": r["title"],
@@ -324,7 +329,9 @@ class Database:
                 "status": r["status"],
                 "created_at": r["created_at"],
                 "tags": meta.get("tags", []),
-                "waiting": bool((meta.get("custom") or {}).get(INDEX_PENDING)),  # for the worker's index
+                # for the worker's index, or a page / file it hasn't read yet (ingestqueue)
+                "waiting": bool(custom.get(INDEX_PENDING) or custom.get("ingest_pending")),
+                "add_failed": bool(custom.get("ingest_error")),
             })
         return listed
 
