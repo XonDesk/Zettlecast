@@ -9,12 +9,17 @@ until the worker is heard from or woken by hand (POST /system/wake).
 
 The PC must allow it: Wake-on-LAN from S5 in the BIOS, "Wake on Magic Packet" on the network
 card, Fast Startup off (deploy/windows/README.md).
+
+In a container (WAKE_SENDER=helper) the packet can't reach the LAN: the request is written to
+<storage>/wake_requests/ instead, and a native helper on the host sends it (deploy/macos).
 """
 
+import json
 import logging
 import re
 import socket
 import threading
+import uuid
 from datetime import datetime
 from datetime import time as dtime
 from typing import Optional
@@ -37,11 +42,25 @@ def magic_packet(mac: str) -> bytes:
     return b"\xff" * 6 + bytes.fromhex(digits) * 16
 
 
+def requests_dir():
+    return settings.storage_path / "wake_requests"
+
+
 def send(mac: Optional[str] = None, broadcast: Optional[str] = None, port: int = 9) -> None:
-    packet = magic_packet(mac or settings.desktop_mac_address)
+    mac, broadcast = mac or settings.desktop_mac_address, broadcast or settings.wake_broadcast
+    packet = magic_packet(mac)  # checked here either way
+    if settings.wake_sender == "helper":
+        folder = requests_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        name = f"{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
+        temp = folder / f".{name}.tmp"  # the helper only reads *.json: never a half-written one
+        temp.write_text(json.dumps({"mac": mac, "broadcast": broadcast, "port": port,
+                                    "at": datetime.now().isoformat(timespec="seconds")}), encoding="utf-8")
+        temp.rename(folder / f"{name}.json")
+        return
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.sendto(packet, (broadcast or settings.wake_broadcast, port))
+        sock.sendto(packet, (broadcast, port))
 
 
 def in_window(window: str, now: Optional[datetime] = None) -> bool:

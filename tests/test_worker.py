@@ -1,5 +1,6 @@
 """Two machines: the primary's job API, the worker's side of it, leases, wake-on-LAN, idle shutdown."""
 
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -433,3 +434,28 @@ def test_idle_shutdown_only_when_nobody_is_signed_in(monkeypatch):
     users[0] = 0
     monkeypatch.setitem(worker.commands, "shutdown_ok", False)  # "stay on" on the process page
     assert not idle.check()
+
+
+def test_in_a_container_the_wake_goes_to_the_native_helper(tmp_path, monkeypatch):
+    import importlib.util
+
+    monkeypatch.setattr(settings, "storage_path", tmp_path)
+    monkeypatch.setattr(settings, "wake_sender", "helper")
+    monkeypatch.setattr(wake.socket, "socket", lambda *a: pytest.fail("broadcast from the container"))
+    wake.send("aa:bb:cc:dd:ee:ff", "192.168.8.255")
+    [request] = list(wake.requests_dir().glob("*.json"))
+    assert not list(wake.requests_dir().glob(".*.tmp"))
+
+    spec = importlib.util.spec_from_file_location(
+        "wake_helper", Path(__file__).parent.parent / "deploy" / "macos" / "wake-helper.py")
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    sent = []
+    (wake.requests_dir() / "broken.json").write_text("{", encoding="utf-8")
+    assert helper.process(wake.requests_dir(), sender=lambda *a: sent.append(a)) == 1
+    assert sent == [("aa:bb:cc:dd:ee:ff", "192.168.8.255", 9)]
+    assert not list(wake.requests_dir().iterdir())  # empty: launchd stops running it
+    # a request older than MAX_AGE_SECONDS is dropped, not sent late
+    wake.send("aa:bb:cc:dd:ee:ff", "192.168.8.255")
+    assert helper.process(wake.requests_dir(), now=time.time() + 3600, sender=lambda *a: sent.append(a)) == 0
+    assert len(sent) == 1 and not list(wake.requests_dir().iterdir())

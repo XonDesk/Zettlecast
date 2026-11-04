@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     rerank_top_k: int = 50  # Chunk candidates to rerank
     return_top_k: int = 5  # Final results to return
     search_min_score: float = 0.05  # Drop reranked results below this relevance (0..1)
+    model_dtype: str = ""  # search models' number format: float32 | float16 | bfloat16 (empty: per device)
     rerank: Optional[bool] = None  # rerank search hits (default: yes, except on the primary: ~17 s on an M1)
     model_idle_minutes: float = 5  # API server unloads the search models after this long unused (0 = keep)
     hf_token: str = Field(default="", validation_alias="HF_TOKEN")
@@ -124,6 +125,9 @@ class Settings(BaseSettings):
     worker_idle_shutdown_minutes: float = 15  # worker shuts its PC down idle this long (nobody signed in; 0 = never)
     desktop_mac_address: str = ""  # primary: the worker's network card, for Wake-on-LAN
     wake_broadcast: str = "255.255.255.255"
+    # direct: this process sends the packet; helper: a native helper on the host does (a container's
+    # broadcasts don't reach the LAN; deploy/macos/wake-helper.py)
+    wake_sender: str = "direct"
     wake_window: str = ""  # primary: "HH:MM-HH:MM" to wake the worker for queued jobs only then (empty = any time)
 
     # --- Image Processing ---
@@ -137,6 +141,14 @@ class Settings(BaseSettings):
         # On Windows "localhost" tries IPv6 ::1 first; Ollama listens on IPv4 only, so every
         # request waited ~2 s for the fallback
         return url.replace("//localhost:", "//127.0.0.1:")
+
+    @field_validator("model_dtype")
+    @classmethod
+    def _known_dtype(cls, value: str) -> str:
+        value = value.strip().lower()
+        if value not in ("", "float32", "float16", "bfloat16"):
+            raise ValueError(f"MODEL_DTYPE must be float32, float16 or bfloat16, not {value!r}")
+        return value
 
     @field_validator("role")
     @classmethod

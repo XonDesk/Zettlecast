@@ -42,9 +42,15 @@ def _device() -> str:
 
 
 def _dtype():
-    """bfloat16 on CUDA; float16 on Apple's GPU (bfloat16 kernels are patchy there); float32 on a CPU."""
+    """
+    bfloat16 on CUDA; float16 on Apple's GPU (bfloat16 kernels are patchy there); float32 on a CPU,
+    unless MODEL_DTYPE says otherwise (float16 halves a CPU's 2.4 GB at the same speed; bfloat16 on a
+    Linux ARM CPU is ~80x slower).
+    """
     import torch
 
+    if settings.model_dtype:
+        return getattr(torch, settings.model_dtype)
     return {"cuda": torch.bfloat16, "mps": torch.float16}.get(_device(), torch.float32)
 
 

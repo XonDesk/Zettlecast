@@ -1,0 +1,14 @@
+# Build context for deploy/macos/*.Dockerfile: code only, never secrets or data
+.git
+.venv
+**/__pycache__
+**/.pytest_cache
+.env
+.env.*
+frontend/.env*
+frontend/node_modules
+frontend/.next
+frontend/tsconfig.tsbuildinfo
+_BRAIN_STORAGE
+_BENCH_STORAGE
+*.log

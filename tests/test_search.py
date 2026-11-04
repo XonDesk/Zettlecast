@@ -58,3 +58,16 @@ def test_link_reason_names_what_links_two_notes():
     assert link_reason({"kind": "similar", "reason_json": json.dumps(reason)}) == \
         "Shared: Sophie Herzog, overtraining; similar passages"
     assert link_reason({"kind": "similar", "reason_json": "{}"}) == "Similar content"
+
+
+def test_model_dtype_overrides_the_per_device_choice(monkeypatch):
+    import pytest
+    import torch
+
+    from zettlecast import embeddings
+    from zettlecast.config import Settings, settings
+
+    monkeypatch.setattr(settings, "model_dtype", "float16")  # the primary's container: half of float32
+    assert embeddings._dtype() is torch.float16
+    with pytest.raises(ValueError):
+        Settings(model_dtype="int8")
