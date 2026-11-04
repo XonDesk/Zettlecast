@@ -455,6 +455,23 @@ def test_no_wake_when_paused_or_nothing_waits(tmp_path, monkeypatch):
     assert wake.tick() is None
 
 
+def test_wake_waits_for_enough_work_and_the_button_doesnt(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "storage_path", tmp_path)
+    monkeypatch.setattr(settings, "desktop_mac_address", "aa:bb:cc:dd:ee:ff")
+    monkeypatch.setattr(settings, "wake_window", "")
+    monkeypatch.setattr(settings, "wake_min_jobs", 5)
+    monkeypatch.setattr(workerstate, "_beat", {"at": None, "seen_at": None, "data": {}})
+    sent = []
+    monkeypatch.setattr(wake, "send", lambda *a, **k: sent.append(1))
+    monkeypatch.setattr(workerstate, "pending_work",
+                        lambda: {"ingest": 3, "tags": 1, "graph": 1, "total": 4})  # the graph doesn't count
+    assert wake.tick() is None and not sent
+    assert wake.wake_now()["status"] == "sent" and len(sent) == 1  # WAKE: any time
+    workerstate.update_wake(sent_at=None)
+    monkeypatch.setattr(workerstate, "pending_work", lambda: {"ingest": 3, "tags": 2, "graph": 1, "total": 5})
+    assert wake.tick() == "sent" and "graph" not in workerstate.load()["wake"]["reason"]
+
+
 # --- Idle shutdown ---
 
 

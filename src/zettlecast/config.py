@@ -128,6 +128,9 @@ class Settings(BaseSettings):
     # direct: this process sends the packet; helper: a native helper on the host does (a container's
     # broadcasts don't reach the LAN; deploy/macos/wake-helper.py)
     wake_sender: str = "direct"
+    # primary: wake the worker for queued work once this many items wait (podcasts, images, pages and files,
+    # notes to tag or index, Today's cards); the Wake button always does
+    wake_min_jobs: int = 1
     wake_window: str = ""  # primary: "HH:MM-HH:MM" to wake the worker for queued jobs only then (empty = any time)
 
     # --- Image Processing ---

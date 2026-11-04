@@ -1,9 +1,10 @@
 """
 Wake-on-LAN for the worker (ROLE=primary).
 
-The worker PC is normally off. When jobs wait for it (podcasts, images, notes to tag) and it
-isn't online, the primary sends a magic packet to DESKTOP_MAC_ADDRESS, then waits for its
-heartbeat. Inside WAKE_WINDOW only ("01:00-07:00"; empty = any time), at most every
+The worker PC is normally off. When WAKE_MIN_JOBS or more jobs wait for it (podcasts, images,
+pages and files, notes to tag or index, Today's cards) and it isn't online, the primary sends a
+magic packet to DESKTOP_MAC_ADDRESS, then waits for its heartbeat; once on, it does everything
+waiting, fewer included, then the graph. An out-of-date graph alone doesn't wake it. Inside WAKE_WINDOW only ("01:00-07:00"; empty = any time), at most every
 RETRY_MINUTES, and after MAX_MISSES unanswered packets it stops trying and raises an alarm
 until the worker is heard from or woken by hand (POST /system/wake).
 
@@ -106,7 +107,7 @@ def tick(now: Optional[datetime] = None) -> Optional[str]:
     if state["paused"] or wake["gave_up"] or not in_window(settings.wake_window, now):
         return None
     pending = workerstate.pending_work()
-    if not pending["total"]:
+    if pending["total"] < max(1, settings.wake_min_jobs):
         return None
     if wake["sent_at"]:
         if (now - datetime.fromisoformat(wake["sent_at"])).total_seconds() < RETRY_MINUTES * 60:
@@ -118,7 +119,7 @@ def tick(now: Optional[datetime] = None) -> Optional[str]:
                            f"seen or woken by hand")
             return "gave_up"
         workerstate.update_wake(misses=misses)
-    parts = [f"{n} {kind}" for kind, n in pending.items() if kind != "total" and n]
+    parts = [f"{n} {kind}" for kind, n in pending.items() if kind not in ("total", "graph") and n]
     result = wake_now(reason="jobs waiting: " + ", ".join(parts))
     return "sent" if result["status"] == "sent" else None
 
