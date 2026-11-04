@@ -86,7 +86,8 @@ cd ~/MacContainers && docker compose -f docker-compose.macos.yaml up -d --build 
 docker logs -f zettlecast-api
 ```
 
-- Updates: `git pull` in `~/Zettlecast`, then the same `up -d --build`. No sudo.
+- Updates: `git pull` in `~/Zettlecast`, then the same `up -d --build`, then `docker image prune -f` (each
+  build leaves the previous image behind: 1.6 GB for the API). No sudo.
 - The API runs as your user with `~/_BRAIN_STORAGE` mounted at the same path (notes refer to their
   files by absolute path), the Hugging Face cache at `/hf`, and `.env` mounted (Settings writes it).
 - No Apple GPU in a Linux container: the query model runs on the CPU in float16 (`MODEL_DTYPE`):

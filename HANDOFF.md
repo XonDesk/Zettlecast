@@ -70,7 +70,8 @@ on a branch and note them here.
 The Mac runs Zettlecast in OrbStack (`zettlecast-api`, `zettlecast-web` in
 `~/MacContainers/docker-compose.macos.yaml`), from the checkout at `~/Zettlecast`; the launchd
 daemons are uninstalled and `~/Documents/Zettlecast` is the old checkout. Deploy a change: push,
-`git pull` in `~/Zettlecast` and on the PC, `up -d --build` on the Mac, and on the PC
+`git pull` in `~/Zettlecast` and on the PC, `up -d --build` then `docker image prune -f` on the Mac
+(old images pile up: 9 GB in one afternoon), and on the PC
 `C:\Users\XonDe\restart-worker.ps1` (stopping the task alone leaves the worker running).
 Wake-on-LAN: the native `com.zettlecast.wake` LaunchAgent (a container's broadcasts don't reach the LAN).
 Checked: the PC reaches the API, heartbeat times in local time (TZ), files owned by the Mac user,
