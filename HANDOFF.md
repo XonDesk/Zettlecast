@@ -46,6 +46,46 @@ pausing) but has never run across two machines: Wake-on-LAN, launchd daemons, MP
 `desktop:` file forwarding and the idle shutdown are all untried. Expect small fixes; keep them
 on a branch and note them here.
 
+## Fixes from the Mac setup (branch `mac-primary-setup`)
+
+- `psutil` was used by `runstate.py`/`system.py`/`llm.py` but not declared (the PC got it through
+  `[gpu]`): added to the base dependencies. Without it 6 tests failed on the Mac.
+- The Mac (M1, 16 GB, 192.168.8.140) runs Home Assistant with `zwave-js-ui` on host port 3000, so
+  the web UI goes on 3100: `install.sh` takes `WEB_PORT` (default 3000).
+- Still failing on macOS, Windows-only by nature: `test_llm.py` (stops llama-server with `taskkill`) x2,
+  `test_worker.py::test_triage_keep_and_image_result` (a `C:/` path resolved on POSIX; the code runs on the PC).
+
+- `setup-worker.ps1` registered the task with a typed password (`Read-Host`, impossible over SSH) and
+  `$env:USERDOMAIN\$env:USERNAME` (WORKGROUP\xondesk over SSH: "No mapping between account names").
+  Now S4U logon (no password stored) and `WindowsIdentity.GetCurrent().Name`. Copied to the PC by scp,
+  so the PC's checkout shows it modified until this branch is merged and pulled.
+
+- API token no longer in URLs: `proxy.ts` sends `Authorization: Bearer`, the 54 unused `token: str = Query(...)`
+  parameters are gone (the middleware checks; `?token=` still accepted, e.g. the bookmarklet), and the access
+  log redacts `token=` and skips successful `/system/status` / `/podcast/status` polls. Token rotated.
+- `tests/conftest.py` forces `ROLE=standalone`: the primary's `.env` made 11 tests fail.
+
+## Open issues seen on the first real run (not fixed)
+
+- Reddit image/link posts with only a title (41-108 chars) fail the LLM pass every time ("no usable answer"):
+  46 notes, 3 attempts each. Three in a row make the worker think the LLM is down and release its batch, so
+  batches end after ~3 notes and each one triggers a full `/worker/link` graph rebuild on the Mac (every
+  ~45 s, the M1 API at 100% CPU). Probably: skip the LLM below MIN_TEXT for reddit too, and don't count a
+  "no usable answer" as the LLM being down.
+- PC: "Sleep after" 1 h on AC and the worker doesn't block sleep (Modern Standby, S0): a long batch with
+  nobody at the PC can be cut off. The worker's own idle shutdown makes Windows sleep unnecessary.
+
+## Done 2026-11-04 (from the Mac, over `ssh zpc`)
+
+- SSH: OpenSSH server on the PC (key `~/.ssh/zettlecast_pc`, firewall LAN only, PowerShell shell);
+  `ssh zpc` = xondesk@192.168.8.175 (wired; Wi-Fi is .173).
+- Data copied to `~/_BRAIN_STORAGE` (file counts match), `migrate-paths` run: 1743 notes, 32228 chunks, 7707 edges.
+- Mac `.env` + `frontend/.env.local` filled (sign-in and Reddit feed copied from the PC).
+- PC: `.env` backed up to `.env.standalone.bak`, worker settings appended; `setup-worker.ps1` run (no RDP).
+- Mac services installed (`WEB_PORT=3100`), worker task started: PC online, tagging 931 Reddit saves.
+- Left: BIOS WoL, end-to-end tests.
+- Router: DHCP reservation for the PC (B4:E9:B8:F8:12:7C -> .175).
+
 ## Known facts and pitfalls (verified, from earlier work)
 
 - Parakeet can't stay loaded across episodes (illegal memory access after a diarization).
