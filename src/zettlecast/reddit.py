@@ -536,8 +536,10 @@ def llm_pass(note: NoteModel) -> tuple:
     """
     The LLM work on one save: its comments curated (thread fetched, no takeaways yet), then tags +
     summary. Returns (note, whether it was curated now); the note is None when the LLM couldn't.
+    A save with too little text for the LLM (an image or link post: its title) is done as it is.
     """
-    from .enricher import enrich_note
+    from .enricher import enrich_note, too_short
+    from .llm import LLMError
 
     curated = False
     if fetched_thread(note) and not note.metadata.custom["reddit"].get("curated"):
@@ -548,8 +550,13 @@ def llm_pass(note: NoteModel) -> tuple:
         note.metadata.tags = []
         for key in ("summary", "people", "organisations"):
             note.metadata.custom.pop(key, None)
-    note = enrich_note(note)
-    if "summary" not in note.metadata.custom:
+    if too_short(note.full_text):
+        note.metadata.custom.setdefault("summary", "")
+        return note, curated
+    try:
+        note = enrich_note(note, raise_errors=True)
+    except LLMError as e:
+        logger.warning(f"Save not tagged: {note.title}: {e}")
         return None, curated
     return note, curated
 

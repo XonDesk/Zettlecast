@@ -15,6 +15,8 @@ from .models import NoteModel
 
 logger = logging.getLogger(__name__)
 
+MIN_TEXT = 100  # shorter notes (a link or a title alone) give the LLM nothing to summarise
+
 ENRICH_PROMPT = """Read this document and return:
 - "tags": exactly {count} short lowercase topic keywords that best describe it: subjects,
   concepts and methods in their most common general form. No names of people or organisations.
@@ -52,17 +54,22 @@ def _add_names(note: NoteModel, result: dict) -> None:
             note.metadata.custom[field] = list(dict.fromkeys(names))
 
 
-def enrich_note(note: NoteModel) -> NoteModel:
+def too_short(text: str) -> bool:
+    return len(text.strip()) < MIN_TEXT
+
+
+def enrich_note(note: NoteModel, raise_errors: bool = False) -> NoteModel:
     """
     Fill in note.metadata.tags and note.metadata.custom["summary"] if missing.
 
-    Failures (Ollama down, bad output) leave the note unchanged.
+    Failures (LLM down, bad output) leave the note unchanged, or raise LLMError with raise_errors.
+    An answer without a summary stores an empty one: the LLM had nothing to say, don't ask again.
     """
     if not settings.enable_auto_tagging or settings.is_primary:
         return note  # the primary has no LLM: the worker tags it later (tagging.py)
     if note.metadata.tags and "summary" in note.metadata.custom:
         return note
-    if len(note.full_text.strip()) < 100:
+    if too_short(note.full_text):
         return note
 
     try:
@@ -75,14 +82,16 @@ def enrich_note(note: NoteModel) -> NoteModel:
             schema=ENRICH_SCHEMA,
         )
     except LLMError as e:
+        if raise_errors:
+            raise
         logger.warning(f"Enrichment skipped: {e}")
         return note
 
     if not note.metadata.tags:
         tags = [t.strip().lower() for t in result.get("tags", []) if isinstance(t, str) and t.strip()]
         note.metadata.tags = tags[: settings.auto_tag_count]
-    if "summary" not in note.metadata.custom and result.get("summary"):
-        note.metadata.custom["summary"] = result["summary"].strip()
+    if "summary" not in note.metadata.custom:
+        note.metadata.custom["summary"] = (result.get("summary") or "").strip()
     _add_names(note, result)
 
     logger.info(f"Enriched '{note.title}': {note.metadata.tags}")

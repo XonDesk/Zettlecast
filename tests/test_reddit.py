@@ -73,9 +73,13 @@ def storage(tmp_path, monkeypatch):
     stored.rebuilds = []
     llm_up = [True]
 
-    def enrich(note):
+    def enrich(note, raise_errors=False):
+        from zettlecast.llm import LLMError
+
         if llm_up[0]:
             note.metadata.tags, note.metadata.custom["summary"] = ["running"], "A summary."
+        elif raise_errors:
+            raise LLMError("down")
         return note
 
     monkeypatch.setattr("zettlecast.enricher.enrich_note", enrich)
@@ -358,3 +362,25 @@ def test_rubric_is_the_users_once_saved(storage):
     assert curation.rubric() == "Keep only shoe reviews."
     curation.save_rubric("  ")
     assert curation.rubric() == curation.DEFAULT_RUBRIC
+
+
+def test_a_title_only_save_is_done_without_the_llm(storage):
+    from zettlecast.models import NoteMetadata, NoteModel
+
+    note = NoteModel(title="Home made Miso Ramen", source_type="reddit", source_path="https://reddit.com/x",
+                     full_text="r/food · posted by u/x · 2020-01-01\n\nLink: https://i.redd.it/a.jpg\n",
+                     content_hash="h", metadata=NoteMetadata(custom={"reddit": {}}))
+    storage.llm_up[0] = False  # not even asked: it would fail
+    done, curated = reddit.llm_pass(note)
+    assert done is note and not curated and done.metadata.custom["summary"] == ""
+    assert not reddit.needs_llm(done.metadata.model_dump())
+
+
+def test_a_save_the_llm_cant_reach_is_not_done(storage):
+    from zettlecast.models import NoteMetadata, NoteModel
+
+    note = NoteModel(title="Heat training", source_type="reddit", source_path="https://reddit.com/x",
+                     full_text="Heat training raises plasma volume over ten days. " * 4,
+                     content_hash="h", metadata=NoteMetadata(custom={"reddit": {}}))
+    storage.llm_up[0] = False
+    assert reddit.llm_pass(note) == (None, False)

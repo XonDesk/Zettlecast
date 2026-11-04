@@ -19,13 +19,13 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .config import settings
+from .enricher import MIN_TEXT  # enrich_note leaves shorter notes alone
 from .models import NoteModel
 
 logger = logging.getLogger(__name__)
 
 TAGGED_TYPES = ("web", "pdf", "markdown", "text", "reddit")  # what parse_file / parse_url / reddit enrich
 MAX_ATTEMPTS = 3
-MIN_TEXT = 100  # enrich_note leaves shorter notes alone
 CACHE_SECONDS = 60
 
 _lock = threading.Lock()

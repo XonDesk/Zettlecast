@@ -74,3 +74,18 @@ def test_keeps_full_names_and_organisations_for_graph_links():
         note = enrich_note(make_note())
     assert note.metadata.custom["people"] == ["Isabel Martinez"]
     assert note.metadata.custom["organisations"] == ["Monash University"]
+
+
+def test_llm_failure_raises_when_asked():
+    with patch("zettlecast.enricher.chat", side_effect=LLMError("down")):
+        with pytest.raises(LLMError):
+            enrich_note(make_note(), raise_errors=True)
+
+
+def test_an_answer_without_a_summary_is_stored_empty_so_it_isnt_asked_again():
+    with patch("zettlecast.enricher.chat", return_value={"tags": ["art"], "summary": " "}):
+        note = enrich_note(make_note())
+    assert note.metadata.custom["summary"] == ""
+    with patch("zettlecast.enricher.chat") as chat:
+        enrich_note(note)
+    chat.assert_not_called()

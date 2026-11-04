@@ -280,6 +280,18 @@ def test_what_needs_the_llm():
                                                                                     "curated": True}}}, "")
 
 
+def test_title_only_saves_dont_look_like_the_llm_being_down(monkeypatch):
+    """Three in a row used to fail ("no usable answer") and cut every batch short."""
+    monkeypatch.setattr(settings, "enable_auto_tagging", True)
+    monkeypatch.setattr("zettlecast.enricher.chat", lambda *a, **k: pytest.fail("the LLM was asked about a title"))
+    for n in range(3):
+        note = NoteModel(uuid=f"r{n}", title="Floating Bed (Kinda)", source_type="reddit",
+                         source_path="https://reddit.com/x", full_text="r/diy · posted by u/x\n\nLink: https://i.redd.it/b.jpg",
+                         content_hash="h", metadata=NoteMetadata(custom={"reddit": {}}))
+        done, error = tagging.llm_pass(note)
+        assert done is not None and error == ""
+
+
 def test_tag_failures_are_counted_then_given_up(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "storage_path", tmp_path)
     monkeypatch.setattr(settings, "enable_auto_tagging", True)
