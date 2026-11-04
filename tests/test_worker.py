@@ -335,6 +335,46 @@ def test_a_tagged_note_comes_back_with_its_vectors(primary, monkeypatch):
     assert db_module._from_payload(note, index)[0] is not None
 
 
+def test_waiting_notes_of_any_type_are_handed_out_and_indexed_without_the_llm(tmp_path, monkeypatch):
+    from zettlecast.db import INDEX_PENDING, Database
+
+    db = Database(tmp_path / "db")
+    monkeypatch.setattr("zettlecast.db.db", db)
+    monkeypatch.setattr(tagging, "_cache", {"at": 0.0, "uuids": None})
+    monkeypatch.setattr(tagging, "_claimed", {})
+    monkeypatch.setattr(settings, "storage_path", tmp_path)
+    monkeypatch.setattr(settings, "enable_auto_tagging", True)
+    monkeypatch.setattr(settings, "role", "primary")
+    transcript = NoteModel(uuid="ep1", title="Episode", source_type="audio", source_path="desktop:podcasts/a.mp3",
+                           full_text="## Transcript\n[0.0s] Host: hello " * 20, content_hash="h",
+                           metadata=NoteMetadata(tags=["running"], custom={"summary": "An episode."}))
+    db.upsert_note(transcript)  # waiting: the primary doesn't embed
+    assert tagging._untagged() == ["ep1"] and tagging.pending_count() == 1
+
+    [claimed] = tagging.claim(5, 60)
+    fake_vectors(monkeypatch)
+    monkeypatch.setattr("zettlecast.enricher.chat", lambda *a, **k: pytest.fail("the LLM was asked to index"))
+    assert not tagging.needs_llm(claimed.source_type, claimed.metadata.model_dump(), claimed.full_text)
+    tagging.store(claimed, db_module.index_payload(claimed))
+    assert INDEX_PENDING not in db.get_note_by_uuid("ep1").metadata.custom
+    assert db.chunks.count_rows() > 0 and tagging._untagged() == [] and tagging.pending_count() == 0
+
+
+def test_a_note_sent_back_without_a_fitting_index_is_counted_as_failed(tmp_path, monkeypatch):
+    from zettlecast.db import Database
+
+    db = Database(tmp_path / "db")
+    monkeypatch.setattr("zettlecast.db.db", db)
+    monkeypatch.setattr(settings, "storage_path", tmp_path)
+    monkeypatch.setattr(settings, "role", "primary")
+    monkeypatch.setattr(tagging, "_claimed", {})
+    note = NoteModel(uuid="w1", title="Web", source_type="web", source_path="https://x",
+                     full_text="Heat training raises plasma volume. " * 5, content_hash="h")
+    db.upsert_note(note)
+    tagging.store(note, None)  # an older worker: no index
+    assert tagging._failures()["w1"]["attempts"] == 1
+
+
 def test_tag_failures_are_counted_then_given_up(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "storage_path", tmp_path)
     monkeypatch.setattr(settings, "enable_auto_tagging", True)

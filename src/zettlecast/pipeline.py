@@ -31,9 +31,12 @@ logger = logging.getLogger(__name__)
 
 
 def ingest_note(note: NoteModel) -> NoteModel:
-    """Store a parsed note (replacing any previous version) and link it into the graph."""
-    db.upsert_note(note)
-    update_edges_for_note(note.uuid)
+    """
+    Store a parsed note (replacing any previous version) and link it into the graph. On the
+    primary it waits for the worker's index, and the worker's batch links it.
+    """
+    if db.upsert_note(note):
+        update_edges_for_note(note.uuid)
     return note
 
 
@@ -288,8 +291,7 @@ def store_transcript(note_path: Path, check_cancel: Callable[[str], None] = lamb
     if parsed.status != "success" or not parsed.note:
         raise RuntimeError(f"Could not read back transcript note: {parsed.error_message}")
     check_cancel("index")
-    db.upsert_note(parsed.note, index=index)
-    if link:
+    if db.upsert_note(parsed.note, index=index) and link:
         check_cancel("link")
         update_edges_for_note(parsed.note.uuid)
     return parsed.note

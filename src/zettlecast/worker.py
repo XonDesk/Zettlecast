@@ -398,7 +398,11 @@ def run_tags(batch: List[dict], rubric: Optional[str] = None) -> None:
             if commands["stop"] or commands["abort"] or commands["paused"]:
                 primary().post("/worker/tag/release", {"uuids": [x.uuid for x in notes[n:]]})
                 break
-            done, error = tagging.llm_pass(note)
+            # a note may only be waiting for its index (stored on the primary): no LLM for it
+            if tagging.needs_llm(note.source_type, note.metadata.model_dump(), note.full_text):
+                done, error = tagging.llm_pass(note)
+            else:
+                done, error = note, ""
             if done is None:
                 primary().post(f"/worker/tag/{note.uuid}", {"error": error})
                 failures_in_a_row += 1

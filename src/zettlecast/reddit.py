@@ -443,7 +443,8 @@ def sync(limit: Optional[int] = None, refresh: bool = False, articles: bool = Tr
         return counts
     finally:
         try:
-            if counts["imported"] or counts["refreshed"] or counts["tagged"]:
+            # the primary stores saves waiting for the worker, whose batch links them
+            if (counts["imported"] or counts["refreshed"] or counts["tagged"]) and not settings.is_primary:
                 progress.update(current="linking notes into the graph")
                 _relink()
         finally:

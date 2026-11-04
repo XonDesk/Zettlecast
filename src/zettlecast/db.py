@@ -27,6 +27,8 @@ from .models import NoteModel
 logger = logging.getLogger(__name__)
 
 DIM = settings.embedding_dimensions
+# metadata.custom flag: stored on the primary without an index; the worker sends one (tagging.py)
+INDEX_PENDING = "index_pending"
 
 NOTES_SCHEMA = pa.schema([
     ("uuid", pa.string()),
@@ -94,6 +96,22 @@ def _row_to_note(row: dict) -> NoteModel:
         metadata=json.loads(row["metadata_json"]),
     )
 
+
+
+def _note_row(note: NoteModel, vector) -> dict:
+    return {
+        "uuid": note.uuid,
+        "title": note.title,
+        "source_type": note.source_type,
+        "source_path": note.source_path,
+        "full_text": note.full_text,
+        "content_hash": note.content_hash,
+        "status": note.status,
+        "created_at": note.created_at.isoformat(),
+        "updated_at": datetime.utcnow().isoformat(),
+        "metadata_json": json.dumps(note.metadata.model_dump()),
+        "vector": np.asarray(vector, np.float32).tolist(),
+    }
 
 
 def _chunks_and_vectors(note: NoteModel):
@@ -196,14 +214,21 @@ class Database:
 
     # --- Notes ---
 
-    def upsert_note(self, note: NoteModel, index: Optional[dict] = None) -> None:
+    def upsert_note(self, note: NoteModel, index: Optional[dict] = None) -> bool:
         """
         Insert or replace a note: chunk it, embed the chunks, store both. With index (from
         index_payload on the worker) the chunks and vectors are stored as sent, nothing embedded here.
+
+        The primary never embeds: without a fitting index the note is stored waiting for one
+        (_store_waiting). Returns whether the note was stored indexed (so it can be linked now).
         """
         chunks, vectors = _from_payload(note, index) if index else (None, None)
+        if chunks is None and settings.is_primary:
+            self._store_waiting(note)
+            return False
         if chunks is None:
             chunks, vectors = _chunks_and_vectors(note)
+        note.metadata.custom.pop(INDEX_PENDING, None)
         note_vector = vectors.mean(axis=0) if len(vectors) else np.zeros(DIM, np.float32)
         norm = np.linalg.norm(note_vector)
         if norm > 0:
@@ -211,19 +236,7 @@ class Database:
 
         self.delete_note(note.uuid, keep_edges=True)
 
-        self.notes.add([{
-            "uuid": note.uuid,
-            "title": note.title,
-            "source_type": note.source_type,
-            "source_path": note.source_path,
-            "full_text": note.full_text,
-            "content_hash": note.content_hash,
-            "status": note.status,
-            "created_at": note.created_at.isoformat(),
-            "updated_at": datetime.utcnow().isoformat(),
-            "metadata_json": json.dumps(note.metadata.model_dump()),
-            "vector": note_vector.astype(np.float32).tolist(),
-        }])
+        self.notes.add([_note_row(note, note_vector)])
         if chunks:
             self.chunks.add([
                 {
@@ -235,6 +248,19 @@ class Database:
                 }
                 for c, v in zip(chunks, vectors)
             ])
+        return True
+
+    def _store_waiting(self, note: NoteModel) -> None:
+        """
+        The primary's store without an index: the note row only, marked for the worker. A note stored
+        before keeps its chunks and vector (still searchable, with its old text) until the new index
+        comes; a new one has none (listed, but not searchable or linked yet).
+        """
+        note.metadata.custom[INDEX_PENDING] = True
+        old = self.notes.search().where(f"uuid = {_q(note.uuid)}").select(["vector"]).limit(1).to_list()
+        vector = np.asarray(old[0]["vector"], np.float32) if old else np.zeros(DIM, np.float32)
+        self.notes.delete(f"uuid = {_q(note.uuid)}")
+        self.notes.add([_note_row(note, vector)])
 
     def update_note_text(self, uuid: str, full_text: str, content_hash: str) -> None:
         """A note's text without re-embedding it: for changes outside its indexed sections."""
@@ -288,20 +314,25 @@ class Database:
 
         rows = query.limit(100_000).to_list()
         rows.sort(key=lambda r: r["created_at"], reverse=True)
-        return [
-            {
+        listed = []
+        for r in rows[offset:offset + limit]:
+            meta = json.loads(r["metadata_json"])
+            listed.append({
                 "uuid": r["uuid"],
                 "title": r["title"],
                 "source_type": r["source_type"],
                 "status": r["status"],
                 "created_at": r["created_at"],
-                "tags": json.loads(r["metadata_json"]).get("tags", []),
-            }
-            for r in rows[offset:offset + limit]
-        ]
+                "tags": meta.get("tags", []),
+                "waiting": bool((meta.get("custom") or {}).get(INDEX_PENDING)),  # for the worker's index
+            })
+        return listed
 
     def all_note_vectors(self) -> List[dict]:
-        """Every note's graph inputs: uuid, title, type, source, created_at, metadata, text, vector."""
+        """
+        Every indexed note's graph inputs: uuid, title, type, source, created_at, metadata, text, vector.
+        A note still waiting for its first index (zero vector) isn't in the graph yet.
+        """
         rows = self.notes.search().select(
             ["uuid", "title", "source_type", "source_path", "created_at", "metadata_json", "full_text", "vector"]
         ).limit(100_000).to_list()
@@ -316,7 +347,7 @@ class Database:
                 "full_text": r["full_text"],
                 "vector": np.asarray(r["vector"], dtype=np.float32),
             }
-            for r in rows
+            for r in rows if np.any(np.asarray(r["vector"], dtype=np.float32))
         ]
 
     def all_chunk_vectors(self) -> List[dict]:

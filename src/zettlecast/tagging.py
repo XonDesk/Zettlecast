@@ -1,11 +1,13 @@
 """
-LLM tags + summaries for notes stored without them, when the machine storing notes has no LLM.
+LLM tags + summaries and indexes for notes stored without them, when the machine storing notes
+has no LLM and doesn't embed (the primary).
 
-On the primary (ROLE=primary) web pages, PDFs, markdown and Reddit saves are stored at once
-without the LLM. What still needs it is read from the database (no summary yet; a Reddit save
-with its thread fetched but not curated), so nothing has to be queued at ingest. The worker
-claims a batch, runs the same LLM pass a standalone install runs at ingest, and sends each note
-back; the primary stores it (re-embedded) and links the batch with one graph rebuild.
+On the primary (ROLE=primary) web pages, PDFs, markdown and Reddit saves are stored at once,
+without the LLM and without an index (db.INDEX_PENDING). What still needs work is read from the
+database (no summary yet; a Reddit save with its thread fetched but not curated; waiting for an
+index), so nothing has to be queued at ingest. The worker claims a batch, runs the LLM pass a
+standalone install runs at ingest where it's needed, embeds the note and sends it back with its
+index; the primary stores it as sent and links the batch with one graph rebuild.
 
 A note the LLM fails on is tried MAX_ATTEMPTS times (<storage>/tag_failures.json), then left.
 """
@@ -62,20 +64,35 @@ def needs_llm(source_type: str, metadata: dict, text: str) -> bool:
 
 
 def _untagged() -> List[str]:
-    """Uuids of stored notes that need the LLM pass (cached for a minute: the wake policy asks often)."""
+    """
+    Uuids of stored notes that need the LLM pass or an index, newest first (cached for a minute:
+    the wake policy asks often).
+    """
     if _cache["uuids"] is not None and time.monotonic() - _cache["at"] < CACHE_SECONDS:
         return _cache["uuids"]
-    from .db import _q, db
+    from .db import INDEX_PENDING, _q, db
 
     types = ", ".join(_q(t) for t in TAGGED_TYPES)
     rows = (db.notes.search().where(f"source_type IN ({types})")
             .select(["uuid", "source_type", "metadata_json", "full_text", "created_at"])
             .limit(1_000_000).to_list())
+    # waiting for an index, any type (a transcript's text isn't read for this: uuids only)
+    rows += (db.notes.search().where(f"metadata_json LIKE '%\"{INDEX_PENDING}\": true%'")
+             .select(["uuid", "created_at"]).limit(1_000_000).to_list())
     rows.sort(key=lambda r: r["created_at"], reverse=True)  # newest first: what was just added
-    uuids = [r["uuid"] for r in rows
-             if needs_llm(r["source_type"], json.loads(r["metadata_json"] or "{}"), r["full_text"] or "")]
+    uuids = list(dict.fromkeys(
+        r["uuid"] for r in rows
+        if "metadata_json" not in r  # from the waiting query
+        or needs_index(json.loads(r["metadata_json"] or "{}"))
+        or needs_llm(r["source_type"], json.loads(r["metadata_json"] or "{}"), r["full_text"] or "")))
     _cache.update(at=time.monotonic(), uuids=uuids)
     return uuids
+
+
+def needs_index(metadata: dict) -> bool:
+    from .db import INDEX_PENDING
+
+    return bool((metadata.get("custom") or {}).get(INDEX_PENDING))
 
 
 def forget_cache() -> None:
@@ -133,8 +150,12 @@ def store(note: NoteModel, index: Optional[dict] = None) -> None:
 
     if db.get_note_by_uuid(note.uuid) is None:
         logger.info(f"Tagged note was deleted meanwhile: {note.title}")
+    elif not db.upsert_note(note, index=index):
+        # stored, but waiting again: the index didn't fit (or none came). Counted, so it isn't
+        # handed out forever
+        failed(note.uuid, "the worker's index didn't fit the note")
+        return
     else:
-        db.upsert_note(note, index=index)
         if note.source_type == "reddit":
             from .reddit import mark_tagged
 
