@@ -101,9 +101,9 @@ export const api = {
         fetchAPI<IngestResponse>(`/notes/${uuid}/references/fetch`, { method: 'POST', body: JSON.stringify({ url }) }),
 
     // Search
-    search: (query: string, topK = 5, rerank = true) =>
+    search: (query: string, topK = 5, rerank = true, signal?: AbortSignal) =>
         fetchAPI<{ query: string; results: SearchResult[]; count: number }>(
-            `/search?q=${encodeURIComponent(query)}&top_k=${topK}&rerank=${rerank}`
+            `/search?q=${encodeURIComponent(query)}&top_k=${topK}&rerank=${rerank}`, { signal }
         ),
 
     // Ingest

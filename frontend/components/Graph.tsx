@@ -59,6 +59,8 @@ const PRELAYOUT_TICKS_CACHED = 40; // most notes start where they were: settle o
 const SEARCH_MIN_CHARS = 3;
 const SEARCH_DEBOUNCE_MS = 450; // passage search runs the embedder + reranker: wait for a pause in typing
 const SEARCH_RESULTS = 12;
+const SEARCH_SLOW_MS = 8000; // "still working": the first search after a restart loads the search model
+const SEARCH_TIMEOUT_MS = 30000; // longer than any real search: the API is stuck or down
 
 /** A search snippet without its leading "[12.3s - 45.6s]" (the result shows the time), shortened. */
 function snippetText(snippet: string): string {
@@ -385,6 +387,10 @@ export default function KnowledgeGraph() {
     // passage search (embeddings + reranker): the notes found stay highlighted until the box is cleared
     const [hits, setHits] = useState<{ query: string; results: SearchResult[] } | null>(null);
     const [searching, setSearching] = useState(false);
+    const [searchStarted, setSearchStarted] = useState<number | null>(null);
+    const [searchError, setSearchError] = useState<string | null>(null);
+    const [searchRetry, setSearchRetry] = useState(0);
+    const [searchNow, setSearchNow] = useState(() => Date.now());
     const [resultsOpen, setResultsOpen] = useState(false);
     const [links, setLinks] = useState<{ uuid: string; items: LinkSuggestion[] } | null>(null);
     // community names on the map: placed straight in the DOM after each frame (React state per frame
@@ -828,31 +834,59 @@ export default function KnowledgeGraph() {
 
     useEffect(() => {
         const q = query.trim();
+        setSearchError(null);
         if (q.length < SEARCH_MIN_CHARS) {
             setHits(null);
+            setSearching(false); // a search still in flight when the box was cleared
             return;
         }
         let cancelled = false;
+        let timedOut = false;
+        const controller = new AbortController();
+        let limit: ReturnType<typeof setTimeout> | undefined;
         const timer = setTimeout(() => {
             setSearching(true);
-            api.search(q, SEARCH_RESULTS, true)
+            setSearchStarted(Date.now());
+            limit = setTimeout(() => {
+                timedOut = true;
+                controller.abort();
+            }, SEARCH_TIMEOUT_MS);
+            api.search(q, SEARCH_RESULTS, true, controller.signal)
                 .then((data) => {
                     if (!cancelled) setHits({ query: q, results: data.results });
                 })
-                .catch((err) => console.error('Search failed:', err))
+                .catch((err) => {
+                    if (cancelled) return; // typed on: a newer search replaces this one
+                    console.error('Search failed:', err);
+                    setSearchError(timedOut
+                        ? `No answer after ${SEARCH_TIMEOUT_MS / 1000} s: the server may be busy or down.`
+                        : `Search failed${err instanceof Error && err.message ? ` (${err.message})` : ''}.`);
+                })
                 .finally(() => {
+                    clearTimeout(limit);
                     if (!cancelled) setSearching(false);
                 });
         }, SEARCH_DEBOUNCE_MS);
         return () => {
             cancelled = true;
             clearTimeout(timer);
+            clearTimeout(limit);
+            controller.abort();
         };
-    }, [query]);
+    }, [query, searchRetry]);
+
+    // the elapsed time ticks while a search runs, so a slow one is visibly still going
+    useEffect(() => {
+        if (!searching) return;
+        const tick = setInterval(() => setSearchNow(Date.now()), 500);
+        return () => clearInterval(tick);
+    }, [searching]);
+    const searchSeconds = searching && searchStarted ? Math.max(0, Math.floor((searchNow - searchStarted) / 1000)) : 0;
 
     const clearSearch = () => {
         setQuery('');
         setHits(null);
+        setSearchError(null);
         setResultsOpen(false);
     };
 
@@ -961,7 +995,7 @@ export default function KnowledgeGraph() {
                     {query && (
                         <button className="graph-search-clear" onClick={clearSearch} aria-label="Clear search" title="Clear (Esc)">✕</button>
                     )}
-                    {resultsOpen && (matches.length > 0 || hits || searching) && (
+                    {resultsOpen && (matches.length > 0 || hits || searching || searchError) && (
                         <div className="graph-search-results">
                             {matches.length > 0 && (
                                 <>
@@ -976,11 +1010,26 @@ export default function KnowledgeGraph() {
                                 </>
                             )}
                             {query.trim().length >= SEARCH_MIN_CHARS && (
-                                <div className="graph-search-heading">
-                                    Passages{searching ? ' · searching…' : hits ? ` · ${hits.results.length} notes highlighted` : ''}
+                                <div className="graph-search-heading" aria-live="polite">
+                                    Passages
+                                    {searching ? (
+                                        <> · <span className="graph-search-spinner" aria-hidden="true" />
+                                            searching…{searchSeconds >= 1 ? ` ${searchSeconds} s` : ''}</>
+                                    ) : hits ? ` · ${hits.results.length} notes highlighted` : ''}
                                 </div>
                             )}
-                            {hits && hits.results.length === 0 && !searching && (
+                            {searching && searchSeconds * 1000 >= SEARCH_SLOW_MS && (
+                                <div className="graph-search-empty">
+                                    Still working. The first search after a restart loads the search model and can take a while.
+                                </div>
+                            )}
+                            {searchError && !searching && (
+                                <div className="graph-search-error" role="alert">
+                                    {searchError}
+                                    <button onClick={() => setSearchRetry((n) => n + 1)}>Retry</button>
+                                </div>
+                            )}
+                            {hits && hits.results.length === 0 && !searching && !searchError && (
                                 <div className="graph-search-empty">Nothing found.</div>
                             )}
                             {hits && hits.results.length > 0 && (
