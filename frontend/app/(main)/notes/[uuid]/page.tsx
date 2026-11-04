@@ -115,6 +115,15 @@ export default function NoteDetailPage() {
                 <h1 className="page-title">{getTypeEmoji(note.source_type)} {note.title}</h1>
                 <div className="card-meta mb-4">
                     <span className={`badge badge-${note.status}`}>{note.status}</span>
+                    {note.metadata?.custom?.index_pending === true && (
+                        <>
+                            {' '}
+                            <span className="badge badge-waiting"
+                                  title="Search and the graph use this note's earlier version, or none yet, until the desktop indexes it">
+                                waiting for the desktop
+                            </span>
+                        </>
+                    )}
                     {' \u00B7 '}
                     {note.source_type}
                     {' \u00B7 '}

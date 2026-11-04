@@ -7,6 +7,7 @@ export interface Note {
     status: 'inbox' | 'reviewed' | 'archived';
     created_at: string;
     tags?: string[];
+    waiting?: boolean; // stored on the primary, not indexed yet: not searchable or linked until the desktop runs
 }
 
 export interface NoteDetail extends Note {

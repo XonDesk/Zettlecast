@@ -102,6 +102,15 @@ export default function NotesPage() {
                             </div>
                             <div className="card-meta">
                                 <span className={getBadgeClass(note.status)}>{note.status}</span>
+                                {note.waiting && (
+                                    <>
+                                        {' '}
+                                        <span className="badge badge-waiting"
+                                              title="Not searchable or linked yet: it is indexed the next time the desktop runs">
+                                            waiting for the desktop
+                                        </span>
+                                    </>
+                                )}
                                 {' · '}
                                 {note.source_type}
                                 {' · '}

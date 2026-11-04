@@ -1194,6 +1194,7 @@ body[data-sidebar='collapsed'] .app-layout { flex-direction: column; }
 .badge-processing { background: #f97316; }
 .badge-completed { background: #22c55e; }
 .badge-failed { background: #ef4444; }
+.badge-waiting { background: #8b5cf6; } /* stored, not indexed yet: the desktop does that */
 
 /* Loading */
 .loading {
