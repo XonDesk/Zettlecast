@@ -75,6 +75,9 @@ daemons are uninstalled and `~/Documents/Zettlecast` is the old checkout. Deploy
 Wake-on-LAN: the native `com.zettlecast.wake` LaunchAgent (a container's broadcasts don't reach the LAN).
 Checked: the PC reaches the API, heartbeat times in local time (TZ), files owned by the Mac user,
 a wake request from the container sent by the helper.
+`WORKER_URL` is required in the containers: the PC's requests arrive from 127.0.0.1 (OrbStack's
+NAT), so the file server address the heartbeat would suggest is wrong.
+Tests on the Mac: `./deploy/macos/test.sh` (in a container from the API image; no venv).
 
 ## Open issues seen on the first real run (not fixed)
 

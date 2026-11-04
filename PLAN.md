@@ -1,6 +1,6 @@
 # Plan: a light primary (Mac only stores, serves and coordinates)
 
-Status (2026-11-04): **steps 1-3 and 10 done** (the Mac runs in containers since 12:18). Next: step 4. Branch: `mac-primary-setup` (then one branch per step or one
+Status (2026-11-04): **steps 1-4 and 10 done** (the Mac runs in containers since 12:18). Next: step 5. Branch: `mac-primary-setup` (then one branch per step or one
 feature branch, see Deploying).
 
 ## Goal
