@@ -59,6 +59,17 @@ export interface IngestResponse {
     error?: string;
 }
 
+/** What a note links to (url) or mentions (name, looked up on Wikipedia) */
+export type Reference =
+    | { kind: 'url'; url: string; label: string; domain: string; context: string; low_value: boolean; existing_uuid: string | null }
+    | { kind: 'name'; label: string; query: string; what: string };
+
+export interface ReferenceCandidate {
+    title: string;
+    url: string;
+    description: string;
+}
+
 export interface GraphNode {
     id: string;
     name: string;

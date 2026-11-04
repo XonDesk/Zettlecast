@@ -17,6 +17,8 @@ import GraphPane, {
     type CommunityInsight,
     type Facets,
     type GraphSettings,
+    KIND_COLORS,
+    type LinkKind,
     mergeSettings,
 } from './GraphPane';
 
@@ -44,6 +46,8 @@ const RINGS: Record<string, { color: string; size: number; label: string }> = {
     image: { color: '#f8fafc', size: 0.42, label: 'image' },
     reddit: { color: '#ff7a45', size: 0.3, label: 'reddit' },
 };
+const KIND_RING = 0.38; // outline of a focused note's neighbours (thicker than the source-type rings)
+const KIND_RANK: Record<LinkKind, number> = { similar: 0, duplicate: 1, link: 2 };
 const RING_LEGEND = [{ label: 'podcast', color: 'transparent', size: 0 }, RINGS.web, RINGS.pdf, RINGS.image, RINGS.reddit];
 const TYPE_LABELS: Record<string, string> = { audio: 'podcast', pdf: 'PDF', markdown: 'note', web: 'web page', image: 'image', reddit: 'Reddit save' };
 const SETTINGS_KEY = 'zettlecast.graph.settings.v2'; // v2: d3 forces
@@ -322,7 +326,7 @@ function facetsOf(data: GraphData): Facets {
 }
 
 /** Node and link ids that pass the filters */
-function visibleSet(full: Graph, s: GraphSettings['filter'], selected: string | null) {
+function visibleSet(full: Graph, s: GraphSettings['filter']) {
     const match = compileQuery(s.query);
     const nodes = new Set<string>();
     full.forEachNode((node, a) => {
@@ -341,32 +345,10 @@ function visibleSet(full: Graph, s: GraphSettings['filter'], selected: string | 
         if (a.kind !== 'link' && a.value < s.minWeight) return;
         edges.add(edge);
     });
-    if (s.local && selected && full.hasNode(selected)) {
-        // the selected note's neighbourhood over the visible links
-        nodes.add(selected);
-        const keep = new Set([selected]);
-        let frontier = [selected];
-        for (let d = 0; d < s.depth; d++) {
-            const next: string[] = [];
-            frontier.forEach((node) => full.forEachEdge(node, (edge, _a, source, target) => {
-                const other = source === node ? target : source;
-                if (edges.has(edge) && !keep.has(other)) {
-                    keep.add(other);
-                    next.push(other);
-                }
-            }));
-            frontier = next;
-        }
-        [...nodes].forEach((n) => !keep.has(n) && nodes.delete(n));
-        [...edges].forEach((e) => {
-            const [a, b] = full.extremities(e);
-            if (!keep.has(a) || !keep.has(b)) edges.delete(e);
-        });
-    }
     if (!s.orphans) {
         const linked = new Set<string>();
         edges.forEach((e) => full.extremities(e).forEach((n) => linked.add(n)));
-        [...nodes].forEach((n) => !linked.has(n) && n !== selected && nodes.delete(n));
+        [...nodes].forEach((n) => !linked.has(n) && nodes.delete(n));
     }
     return { nodes, edges };
 }
@@ -576,11 +558,9 @@ export default function KnowledgeGraph() {
 
     // --- The view graph follows the filters ---
 
-    // the selection changes the visible notes only in neighbourhood mode
-    const localCentre = settings.filter.local ? selected : null;
     useEffect(() => {
         if (!full || laidOut !== full) return;
-        const { nodes, edges } = visibleSet(full, settings.filter, localCentre);
+        const { nodes, edges } = visibleSet(full, settings.filter);
         const changed = view.order > 0;
         view.forEachNode((node) => !nodes.has(node) && view.dropNode(node));
         nodes.forEach((node) => {
@@ -610,7 +590,7 @@ export default function KnowledgeGraph() {
             // settle here ran ~170 steps, each one re-uploading every note and link: seconds of stutter)
             alpha: changed ? 0.5 : null,
         });
-    }, [full, laidOut, view, settings.filter, localCentre, postLayout]);
+    }, [full, laidOut, view, settings.filter, postLayout]);
 
     useEffect(() => {
         postLayout({ type: 'forces', forces: settings.forces, nodeSize: settings.display.nodeSize });
@@ -768,13 +748,23 @@ export default function KnowledgeGraph() {
         if (!renderer) return;
         const { display } = settings;
         const focus = hovered || selected;
-        const neighbours = new Set(focus && view.hasNode(focus) ? view.neighbors(focus) : []);
+        // each neighbour by its strongest kind of link to the focused note
+        const neighbours = new Map<string, LinkKind>();
+        if (focus && view.hasNode(focus)) {
+            view.forEachEdge(focus, (_edge, a, source, target) => {
+                const other = source === focus ? target : source;
+                const kind = a.kind as LinkKind;
+                const had = neighbours.get(other);
+                if (!had || KIND_RANK[kind] > KIND_RANK[had]) neighbours.set(other, kind);
+            });
+        }
         renderer.setSetting('labelRenderedSizeThreshold', display.textFade);
         renderer.setSetting('nodeReducer', (node, attrs) => {
             const shown = { ...attrs, color: colorOf(attrs), size: attrs.size * display.nodeSize };
             if (focus && view.hasNode(focus)) {
                 if (node === focus) return { ...shown, highlighted: true, zIndex: 2 };
-                if (neighbours.has(node)) return { ...shown, forceLabel: true, zIndex: 1 };
+                const kind = neighbours.get(node);
+                if (kind) return { ...shown, ringColor: KIND_COLORS[kind] ?? '#94a3b8', ringSize: KIND_RING, forceLabel: true, zIndex: 1 };
                 return { ...shown, color: DIMMED, ringColor: 'transparent', label: '', zIndex: 0 };
             }
             if (hitNodes.size) {
@@ -789,7 +779,8 @@ export default function KnowledgeGraph() {
         renderer.setSetting('edgeReducer', (edge, attrs) => {
             const shown = { ...attrs, size: attrs.size * display.linkThickness, hidden: display.linkThickness === 0 };
             if (focus && view.hasNode(focus)) {
-                return view.hasExtremity(edge, focus) ? { ...shown, color: '#94a3b8', zIndex: 1 } : { ...shown, hidden: true };
+                return view.hasExtremity(edge, focus)
+                    ? { ...shown, color: KIND_COLORS[attrs.kind as LinkKind] ?? '#94a3b8', zIndex: 1 } : { ...shown, hidden: true };
             }
             if (hitNodes.size) {
                 const [a, b] = view.extremities(edge);
@@ -902,6 +893,19 @@ export default function KnowledgeGraph() {
     };
 
     const selectedAttrs = selected && full?.hasNode(selected) ? full.getNodeAttributes(selected) : null;
+
+    // links by kind under the pane's checkboxes: the selected note's (filters aside, so hidden ones count), else all
+    const kindCounts = useMemo(() => {
+        const counts: Record<LinkKind, number> = { similar: 0, duplicate: 0, link: 0 };
+        if (!full) return { counts, ofNote: false };
+        const ofNote = !!selected && full.hasNode(selected);
+        const count = (_edge: string, a: Record<string, unknown>) => {
+            if ((a.kind as LinkKind) in counts) counts[a.kind as LinkKind] += 1;
+        };
+        if (ofNote) full.forEachEdge(selected!, count);
+        else full.forEachEdge(count);
+        return { counts, ofNote };
+    }, [full, selected]);
     const selectedLinks = links && links.uuid === selected ? links.items : null;
     const selectedCommunity = selectedAttrs ? communities.find((c) => c.id === selectedAttrs.community) : undefined;
     const hoveredAttrs = hovered && hovered !== selected && full?.hasNode(hovered) ? full.getNodeAttributes(hovered) : null;
@@ -1069,7 +1073,7 @@ export default function KnowledgeGraph() {
                     communities={insights}
                     facets={facets}
                     visible={visibleCount}
-                    hasSelection={!!selected}
+                    kindCounts={kindCounts}
                     focusCommunity={focusCommunity}
                     onFocusCommunity={focusOnCommunity}
                     onAnimate={animate}

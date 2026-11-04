@@ -15,7 +15,7 @@ Notes are the only nodes. An edge's weight combines three signals:
 
 Each note keeps its k best partners (no global threshold: an episode pair and an
 episode/screenshot pair live on different similarity scales); the edges are the union.
-[[Wikilinks]] are always edges; rejected pairs never are. Communities: Leiden on the
+[[Wikilinks]] are always edges, even rejected; other rejected pairs never are. Communities: Leiden on the
 weighted graph, ids kept stable across rebuilds, named after their most distinctive topics.
 """
 
@@ -289,13 +289,17 @@ def best_pair(passages: Passages, i: int, j: int) -> Optional[dict]:
 # --- Wikilinks ---
 
 
-def wikilink_pairs(notes: List[dict]) -> Set[Tuple[int, int]]:
-    """(i, j) for every [[Title]] in note i that names note j."""
+def wikilink_pairs(notes: List[dict], referenced: bool = True) -> Set[Tuple[int, int]]:
+    """(i, j) for every [[Title]] in note i that names note j, and (referenced) every note j a
+    page i was fetched from."""
     by_title = {n["title"].strip().lower(): j for j, n in enumerate(notes)}
+    by_uuid = {n.get("uuid"): j for j, n in enumerate(notes)}
     pairs = set()
     for i, n in enumerate(notes):
-        for title in _WIKILINK_RE.findall(n.get("full_text") or ""):
-            j = by_title.get(title.strip().lower())
+        referenced_by = (((n.get("metadata") or {}).get("custom") or {}).get("referenced_by") or []
+                         if referenced else [])
+        targets = [by_title.get(title.strip().lower()) for title in _WIKILINK_RE.findall(n.get("full_text") or "")]
+        for j in targets + [by_uuid.get(uuid) for uuid in referenced_by]:
             if j is not None and j != i:
                 pairs.add((min(i, j), max(i, j)))
     return pairs
@@ -313,7 +317,8 @@ class Graph:
     shares: np.ndarray
     entities: EntityIndex
     passages: Passages
-    links: Set[Tuple[int, int]]
+    links: Set[Tuple[int, int]]  # wikilinks and referenced_by: always edges, unless rejected
+    typed: Set[Tuple[int, int]] = field(default_factory=set)  # [[wikilinks]]: edges even when rejected
 
 
 def build(notes: Optional[List[dict]] = None, chunks: Optional[List[dict]] = None,
@@ -341,7 +346,8 @@ def build(notes: Optional[List[dict]] = None, chunks: Optional[List[dict]] = Non
     entities = build_entities(notes)
     weights = (settings.graph_weight_semantic * semantic + settings.graph_weight_passage * passage
                + settings.graph_weight_entity * entities.similarity)
-    return Graph(notes, weights, semantic, passage, shares, entities, passages, wikilink_pairs(notes))
+    return Graph(notes, weights, semantic, passage, shares, entities, passages,
+                 wikilink_pairs(notes), wikilink_pairs(notes, referenced=False))
 
 
 def _edge(graph: Graph, i: int, j: int, kind: str) -> dict:
@@ -391,10 +397,13 @@ def select_pairs(graph: Graph, rejected: Set[Tuple[str, str]], only: Optional[in
     k = settings.graph_max_edges_per_note
     uuids = [n["uuid"] for n in graph.notes]
     weights = graph.weights.copy()
+    index = {u: i for i, u in enumerate(uuids)}
+    rejected_pairs = set()
     for a, b in rejected:
-        ia, ib = uuids.index(a) if a in uuids else None, uuids.index(b) if b in uuids else None
+        ia, ib = index.get(a), index.get(b)
         if ia is not None and ib is not None:
             weights[ia, ib] = weights[ib, ia] = -1
+            rejected_pairs.add((min(ia, ib), max(ia, ib)))
     pairs = set()
     for i in range(len(uuids)) if only is None else [only]:
         order = np.argsort(-weights[i])
@@ -407,7 +416,9 @@ def select_pairs(graph: Graph, rejected: Set[Tuple[str, str]], only: Optional[in
             if j != only and weights[j, only] >= settings.graph_min_weight:
                 if weights[j, only] >= (kth or {}).get(uuids[j], -np.inf):
                     pairs.add((min(j, only), max(j, only)))
-    return pairs | {p for p in graph.links if only is None or only in p}
+    # a link the user typed ([[Title]]) always shows; one from referenced_by unless rejected
+    return pairs | {p for p in graph.links
+                    if (only is None or only in p) and (p in graph.typed or p not in rejected_pairs)}
 
 
 def rebuild_graph() -> int:

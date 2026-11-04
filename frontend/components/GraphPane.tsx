@@ -20,8 +20,6 @@ export interface GraphSettings {
         yearFrom: number | null;
         yearTo: number | null;
         hiddenCommunities: number[];
-        local: boolean; // only the selected note's neighbourhood
-        depth: number;
     };
     groups: {
         colorBy: ColorBy;
@@ -55,8 +53,6 @@ export const DEFAULT_SETTINGS: GraphSettings = {
         yearFrom: null,
         yearTo: null,
         hiddenCommunities: [],
-        local: false,
-        depth: 1,
     },
     groups: { colorBy: 'community', custom: [], communityColors: {} },
     display: { nodeSize: 1, linkThickness: 1, textFade: 14, communityLabels: true, contours: false, contourBandwidth: 20 },
@@ -89,6 +85,11 @@ export interface CommunityInsight {
     hours: number;
 }
 
+export type LinkKind = 'similar' | 'duplicate' | 'link';
+
+/** Outline of a hovered or selected note's neighbours, by the kind of link to it (a wikilink wins over a duplicate over similar) */
+export const KIND_COLORS: Record<LinkKind, string> = { similar: '#7dd3fc', duplicate: '#f87171', link: '#fbbf24' };
+
 export interface Facets {
     tag: string[];
     person: string[];
@@ -106,7 +107,7 @@ interface Props {
     communities: CommunityInsight[];
     facets: Facets;
     visible: { nodes: number; links: number };
-    hasSelection: boolean;
+    kindCounts: { counts: Record<LinkKind, number>; ofNote: boolean }; // the selected note's links, else the whole graph's
     focusCommunity: number | null;
     onFocusCommunity: (id: number | null) => void;
     onAnimate: () => void;
@@ -266,23 +267,23 @@ export default function GraphPane(props: Props) {
                 )}
                 <div className="gp-checks">
                     {(['similar', 'duplicate', 'link'] as const).map((k) => (
-                        <label key={k} className="gp-check">
-                            <input type="checkbox" checked={filter.kinds[k]}
-                                   onChange={(e) => set('filter', { kinds: { ...filter.kinds, [k]: e.target.checked } })} />
-                            {k === 'link' ? 'wikilinks' : k === 'similar' ? 'similar' : 'duplicates'}
+                        <label key={k} className="gp-check gp-kind">
+                            <span className="gp-kind-row">
+                                <input type="checkbox" checked={filter.kinds[k]}
+                                       onChange={(e) => set('filter', { kinds: { ...filter.kinds, [k]: e.target.checked } })} />
+                                <span className="gp-kind-swatch" style={{ borderColor: KIND_COLORS[k] }} />
+                                {k === 'link' ? 'wikilinks' : k === 'similar' ? 'similar' : 'duplicates'}
+                            </span>
+                            <span className="gp-kind-count">{props.kindCounts.counts[k].toLocaleString()}</span>
                         </label>
                     ))}
+                </div>
+                <div className="gp-hint">
+                    {props.kindCounts.ofNote ? 'Links of the selected note' : 'Links in the graph; select a note for its own'}
                 </div>
                 <Slider label="Minimum link strength" value={filter.minWeight} min={0} max={0.6} step={0.01}
                         onChange={(v) => set('filter', { minWeight: v })} format={(v) => v.toFixed(2)} />
                 <Toggle label="Notes without links" checked={filter.orphans} onChange={(v) => set('filter', { orphans: v })} />
-                <Toggle label="Only the selected note's neighbourhood" checked={filter.local}
-                        onChange={(v) => set('filter', { local: v })} />
-                {filter.local && (
-                    <Slider label="Depth" value={filter.depth} min={1} max={4} step={1}
-                            onChange={(v) => set('filter', { depth: v })} />
-                )}
-                {filter.local && !props.hasSelection && <div className="gp-hint">Click a note to centre on it.</div>}
             </details>
 
             <details open className="gp-section">

@@ -16,7 +16,6 @@ on disk, and the lookup switches itself off for the run after a network error.
 """
 
 import difflib
-import json
 import logging
 import re
 from pathlib import Path
@@ -24,11 +23,10 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import httpx
 
-from .rss import USER_AGENT
+from ..wikipedia import JsonCache, new_client, search_pages
 
 logger = logging.getLogger(__name__)
 
-API_URL = "https://en.wikipedia.org/w/api.php"
 PROPOSE_CUTOFF = 0.7  # "Christian Blunfeld" ~ "Kristian Blummenfelt" is 0.79
 MAX_CANDIDATES = 2
 _NAME = re.compile(r"[A-ZÀ-Þ][\w'’.-]+(?: (?:[A-ZÀ-Þ][\w'’.-]+|van|von|de|der|den|du|la|le))*")
@@ -70,13 +68,7 @@ class NameLookup:
     """Wikipedia topic search with an on-disk cache of query -> (result names, linked names)."""
 
     def __init__(self, cache_path: Optional[Path] = None, client: Optional[httpx.Client] = None):
-        self.cache_path = cache_path
-        self.cache: Dict[str, Dict[str, List[str]]] = {}
-        if cache_path and cache_path.exists():
-            try:
-                self.cache = json.loads(cache_path.read_text(encoding="utf-8"))
-            except ValueError:
-                self.cache = {}
+        self.cache = JsonCache(cache_path)
         self._client = client
         self.enabled = True
         self.queries = 0
@@ -84,22 +76,16 @@ class NameLookup:
     @property
     def client(self) -> httpx.Client:
         if self._client is None:
-            self._client = httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=15)
+            self._client = new_client()
         return self._client
 
     def _fetch(self, about: str) -> Dict[str, List[str]]:
-        key = about.strip().lower()
-        if key in self.cache:
-            return self.cache[key]
+        if about in self.cache:
+            return self.cache.get(about)
         if not self.enabled:
             return {"results": [], "linked": []}
         try:
-            response = self.client.get(API_URL, params={
-                "format": "json", "action": "query", "generator": "search", "gsrsearch": about,
-                "gsrlimit": 10, "prop": "links", "pllimit": "max", "plnamespace": 0,
-            })
-            response.raise_for_status()
-            pages = response.json().get("query", {}).get("pages", {}).values()
+            pages = search_pages(self.client, about, 10, prop="links", pllimit="max", plnamespace=0)
         except (httpx.HTTPError, ValueError) as e:
             logger.warning(f"Name lookup unavailable, continuing without it: {e}")
             self.enabled = False
@@ -108,7 +94,7 @@ class NameLookup:
         results = name_titles(p["title"] for p in pages)
         linked = name_titles(link["title"] for p in pages for link in p.get("links", [])) - results
         entry = {"results": sorted(results), "linked": sorted(linked)}
-        self.cache[key] = entry
+        self.cache.set(about, entry)
         return entry
 
     def find(self, heard: str, about: str) -> Tuple[List[str], Set[str]]:
@@ -123,6 +109,4 @@ class NameLookup:
         return best_matches(heard, results), results | set(entry["linked"])
 
     def save(self) -> None:
-        if self.cache_path:
-            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-            self.cache_path.write_text(json.dumps(self.cache, indent=1, ensure_ascii=False), encoding="utf-8")
+        self.cache.save()

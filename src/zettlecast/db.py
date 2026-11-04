@@ -196,6 +196,17 @@ class Database:
         self.notes.update(where=f"uuid = {_q(uuid)}", values={
             "full_text": full_text, "content_hash": content_hash, "updated_at": datetime.utcnow().isoformat()})
 
+    def update_note_metadata(self, uuid: str, metadata: dict) -> None:
+        """A note's metadata without re-embedding it."""
+        self.notes.update(where=f"uuid = {_q(uuid)}", values={
+            "metadata_json": json.dumps(metadata), "updated_at": datetime.utcnow().isoformat()})
+
+    def web_source_paths(self) -> List[tuple]:
+        """(uuid, source_path) of every note stored from a web address."""
+        rows = (self.notes.search().where("source_path LIKE 'http%'")
+                .select(["uuid", "source_path"]).limit(100_000).to_list())
+        return [(r["uuid"], r["source_path"]) for r in rows]
+
     def get_note_by_uuid(self, uuid: str) -> Optional[NoteModel]:
         rows = self.notes.search().where(f"uuid = {_q(uuid)}").limit(1).to_list()
         return _row_to_note(rows[0]) if rows else None

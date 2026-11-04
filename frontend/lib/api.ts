@@ -10,6 +10,8 @@ import type {
     SystemStatus,
     DesktopStatus,
     TodayResponse,
+    Reference,
+    ReferenceCandidate,
 } from './types';
 
 // Calls go to /zc-api on the web UI's own server, which checks the sign-in and forwards them to
@@ -89,6 +91,14 @@ export const api = {
     getNoteThumbUrl: (uuid: string) => apiUrl(`/notes/${uuid}/thumb`),
 
     getNoteMarkdownUrl: (uuid: string) => apiUrl(`/notes/${uuid}/markdown`),
+
+    // What a note links to or mentions, and fetching one as a note linked to it
+    getReferences: (uuid: string) =>
+        fetchAPI<{ references: Reference[] }>(`/notes/${uuid}/references`),
+    lookupReference: (query: string) =>
+        fetchAPI<{ candidates: ReferenceCandidate[] }>(`/references/lookup?q=${encodeURIComponent(query)}`),
+    fetchReference: (uuid: string, url: string) =>
+        fetchAPI<IngestResponse>(`/notes/${uuid}/references/fetch`, { method: 'POST', body: JSON.stringify({ url }) }),
 
     // Search
     search: (query: string, topK = 5, rerank = true) =>

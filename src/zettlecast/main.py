@@ -24,7 +24,7 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
-from . import embeddings, llm, paths, workerstate
+from . import embeddings, llm, paths, references, workerstate
 from .config import ENV_FILE, settings
 from .brief import has_image, iso_date, note_brief
 from .db import _q, db
@@ -333,6 +333,49 @@ async def get_note(
         response["suggestions"] = [s.model_dump() for s in suggestions]
     
     return response
+
+
+@app.get("/notes/{uuid}/references")
+async def get_note_references(uuid: str, token: str = Query(...)):
+    """What a note links to (URLs) and mentions (names to look up); nothing is fetched."""
+    note = db.get_note_by_uuid(uuid)
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    return {"references": await run_in_threadpool(references.extract, note)}
+
+
+@app.get("/references/lookup")
+async def lookup_reference(q: str = Query(..., min_length=1), token: str = Query(...)):
+    """Wikipedia pages for a mentioned name."""
+    try:
+        return {"candidates": await run_in_threadpool(references.lookup, q)}
+    except (httpx.HTTPError, ValueError, OSError) as e:  # ValueError: not JSON (a maintenance page)
+        raise HTTPException(status_code=502, detail=f"Wikipedia lookup failed: {e}")
+
+
+class FetchReferenceRequest(BaseModel):
+    url: str
+
+
+@app.post("/notes/{uuid}/references/fetch", response_model=IngestResponse)
+async def fetch_reference(uuid: str, body: FetchReferenceRequest, token: str = Query(...)):
+    """The page a note links to (or a looked-up name's page) as a note linked to it."""
+    source = db.get_note_by_uuid(uuid)
+    if not source:
+        raise HTTPException(status_code=404, detail="Note not found")
+    if not body.url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="Not a web link")
+
+    def fetch() -> ProcessingResult:
+        with tracking_ingest("web", urlparse(body.url).netloc or body.url) as item:
+            result = references.fetch(source, body.url)
+            item["status"] = result.status
+            return result
+
+    result = await run_in_threadpool(fetch)
+    if result.status == "failed":
+        return IngestResponse(status="failed", error=result.error_message)
+    return IngestResponse(status=result.status, uuid=result.uuid, title=result.title)
 
 
 @app.delete("/notes/{uuid}")

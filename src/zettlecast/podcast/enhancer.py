@@ -13,6 +13,7 @@ import logging
 import re
 from typing import Callable, Dict, List, Optional, Tuple
 
+from ..chunker import strip_link_urls
 from ..llm import LLMError, chat, chat_each
 
 logger = logging.getLogger(__name__)
@@ -408,7 +409,7 @@ class TranscriptEnhancer:
         if len(transcript) > MAX_ANALYSIS_CHARS:
             half = MAX_ANALYSIS_CHARS // 2
             transcript = transcript[:half] + "\n[...]\n" + transcript[-half:]
-        notes = show_notes.strip()[:MAX_SHOW_NOTES_CHARS]
+        notes = strip_link_urls(show_notes).strip()[:MAX_SHOW_NOTES_CHARS]
         try:
             result = chat(
                 ANALYSIS_PROMPT.format(
@@ -504,7 +505,7 @@ class TranscriptEnhancer:
             f"Episode: {episode}" if episode else "",
             f"People: {', '.join(people)}" if people else "",
             f"Names and terms from earlier episodes: {', '.join(glossary_terms)}" if glossary_terms else "",
-            f"Show notes: {show_notes.strip()}" if show_notes.strip() else "",
+            f"Show notes: {strip_link_urls(show_notes).strip()}" if show_notes.strip() else "",
         ]))
 
         corrections = []

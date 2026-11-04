@@ -126,6 +126,15 @@ def _drop_sections(text: str, titles: tuple) -> str:
     return re.sub(r"!\[([^\]\n]*)\]\([^)\s]+\)", r"\1", text)
 
 
+_LABELLED_URL = re.compile(r"(?<=\S) \(https?://(?:[^()\s]|\([^()\s]*\))+\)")
+
+
+def strip_link_urls(text: str) -> str:
+    """"text (url)" -> "text": a show note's or Reddit comment's link address is not content
+    (a sponsor link in every episode would match every episode)."""
+    return _LABELLED_URL.sub("", text)
+
+
 def create_chunks(text: str, base_chunk_id: str) -> List[ChunkModel]:
     """
     Create ChunkModel instances from text.
@@ -137,10 +146,10 @@ def create_chunks(text: str, base_chunk_id: str) -> List[ChunkModel]:
     chunk_size = settings.chunk_size
     if "\n## Transcript\n" in text:
         head, transcript = text.split("\n## Transcript\n", 1)
-        head = _drop_sections(head, UNINDEXED_SECTIONS)
+        head = strip_link_urls(_drop_sections(head, UNINDEXED_SECTIONS))
         raw_chunks = recursive_split(head.strip()) + _split_transcript(transcript, chunk_size)
     else:
-        raw_chunks = recursive_split(_drop_sections(text, UNINDEXED_SECTIONS).strip())
+        raw_chunks = recursive_split(strip_link_urls(_drop_sections(text, UNINDEXED_SECTIONS)).strip())
 
     chunks = []
     current_pos = 0

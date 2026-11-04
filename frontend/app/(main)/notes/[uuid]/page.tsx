@@ -7,6 +7,7 @@ import { api } from '@/lib/api';
 import { formatDate, formatTimestamp } from '@/lib/utils';
 import MarkdownContent from '@/components/MarkdownContent';
 import Transcript from '@/components/Transcript';
+import References from '@/components/References';
 import type { NoteDetail as NoteDetailType } from '@/lib/types';
 
 function formatDuration(seconds: number): string {
@@ -246,6 +247,8 @@ export default function NoteDetailPage() {
                             <p className="text-muted">Language: {note.metadata.language}</p>
                         )}
                     </div>
+
+                    <References uuid={uuid} onFetched={() => api.getNote(uuid).then(setNote).catch(() => undefined)} />
 
                     <div className="card">
                         <h3 className="card-title mb-2">Related Notes</h3>

@@ -43,6 +43,9 @@ src/zettlecast/
   insights.py        Today's cards: surprising graph links + echoes (new vs much older), picked ahead; LLM says what
                      links them (agree/contradict/extend/apply/unrelated); verdicts; notes written from a card
   brief.py           A note at a glance (summary / image description / start; has_image; iso_date): graph + cards
+  wikipedia.py       Wikipedia search + JSON cache, shared by podcast/lookup.py and references.py
+  references.py      What a note links to (URLs; video/social/shorteners marked low value) and mentions (kept item,
+                     people, orgs -> Wikipedia lookup); fetch one as a web note with referenced_by (a link edge)
   curation.py        Reddit comment curation: the user's rubric (<storage>/reddit_curation.md, Settings page) -> takeaways
   runstate.py        Run state shared across processes (<storage>/run_state.json) + stop requests; one run at a time;
                      cycle times per phase, step times, per-phase averages carried to the next run (HMI ETA)
@@ -213,6 +216,9 @@ GET  /notes/{uuid}?include_suggestions=true      -> note + metadata + suggestion
 GET  /notes/{uuid}/source               original file (audio/pdf/image), or {url} for web notes
 GET  /notes/{uuid}/markdown             note as a markdown download
 GET  /notes/{uuid}/thumb                small JPEG of a screenshot kept with its image (<storage>/thumbs)
+GET  /notes/{uuid}/references           links + names in the note (no network); links already stored have existing_uuid
+GET  /references/lookup?q=              Wikipedia pages for a name (cached in <storage>/lookups/references.json)
+POST /notes/{uuid}/references/fetch {url}   the page as a note linked to this one (IngestResponse; duplicate = already a note)
 DELETE /notes/{uuid}
 GET  /search?q=&top_k=5&rerank=true     -> {results: [{uuid,title,score,snippet,source_type,timestamp_seconds}]}
 POST /notes/{uuid}/link {target_uuid, action: accept|reject}
@@ -377,8 +383,8 @@ Notes are the only nodes. Edge weight = 0.5 x cosine of note vectors after subtr
 mean (each source group - podcast show, website, images - counts once) + 0.3 x share of closely
 matching passages (passage vectors centred the same way; passages repeated across a group skipped)
 + 0.2 x IDF-weighted shared topics / people / organisations (the host, in every episode, adds ~0).
-Each note keeps its 6 best partners (`GRAPH_MAX_EDGES_PER_NOTE`), edges are the union; wikilinks are
-always edges; rejected pairs never. Communities: Leiden (`igraph` + `leidenalg`), `GRAPH_RESOLUTION`.
+Each note keeps its 6 best partners (`GRAPH_MAX_EDGES_PER_NOTE`), edges are the union; wikilinks and
+`referenced_by` (a page fetched from a note's References card) are always edges; rejected pairs never, except a [[wikilink]] (typed by the user, it always shows). Communities: Leiden (`igraph` + `leidenalg`), `GRAPH_RESOLUTION`.
 Edges for a new note are computed at ingest; the full rebuild (communities) runs after each podcast
 run, on `reindex`, `graph rebuild` and the UI button. The verification sections of a transcript
 note (`chunker.UNINDEXED_SECTIONS`) are not chunked or embedded.
@@ -388,11 +394,11 @@ link force/distance, collision, plus a community pull towards each community's c
 communities weaken as it grows), laid out 300 ticks before the first frame; notes are not draggable (a drag reheated the layout and moved every note on a click).
 Fill = community: picked per graph so linked communities (neighbours on the map) differ most
 (`autoCommunityColors`: 12 hues, then golden-angle ones; any changeable in the pane, Reset colours drops
-the picks; communities also named on the map), ring = source type. Node sizes are in layout units (`itemSizesReference: 'positions'`), so the collision
+the picks; communities also named on the map), ring = source type; a hovered or selected note's neighbours are outlined by link kind (similar / duplicate / wikilink, `KIND_COLORS`) and the pane counts its links per kind (the whole graph's with nothing selected). Node sizes are in layout units (`itemSizesReference: 'positions'`), so the collision
 radius matches what's drawn and titles appear as you zoom in. The right-hand pane
 (`GraphPane.tsx`, settings in localStorage) has Filters (query language in `lib/graphQuery.ts`:
 `tag:` `person:` `org:` `source:` `type:` `community:` `year:2021-2023`, `-` negates; types, years,
-link kinds, minimum strength, orphans, neighbourhood of the selected note), Communities (show/hide,
+link kinds, minimum strength, orphans), Communities (show/hide,
 highlight, what stands out in each: topics/people/organisations at 1.5x their overall rate),
 Groups (colour by community/year/source/type, query -> colour groups), Display and Forces.
 The search box matches titles as you type and, after a pause, runs passage search (`/search`, embeddings +

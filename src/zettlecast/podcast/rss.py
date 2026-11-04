@@ -61,10 +61,16 @@ def episode_date(published: str) -> str:
 
 
 def html_to_text(html: str) -> str:
-    """Show notes HTML -> plain text with one paragraph/list item per line."""
+    """Show notes HTML -> plain text with one paragraph/list item per line, links as "text (url)"."""
     from bs4 import BeautifulSoup
 
     soup = BeautifulSoup(html or "", "html.parser")
+    for a in soup.find_all("a"):
+        href, label = a.get("href") or "", a.get_text().strip()
+        # a label that is the address itself ("example.com/book") is enough for the References card
+        bare = re.sub(r"^https?://(www\.)?", "", href).rstrip("/").lower()
+        if href.startswith("http") and bare != re.sub(r"^https?://(www\.)?", "", label).rstrip("/").lower():
+            a.replace_with(f"{label} ({href})" if label else href)
     for br in soup.find_all("br"):
         br.replace_with("\n")
     for block in soup.find_all(["p", "li", "div", "h1", "h2", "h3", "h4", "h5", "h6", "tr"]):

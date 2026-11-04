@@ -976,6 +976,10 @@ body[data-sidebar='collapsed'] .app-layout { flex-direction: column; }
 .gp-checks { display: flex; flex-wrap: wrap; gap: 0.25rem 0.875rem; }
 .gp-check { display: flex; align-items: center; gap: 0.375rem; cursor: pointer; }
 .gp-check input, .gp-toggle input { accent-color: #3987e5; }
+.gp-kind { flex-direction: column; align-items: flex-start; gap: 0.125rem; }
+.gp-kind-row { display: flex; align-items: center; gap: 0.375rem; }
+.gp-kind-swatch { width: 0.75rem; height: 0.75rem; border-radius: 50%; border: 2px solid; flex: none; }
+.gp-kind-count { padding-left: 1.25rem; font-size: 0.75rem; color: var(--color-text-muted); font-variant-numeric: tabular-nums; }
 
 .gp-years { display: grid; grid-template-columns: auto 1fr 1fr; align-items: center; gap: 0.375rem; }
 .gp-select { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 0.5rem; }
