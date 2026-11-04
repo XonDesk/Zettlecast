@@ -32,6 +32,8 @@ Stop everything on the PC first. Then copy these from the PC's storage folder
 - `uploads/`
 - `podcast_queue.json`, `image_queue.json`
 - `reddit_saved.json`, `reddit_curation.md`
+- `insights.json` (Today's cards and your verdicts), `notes/` (notes written from a card)
+- each only if it exists; `thumbs/` isn't needed (thumbnails are remade on first view)
 
 **Leave on the PC:**
 
