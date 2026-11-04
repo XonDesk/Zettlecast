@@ -1,6 +1,6 @@
 # Plan: a light primary (Mac only stores, serves and coordinates)
 
-Status: **proposed, 2026-11-04, not started.** Branch: `mac-primary-setup` (then one branch per step or one
+Status (2026-11-04): **steps 1-3 done** (1 and 3 deployed to the PC; 2 and 3 live on the Mac after its restart). Next: step 4. Branch: `mac-primary-setup` (then one branch per step or one
 feature branch, see Deploying).
 
 ## Goal
