@@ -24,6 +24,7 @@ Decisions (user, 2026-11-04):
 | Search: load embedder / reranker | 9 s / **71 s** | |
 | Search: embed + kNN | ~0.1 s | |
 | Search with rerank | **~17 s** | |
+| Search: query embed on CPU only (as in a Linux container) | ~250 ms, 1.4 GB | |
 
 The graph is CPU work (O(chunks²) passage similarity), as fast on either machine; it moves anyway (goal), and
 runs once per PC session instead of after every batch, which also ends the GPU idling ~30 s per batch on
@@ -135,6 +136,28 @@ never gets a job kind it can't do.
 
 `AGENTS.md` ("Two machines"), `deploy/macos/README.md`, `deploy/windows/README.md`, `.env.example`
 (`RERANK`, `WAKE_MIN_JOBS`), `HANDOFF.md`.
+
+### 10. The Mac side in containers (OrbStack)
+
+Decided 2026-11-04: containerize the primary only; the worker stays native (Docker on Windows starts at
+sign-in, can't see Windows sessions or run `shutdown /s` for the idle shutdown, and reads `D:`/OneDrive media
+and multi-GB models slowly through WSL2).
+
+- After step 6 (no heavy work left on the Mac). A Linux container has no MPS: the query model runs on the CPU,
+  ~250 ms a query (measured; try float32, bf16 on CPU is slow).
+- Two services next to Home Assistant in the existing OrbStack compose (`~/MacContainers`): `zettlecast-api`
+  (Python 3.12 slim, `uv pip install .` without `[gpu]`, CPU torch wheels) and `zettlecast-web` (Node 24,
+  `npm run build`, `next start -p 3100`).
+- **Host networking** for the API: Wake-on-LAN broadcasts to 192.168.8.255, and the PC reaches it at
+  192.168.8.140:8000 (as `homeassistant` does). The web UI can be host networked too (port 3100; 3000 is
+  zwave-js-ui).
+- Mounts: `~/_BRAIN_STORAGE` (read-write), the Hugging Face cache (read-only once the model is in it), `.env`
+  and `frontend/.env.local` as env files. Same uid as the Mac user so files stay readable outside.
+- `restart: unless-stopped` replaces the launchd daemons; `deploy/macos/install.sh uninstall` removes them
+  once the containers are proven. Updates: `git pull && docker compose up -d --build`, no sudo.
+- Check before switching: search time, a batch of worker results written through the mount (LanceDB on
+  OrbStack's file sharing), memory of the OrbStack VM with HA + Zettlecast, WAKE from the process page.
+- Tests: `pytest` inside the API image; the "Checking the whole thing" list below against the containers.
 
 ## Deploying
 
