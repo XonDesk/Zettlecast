@@ -52,7 +52,10 @@ def test_a_url_waits_as_a_placeholder_until_the_worker_reads_it(primary, db, mon
     note = db.get_note_by_uuid(placeholder)
     assert note.title == "Heat training" and PLACEHOLDER not in note.metadata.custom
     assert db.chunks.count_rows() > 0 and len(db.all_note_vectors()) == 1 and not db.list_notes()[0]["waiting"]
-    assert "/worker/link" in links  # the batch is linked once
+    assert "/worker/link" not in links  # linked by the session's graph job instead
+    from zettlecast import graphstate
+
+    assert graphstate.dirty()
     assert IngestQueue().items[batch["items"][0]["id"]]["status"] == "completed"
 
 

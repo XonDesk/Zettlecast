@@ -467,6 +467,7 @@ function DesktopPanel({ d, now, busy, act }: {
         d.pending.images && `${d.pending.images} image${d.pending.images > 1 ? 's' : ''}`,
         d.pending.ingest && `${d.pending.ingest} page${d.pending.ingest > 1 ? 's' : ''} or file${d.pending.ingest > 1 ? 's' : ''} to add`,
         d.pending.tags && `${d.pending.tags} note${d.pending.tags > 1 ? 's' : ''} to tag or index`,
+        d.pending.graph ? 'the graph to rebuild' : '',
     ].filter(Boolean).join(' · ');
     const wakeNote = !d.wake.configured ? 'not set up (DESKTOP_MAC_ADDRESS)'
         : d.wake.gave_up ? `gave up after ${d.wake.misses} tries`
@@ -709,7 +710,10 @@ export default function ProcessPage() {
                     <div className="hmi-buttons">
                         <button className="hmi-btn" disabled={busy || run.alive} onClick={() => act('Rebuild graph', async () => {
                             const r = await api.rebuildGraph();
-                            return { status: r.status, message: `${r.edges} links` };
+                            return {
+                                status: r.status,
+                                message: r.status === 'queued' ? 'the desktop rebuilds it the next time it runs' : `${r.edges} links`,
+                            };
                         })}>REBUILD GRAPH</button>
                         <ConfirmButton label="REINDEX" confirmLabel="CONFIRM REINDEX" disabled={busy || run.alive || task.running}
                                        title="Re-embed every note and rebuild the graph (minutes, uses the GPU)"

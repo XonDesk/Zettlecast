@@ -237,7 +237,11 @@ def add_referrer(note: NoteModel, source: NoteModel) -> None:
         return
     note.metadata.custom["referenced_by"] = referenced_by + [source.uuid]
     db.update_note_metadata(note.uuid, note.metadata.model_dump())
-    if not settings.is_primary:  # the primary leaves linking to the worker's batch
+    if settings.is_primary:  # the worker's next rebuild links it
+        from . import graphstate
+
+        graphstate.mark_dirty()
+    else:
         update_edges_for_note(note.uuid)
 
 

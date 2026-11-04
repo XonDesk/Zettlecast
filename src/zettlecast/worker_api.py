@@ -13,7 +13,9 @@ The primary owns the queues and the database; the worker only talks to it here:
     image/add, image/remove                  screenshot triage on the worker queues keeps here
     ingest          a page or file read on the worker (ingestqueue.py): stored in its placeholder's place
     tag             a note back from the LLM pass
-    link            one graph rebuild after a batch
+    graph           the rebuild, claimed last (graphstate.py): notes and chunks streamed to the
+                    worker as Arrow, the edges and communities it computed stored here
+    link            (older workers) marks the graph out of date
 """
 
 import base64
@@ -33,7 +35,8 @@ from .models import NoteModel
 
 logger = logging.getLogger(__name__)
 
-KINDS = ("podcast", "image", "ingest", "tag", "insight")  # claimed in this order: one GPU job at a time
+# claimed in this order, one GPU job at a time; the graph only once nothing else is left
+KINDS = ("podcast", "image", "ingest", "tag", "insight", "graph")
 HELD_FOLDERS = ("podcasts", "uploads")  # the primary deletes its copy of inputs in these once fetched
 
 
@@ -129,6 +132,12 @@ def claim(body: ClaimRequest):
             cards = insights.claim(limit or 20, lease.total_seconds())
             if cards:
                 return {"kind": kind, "items": cards}
+        elif kind == "graph":
+            from . import graphstate
+
+            job = graphstate.claim(body.worker_id, lease)
+            if job:
+                return {"kind": kind, "items": [job]}
     return {"kind": None}
 
 
@@ -430,7 +439,109 @@ def insight_done(key: str, body: InsightResult):
 
 @router.post("/link")
 def link():
-    """One graph rebuild for everything the batch stored (edges + communities)."""
-    from .linker import rebuild_graph
+    """An older worker's "link this batch": the graph is out of date, the next graph job rebuilds it."""
+    from . import graphstate
 
-    return {"edges": rebuild_graph()}
+    graphstate.mark_dirty()
+    return {"edges": None, "status": "queued"}
+
+
+# --- The graph, rebuilt on the worker (graphstate.py) ---
+
+
+class _Collected:
+    """A write-only file for pyarrow's IPC writer, emptied after each batch (streamed, never all in memory)."""
+
+    def __init__(self):
+        self.parts, self.size, self.closed = [], 0, False
+
+    def write(self, data) -> int:
+        self.parts.append(bytes(data))
+        self.size += len(data)
+        return len(data)
+
+    def tell(self) -> int:
+        return self.size
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+    def take(self) -> bytes:
+        out, self.parts = b"".join(self.parts), []
+        return out
+
+
+def _arrow_stream(reader):
+    import pyarrow as pa
+
+    sink = _Collected()
+    writer = pa.ipc.new_stream(pa.PythonFile(sink, mode="w"), reader.schema)
+    for batch in reader:
+        writer.write_batch(batch)
+        yield sink.take()
+    writer.close()
+    yield sink.take()
+
+
+@router.get("/graph/notes")
+def graph_notes():
+    from fastapi.responses import StreamingResponse
+
+    from .db import NOTE_VECTOR_COLUMNS, db
+
+    reader = db.notes.search().select(NOTE_VECTOR_COLUMNS).limit(10_000_000).to_batches(1024)
+    return StreamingResponse(_arrow_stream(reader), media_type="application/vnd.apache.arrow.stream")
+
+
+@router.get("/graph/chunks")
+def graph_chunks():
+    from fastapi.responses import StreamingResponse
+
+    from .db import CHUNK_VECTOR_COLUMNS, db
+
+    reader = db.chunks.search().select(CHUNK_VECTOR_COLUMNS).limit(10_000_000).to_batches(4096)
+    return StreamingResponse(_arrow_stream(reader), media_type="application/vnd.apache.arrow.stream")
+
+
+@router.get("/graph/extras")
+def graph_extras():
+    """Rejected pairs (never linked again) and the current communities (their names carry over)."""
+    import json
+
+    from .db import db
+
+    return json.loads(json.dumps({"rejected": sorted(db.get_all_rejected_pairs()), "communities": db.get_communities()},
+                                 default=_plain))
+
+
+def _plain(value):
+    return value.tolist() if hasattr(value, "tolist") else str(value)
+
+
+class GraphDone(BaseModel):
+    edges: List[dict]
+    communities: List[dict]
+    seconds: float = 0.0
+
+
+@router.post("/graph/{job_id}/completed")
+def graph_completed(job_id: str, body: GraphDone):
+    from . import graphstate
+    from .linker import store_graph
+
+    if not graphstate.finish(job_id, stored=True):
+        raise HTTPException(status_code=409, detail="Not the current graph job (its lease ran out?)")
+    edges = store_graph(body.edges, body.communities)
+    logger.info(f"Graph from the worker stored: {edges} edges, {len(body.communities)} communities "
+                f"({body.seconds:.0f} s there)")
+    return {"edges": edges}
+
+
+@router.post("/graph/{job_id}/release")
+def graph_release(job_id: str):
+    from . import graphstate
+
+    return {"released": graphstate.finish(job_id, stored=False)}

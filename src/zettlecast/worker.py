@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 POLL_SECONDS = 20  # between claims while there's nothing to do
 RETRY_SECONDS = 30  # after the primary couldn't be reached
-LIMITS = {"podcast": 10, "image": 50, "ingest": 20, "tag": 25, "insight": 20}  # per batch
+LIMITS = {"podcast": 10, "image": 50, "ingest": 20, "tag": 25, "insight": 20, "graph": 1}  # per batch
 KINDS = list(LIMITS)  # what this worker can do: the primary hands out nothing else
 
 
@@ -72,6 +72,12 @@ class Primary:
                     raise PrimaryError(f"POST {path}: {e}") from e
                 time.sleep(2 * (attempt + 1))
         raise PrimaryError(f"POST {path} failed")
+
+    def get(self, path: str, timeout: Optional[float] = None) -> dict:
+        response = self.client.get(path, timeout=timeout or 60)
+        if response.status_code != 200:
+            raise PrimaryError(f"GET {path}: HTTP {response.status_code}")
+        return response.json()
 
     def download(self, path: str, target: Path) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -291,7 +297,7 @@ def run_podcasts(batch: List[dict]) -> None:
     try:
         run_podcast_queue(
             sync=False, queue=queue, store=lambda path, check_cancel: None, progress_for=_cancel_check,
-            source="worker", link=lambda: primary().post("/worker/link", timeout=3600),
+            source="worker", link=lambda: None,  # the session's graph job links it
         )
     except RunActiveError as e:  # another local run (a CLI run on this PC): hand the jobs back
         logger.warning(str(e))
@@ -371,8 +377,7 @@ def run_images(batch: List[dict]) -> None:
 
     logger.info(f"Image batch: {len(items)} image(s)")
     try:
-        image_worker.read_images(queue, store, image_state,
-                                 link=lambda: primary().post("/worker/link", timeout=3600))
+        image_worker.read_images(queue, store, image_state, link=lambda: None)  # the graph job links them
     finally:
         left = [job for job, i in queue.items.items() if i.status in ("pending", "processing")]
         if left:
@@ -426,8 +431,6 @@ def run_ingest(batch: List[dict]) -> None:
                        timeout=300)
         stored += 1
         logger.info(f"Added for the primary: {note.title}")
-    if stored:
-        primary().post("/worker/link", timeout=3600)
 
 
 # --- Notes to tag ---
@@ -468,12 +471,69 @@ def run_tags(batch: List[dict], rubric: Optional[str] = None) -> None:
                            {"note": done.model_dump(mode="json"), "index": index_payload(done)}, timeout=300)
             stored += 1
             task["done"] = n + 1
-        if stored:
-            task["name"] = "linking tagged notes"
-            primary().post("/worker/link", timeout=3600)
-        task["result"] = {"tagged": stored}
+        task["result"] = {"tagged": stored}  # linked by the session's graph job
     finally:
         task.update(running=False, finished_at=datetime.now().isoformat(timespec="seconds"))
+
+
+# --- The graph, rebuilt here for the primary (graphstate.py) ---
+
+
+def _arrow_table(path: str):
+    import tempfile
+
+    import pyarrow as pa
+
+    with tempfile.TemporaryDirectory() as folder:
+        local = Path(folder) / "table.arrow"
+        primary().download(path, local)
+        with pa.memory_map(str(local)) as source:
+            return pa.ipc.open_stream(source).read_all()
+
+
+def _rows(table, columns: List[str]) -> List[dict]:
+    """Rows as db.all_note_vectors / all_chunk_vectors build them, the vectors as one array (fast)."""
+    import numpy as np
+
+    from .db import DIM
+
+    vectors = np.asarray(table.column("vector").combine_chunks().flatten(), np.float32).reshape(-1, DIM)
+    plain = table.select([c for c in columns if c != "vector"]).to_pylist()
+    return [{**row, "vector": vector} for row, vector in zip(plain, vectors)]
+
+
+def graph_for_primary() -> tuple:
+    from .db import CHUNK_VECTOR_COLUMNS, NOTE_VECTOR_COLUMNS, chunk_vector_rows, note_vector_rows
+    from .linker import compute_graph
+
+    notes = note_vector_rows(_rows(_arrow_table("/worker/graph/notes"), NOTE_VECTOR_COLUMNS))
+    chunks = chunk_vector_rows(_rows(_arrow_table("/worker/graph/chunks"), CHUNK_VECTOR_COLUMNS))
+    extras = primary().get("/worker/graph/extras", timeout=120)
+    edges, communities = compute_graph(notes, chunks, {tuple(p) for p in extras["rejected"]}, extras["communities"])
+    return len(notes), edges, communities
+
+
+def run_graph(job: dict) -> None:
+    import json
+
+    task.update(name="rebuilding the graph", running=True, done=0, total=1, error=None, result=None)
+    started = time.monotonic()
+    try:
+        count, edges, communities = graph_for_primary()
+        # numpy numbers as plain JSON numbers
+        body = json.loads(json.dumps({"edges": edges, "communities": communities,
+                                      "seconds": time.monotonic() - started},
+                                     default=lambda v: v.tolist() if hasattr(v, "tolist") else str(v)))
+        primary().post(f"/worker/graph/{job['id']}/completed", body, timeout=600)
+        task.update(done=1, result={"edges": len(edges)})
+        logger.info(f"Graph rebuilt for the primary: {count} notes, {len(edges)} edges, "
+                    f"{len(communities)} communities in {time.monotonic() - started:.0f} s")
+    except Exception as e:
+        task["error"] = str(e)
+        primary().post(f"/worker/graph/{job['id']}/release")
+        raise
+    finally:
+        task["running"] = False
 
 
 # --- Today's insight cards ---
@@ -595,6 +655,8 @@ def handle(batch: dict) -> None:
             run_tags(batch["items"], batch.get("rubric"))
         elif kind == "insight":
             run_insights(batch["items"])
+        elif kind == "graph":
+            run_graph(batch["items"][0])
     finally:
         activity.update(busy=False, kind=None)
         from . import runstate

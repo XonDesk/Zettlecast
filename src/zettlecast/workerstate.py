@@ -87,7 +87,7 @@ def worker_url() -> str:
 
 def heartbeat(data: dict, remote_host: Optional[str] = None) -> dict:
     """Record a heartbeat, renew the worker's leases, and return the commands waiting for it."""
-    from . import insights, tagging
+    from . import graphstate, insights, tagging
     from .image.queue import ImageQueue
     from .ingestqueue import IngestQueue
     from .podcast.queue import TranscriptionQueue
@@ -116,6 +116,7 @@ def heartbeat(data: dict, remote_host: Optional[str] = None) -> dict:
     ImageQueue().renew(worker_id, lease())
     tagging.renew(lease().total_seconds())
     IngestQueue().renew(worker_id, lease())
+    graphstate.renew(worker_id, lease())
     insights.renew(lease().total_seconds())
     return {**commands, "paused": state["paused"], "shutdown_ok": not state["stay_on"],
             "heartbeat_seconds": settings.worker_heartbeat_seconds}
@@ -192,6 +193,9 @@ def pending_work() -> dict:
     counts = {"podcasts": TranscriptionQueue().get_pending_count(), "images": ImageQueue().get_pending_count(),
               "ingest": IngestQueue().pending_count(), "tags": tags, "insights": cards}
     counts["total"] = sum(counts.values())
+    from . import graphstate
+
+    counts["graph"] = int(graphstate.dirty())  # not in the total: an out-of-date graph alone doesn't wake the PC
     return counts
 
 

@@ -216,7 +216,8 @@ export interface DesktopStatus {
     paused: boolean; // Stop on this page: no new work until Resume
     stay_on: boolean; // no idle shutdown
     wake: { configured: boolean; window: string; sent_at: string | null; misses: number; gave_up: boolean; reason: string | null };
-    pending: { podcasts: number; images: number; ingest: number; tags: number; insights: number; total: number };
+    // graph: 1 when the graph is out of date (rebuilt last, after the rest; not in total: it doesn't wake the PC)
+    pending: { podcasts: number; images: number; ingest: number; tags: number; insights: number; graph: number; total: number };
     idle_shutdown_minutes: number;
 }
 

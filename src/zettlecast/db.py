@@ -98,6 +98,28 @@ def _row_to_note(row: dict) -> NoteModel:
 
 
 
+NOTE_VECTOR_COLUMNS = ["uuid", "title", "source_type", "source_path", "created_at", "metadata_json", "full_text",
+                       "vector"]
+CHUNK_VECTOR_COLUMNS = ["note_uuid", "text", "vector"]
+
+
+def note_vector_rows(rows: List[dict]) -> List[dict]:
+    """Note rows (NOTE_VECTOR_COLUMNS) as the graph takes them; a note still waiting for its first index is left out."""
+    out = []
+    for r in rows:
+        vector = np.asarray(r["vector"], dtype=np.float32)
+        if np.any(vector):
+            out.append({"uuid": r["uuid"], "title": r["title"], "source_type": r["source_type"],
+                        "source_path": r["source_path"], "created_at": r["created_at"],
+                        "metadata": json.loads(r["metadata_json"]), "full_text": r["full_text"], "vector": vector})
+    return out
+
+
+def chunk_vector_rows(rows: List[dict]) -> List[dict]:
+    return [{"note_uuid": r["note_uuid"], "text": r["text"], "vector": np.asarray(r["vector"], dtype=np.float32)}
+            for r in rows]
+
+
 def _note_row(note: NoteModel, vector) -> dict:
     return {
         "uuid": note.uuid,
@@ -248,6 +270,10 @@ class Database:
                 }
                 for c, v in zip(chunks, vectors)
             ])
+        if settings.is_primary:  # the worker rebuilds the graph once its session's work is done
+            from . import graphstate
+
+            graphstate.mark_dirty()
         return True
 
     def store_placeholder(self, note: NoteModel) -> None:
@@ -340,34 +366,21 @@ class Database:
         Every indexed note's graph inputs: uuid, title, type, source, created_at, metadata, text, vector.
         A note still waiting for its first index (zero vector) isn't in the graph yet.
         """
-        rows = self.notes.search().select(
-            ["uuid", "title", "source_type", "source_path", "created_at", "metadata_json", "full_text", "vector"]
-        ).limit(100_000).to_list()
-        return [
-            {
-                "uuid": r["uuid"],
-                "title": r["title"],
-                "source_type": r["source_type"],
-                "source_path": r["source_path"],
-                "created_at": r["created_at"],
-                "metadata": json.loads(r["metadata_json"]),
-                "full_text": r["full_text"],
-                "vector": np.asarray(r["vector"], dtype=np.float32),
-            }
-            for r in rows if np.any(np.asarray(r["vector"], dtype=np.float32))
-        ]
+        return note_vector_rows(self.notes.search().select(NOTE_VECTOR_COLUMNS).limit(100_000).to_list())
 
     def all_chunk_vectors(self) -> List[dict]:
         """note_uuid, text and vector of every chunk (passage matching)."""
-        rows = self.chunks.search().select(["note_uuid", "text", "vector"]).limit(10_000_000).to_list()
-        return [{"note_uuid": r["note_uuid"], "text": r["text"],
-                 "vector": np.asarray(r["vector"], dtype=np.float32)} for r in rows]
+        return chunk_vector_rows(self.chunks.search().select(CHUNK_VECTOR_COLUMNS).limit(10_000_000).to_list())
 
     def delete_note(self, uuid: str, keep_edges: bool = False) -> None:
         self.notes.delete(f"uuid = {_q(uuid)}")
         self.chunks.delete(f"note_uuid = {_q(uuid)}")
         if not keep_edges:
             self.delete_edges_for_note(uuid)
+            if settings.is_primary:  # its communities change: the worker's next rebuild
+                from . import graphstate
+
+                graphstate.mark_dirty()
 
     # --- Chunk search ---
 

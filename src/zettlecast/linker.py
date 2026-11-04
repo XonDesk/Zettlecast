@@ -421,17 +421,30 @@ def select_pairs(graph: Graph, rejected: Set[Tuple[str, str]], only: Optional[in
                     if (only is None or only in p) and (p in graph.typed or p not in rejected_pairs)}
 
 
-def rebuild_graph() -> int:
-    """Recompute every edge and the communities from scratch. Returns the edge count."""
-    graph = build()
-    pairs = select_pairs(graph, db.get_all_rejected_pairs())
+def compute_graph(notes: List[dict], chunks: List[dict], rejected: Set[Tuple[str, str]],
+                  previous: List[dict]) -> Tuple[List[dict], List[dict]]:
+    """Every edge and the communities, from the notes and chunks alone (the worker runs this for the primary)."""
+    graph = build(notes, chunks)
+    pairs = select_pairs(graph, rejected)
     edges = [_edge(graph, i, j, _kind(graph, i, j)) for i, j in sorted(pairs)]
+    return edges, detect_communities(graph, edges, previous)
+
+
+def store_graph(edges: List[dict], communities: List[dict]) -> int:
     db.clear_edges()
     db.add_edges(edges)
-    communities = detect_communities(graph, edges, db.get_communities())
     db.replace_communities(communities)
     db.optimize()
-    logger.info(f"Rebuilt graph: {len(graph.notes)} notes, {len(edges)} edges, {len(communities)} communities")
+    return len(edges)
+
+
+def rebuild_graph() -> int:
+    """Recompute every edge and the communities from scratch. Returns the edge count."""
+    notes = db.all_note_vectors()
+    edges, communities = compute_graph(notes, db.all_chunk_vectors(), db.get_all_rejected_pairs(),
+                                       db.get_communities())
+    store_graph(edges, communities)
+    logger.info(f"Rebuilt graph: {len(notes)} notes, {len(edges)} edges, {len(communities)} communities")
     return len(edges)
 
 

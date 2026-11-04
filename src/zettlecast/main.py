@@ -729,9 +729,14 @@ async def get_graph_data(
 
 @app.post("/graph/rebuild")
 async def rebuild_graph_endpoint():
-    """Recompute all graph edges."""
+    """Recompute all graph edges (on the primary: the worker does, the next time it runs)."""
     from .linker import rebuild_graph
 
+    if settings.is_primary:
+        from . import graphstate
+
+        graphstate.mark_dirty()
+        return {"status": "queued", "edges": db.stats().get("edges", 0)}
     return {"status": "rebuilt", "edges": rebuild_graph()}
 
 
