@@ -5,8 +5,8 @@
 # What it does (each step prints what it changed):
 #   1. Fast Startup off: a "shut down" PC is then really off (S5), the state Wake-on-LAN wakes from
 #   2. Wake on Magic Packet on for the wired network card(s); prints the MAC address for the primary
-#   3. A scheduled task that starts `zettlecast worker` at boot, signed in or not (asks for your
-#      Windows password: the task runs as you, so it finds your models and storage folder)
+#   3. A scheduled task that starts `zettlecast worker` at boot, signed in or not (runs as you, so it
+#      finds your models and storage folder; S4U logon, so no password is asked for or stored)
 #   4. Firewall: the worker's file server (WORKER_PORT, 8010) open to the primary only
 #   5. -EnableRdp: Remote Desktop on, for the private network (VPN included)
 #
@@ -54,9 +54,11 @@ foreach ($nic in $nics) {
 }
 
 Write-Host "`n3. Start the worker at boot" -ForegroundColor Cyan
-$user = "$env:USERDOMAIN\$env:USERNAME"
-$password = Read-Host "   Windows password for $user (the task runs as you, signed in or not)" -AsSecureString
-$plain = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($password))
+# not "$env:USERDOMAIN\$env:USERNAME": over SSH USERDOMAIN is WORKGROUP
+$user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+# S4U: runs as you, signed in or not, with no stored password (works over SSH too). It gets no network
+# credentials, which the worker doesn't need: local files and plain HTTP to the primary.
+$principal = New-ScheduledTaskPrincipal -UserId $user -LogonType S4U -RunLevel Limited
 $log = Join-Path $Repo "worker.log"
 $action = New-ScheduledTaskAction -Execute "cmd.exe" -WorkingDirectory $Repo `
     -Argument "/c `"`"$Exe`" worker >> `"$log`" 2>&1`""
@@ -65,7 +67,7 @@ $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoi
     -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) `
     -StartWhenAvailable
 Register-ScheduledTask -TaskName "Zettlecast worker" -Action $action -Trigger $trigger -Settings $settings `
-    -User $user -Password $plain -RunLevel Limited -Force | Out-Null
+    -Principal $principal -Force | Out-Null
 Write-Host "   task 'Zettlecast worker' registered (log: $log)"
 
 Write-Host "`n4. Firewall" -ForegroundColor Cyan

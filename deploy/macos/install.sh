@@ -5,6 +5,7 @@
 #
 #   ./deploy/macos/install.sh            install / update and (re)start both services
 #   ./deploy/macos/install.sh uninstall  stop and remove them
+#   WEB_PORT=3100 ./deploy/macos/install.sh   web UI on another port (default 3000)
 #
 # Logs: ~/Library/Logs/Zettlecast/{api,web}.log
 
@@ -16,6 +17,7 @@ LOGS="$HOME/Library/Logs/Zettlecast"
 DAEMONS=/Library/LaunchDaemons
 API=com.zettlecast.api
 WEB=com.zettlecast.web
+WEB_PORT="${WEB_PORT:-3000}"
 NODE_DIR="$(dirname "$(command -v node || echo /opt/homebrew/bin/node)")"
 
 unload() {
@@ -76,7 +78,7 @@ unload
 plist "$API" "$REPO" api "$REPO/.venv/bin/python" -m uvicorn zettlecast.main:app --host 0.0.0.0 --port 8000 \
     | sudo tee "$DAEMONS/$API.plist" >/dev/null
 # the web UI for phones and laptops on the network / VPN (sign-in required)
-plist "$WEB" "$REPO/frontend" web "$NODE_DIR/npm" run start -- -H 0.0.0.0 \
+plist "$WEB" "$REPO/frontend" web "$NODE_DIR/npm" run start -- -H 0.0.0.0 -p "$WEB_PORT" \
     | sudo tee "$DAEMONS/$WEB.plist" >/dev/null
 for label in "$API" "$WEB"; do
     sudo chown root:wheel "$DAEMONS/$label.plist"
@@ -85,4 +87,4 @@ for label in "$API" "$WEB"; do
 done
 
 echo "Started. API http://$(ipconfig getifaddr en0 2>/dev/null || echo localhost):8000/health ," \
-     "web UI :3000. Logs in $LOGS"
+     "web UI :$WEB_PORT. Logs in $LOGS"
